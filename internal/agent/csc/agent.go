@@ -358,53 +358,81 @@ func (a *Agent) subscribeEvents(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 4096)
-	for {
+	logger.Info("[csc-events] subscribed to %s/event", a.rawEndpoint)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var sseEvent string
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		n, err := resp.Body.Read(buf)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "event: ") {
+			sseEvent = strings.TrimPrefix(trimmed, "event: ")
+			continue
+		}
+
+		if !strings.HasPrefix(trimmed, "data: ") {
+			if trimmed == "" {
+				sseEvent = ""
 			}
-			if err == io.EOF {
-				logger.Info("csc event stream closed, reconnecting")
-			} else {
-				logger.Warn("csc event read error: %v, reconnecting", err)
-			}
-			time.Sleep(time.Second)
-			go a.subscribeEvents(ctx)
+			continue
+		}
+		data := strings.TrimPrefix(trimmed, "data: ")
+
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(data), &raw); err != nil {
+			logger.Debug("[csc-events] JSON parse error: %v data=%.80s", err, data)
+			sseEvent = ""
+			continue
+		}
+
+		eventType, _ := raw["type"].(string)
+		if eventType == "" && sseEvent != "" && sseEvent != "message" {
+			eventType = sseEvent
+		}
+		sseEvent = ""
+
+		props, _ := raw["properties"].(map[string]any)
+		if props == nil {
+			props = raw
+		}
+
+		if eventType == "" {
+			continue
+		}
+
+		if eventType == "permission.asked" || eventType == "question.asked" ||
+			eventType == "permission.responded" || eventType == "question.responded" ||
+			eventType == "session.idle" {
+			logger.Info("[csc-events] emitting: type=%s sessionID=%s", eventType, a.sessionID)
+		}
+
+		a.emit(agent.Event{
+			Type:           eventType,
+			ConversationID: a.sessionID,
+			Backend:        "csc",
+			Data:           props,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
 			return
 		}
-
-		chunk := string(buf[:n])
-		for _, line := range strings.Split(chunk, "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
-
-			var raw map[string]any
-			if err := json.Unmarshal([]byte(data), &raw); err != nil {
-				continue
-			}
-
-			eventType, _ := raw["type"].(string)
-			props, _ := raw["properties"].(map[string]any)
-
-			a.emit(agent.Event{
-				Type:           eventType,
-				ConversationID: a.sessionID,
-				Backend:        "csc",
-				Data:           props,
-			})
-		}
+		logger.Warn("[csc-events] scanner error: %v, reconnecting", err)
+	} else {
+		logger.Info("[csc-events] stream ended, reconnecting")
 	}
+	time.Sleep(time.Second)
+	go a.subscribeEvents(ctx)
 }
 
 func (a *Agent) doGet(ctx context.Context, path string) (*http.Response, error) {

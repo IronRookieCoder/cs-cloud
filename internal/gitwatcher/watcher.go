@@ -39,6 +39,7 @@ type RepoState struct {
 	LastCommit    string
 	LastStatus    string
 	IsRepo        bool
+	hasUpstream   bool
 }
 
 type EventEmitter interface {
@@ -356,17 +357,29 @@ func (w *Watcher) updateRepoState(state *RepoState) error {
 				if err == nil {
 					oldHead := state.RemoteHead
 					state.RemoteHead = strings.TrimSpace(remoteHead)
-					logger.Debug("Remote HEAD for %s (upstream: %s): %s (was: %s)", state.CurrentBranch, upstream, state.RemoteHead, oldHead)
+					if !state.hasUpstream {
+						logger.Debug("Upstream configured for %s: %s", state.CurrentBranch, upstream)
+						state.hasUpstream = true
+					}
+					if state.RemoteHead != oldHead {
+						logger.Debug("Remote HEAD for %s (upstream: %s): %s (was: %s)", state.CurrentBranch, upstream, state.RemoteHead, oldHead)
+					}
 				} else {
 					logger.Debug("Failed to get remote HEAD for %s: %v", upstream, err)
 					state.RemoteHead = ""
 				}
 			} else {
-				logger.Debug("No upstream branch configured for %s", state.CurrentBranch)
+				if state.hasUpstream {
+					logger.Debug("Upstream removed for %s", state.CurrentBranch)
+					state.hasUpstream = false
+				}
 				state.RemoteHead = ""
 			}
 		} else {
-			logger.Debug("No upstream configured for %s: %v", state.CurrentBranch, err)
+			if state.hasUpstream {
+				logger.Debug("Upstream removed for %s", state.CurrentBranch)
+				state.hasUpstream = false
+			}
 			state.RemoteHead = ""
 		}
 	}
