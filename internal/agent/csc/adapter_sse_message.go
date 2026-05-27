@@ -15,22 +15,6 @@ func (a *AdapterServer) adaptMessageEvent(sessionID string, payload map[string]a
 		return a.adaptUserMessageEvent(sessionID, payload, ss)
 	}
 
-	if compactBoundary, _ := payload["compact_boundary"].(bool); compactBoundary {
-		now := time.Now().UnixMilli()
-		auto, _ := payload["auto"].(bool)
-		return []sseFrame{frame("message.part.updated", map[string]any{
-			"sessionID": sessionID,
-			"part": map[string]any{
-				"id":        fmt.Sprintf("prt_compact_%d", now),
-				"sessionID": sessionID,
-				"messageID": fmt.Sprintf("msg_compact_%d", now),
-				"type":      "compaction",
-				"auto":      auto,
-			},
-			"time": now,
-		})}
-	}
-
 	if msgType != "assistant" {
 		return nil
 	}
