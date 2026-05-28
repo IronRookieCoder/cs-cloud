@@ -82,7 +82,7 @@ func doctor(a *app.App) error {
 					r   *checkResult
 				}{idx: i, r: r})
 			}
-			if c.name == "daemon" || c.name == "instance conflict" || c.name == "cloud connectivity" || c.name == "credentials" {
+			if c.name == "instance conflict" || c.name == "cloud connectivity" || c.name == "credentials" {
 				break
 			}
 		}
@@ -297,7 +297,7 @@ func checkDevice(ctx context.Context, a *app.App) *checkResult {
 		}
 	}
 
-	return &checkResult{name: "device", ok: true, detail: fmt.Sprintf("(id=%s)", dev.DeviceID)}
+	return &checkResult{name: "device", ok: true, detail: fmt.Sprintf("(id=%s, legacy=%s)", dev.DeviceID, device.GetLegacyDeviceID())}
 }
 
 func fixDevice(ctx context.Context, a *app.App) *checkResult {

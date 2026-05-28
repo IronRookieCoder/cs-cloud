@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/device"
 	"cs-cloud/internal/provider"
 )
 
@@ -57,6 +58,7 @@ func status(a *app.App) error {
 		}
 		printKV("device", fmt.Sprintf("%t", dev != nil))
 		printKV("device_id", deviceIDVal)
+		printKV("legacy_device_id", device.GetLegacyDeviceID())
 		p, m, u := provider.MachineIDParts()
 		printKV("device_id.platform", p)
 		printKV("device_id.mac", m)
@@ -92,6 +94,7 @@ func status(a *app.App) error {
 		}
 		printKV("device", fmt.Sprintf("%t", dev != nil))
 		printKV("device_id", deviceIDVal)
+		printKV("legacy_device_id", device.GetLegacyDeviceID())
 	}
 	return nil
 }

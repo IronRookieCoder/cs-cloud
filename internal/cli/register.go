@@ -16,6 +16,7 @@ func register(a *app.App) error {
 	printTitle("cs-cloud register")
 	printSuccess("Device registered")
 	printKV("device_id", info.DeviceID)
+	printKV("legacy_device_id", device.GetLegacyDeviceID())
 	printKV("base_url", info.BaseURL)
 	return nil
 }

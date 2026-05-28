@@ -64,6 +64,7 @@ func start(a *app.App) error {
 		}
 		printSuccess("Device registered")
 		printKV("device_id", info.DeviceID)
+		printKV("legacy_device_id", device.GetLegacyDeviceID())
 
 		if err := device.ValidateDeviceToken(ctx, info); err != nil {
 			if device.IsInvalidDeviceTokenError(err) {
@@ -76,6 +77,7 @@ func start(a *app.App) error {
 			}
 			printWarn("Device re-registered")
 			printKV("device_id", info.DeviceID)
+			printKV("legacy_device_id", device.GetLegacyDeviceID())
 				if err := device.ValidateDeviceToken(ctx, info); err != nil {
 					printRegDebugInfo(a)
 					return err
@@ -242,8 +244,10 @@ func printRegDebugInfo(a *app.App) {
 	printKV("cloud_url", a.CloudBaseURL())
 	if devInfo, _ := a.Device(); devInfo != nil {
 		printKV("device_id", devInfo.DeviceID)
+		printKV("legacy_device_id", device.GetLegacyDeviceID())
 	} else {
 		printKV("device_id", provider.GenerateMachineID())
+		printKV("legacy_device_id", device.GetLegacyDeviceID())
 	}
 }
 
