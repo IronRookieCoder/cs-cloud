@@ -93,6 +93,10 @@ func TransformPromptBody(body io.ReadCloser) io.ReadCloser {
 }
 
 func RenameJSONField(from, to string) func(io.ReadCloser) io.ReadCloser {
+	return RenameJSONFieldAny([]string{from}, to)
+}
+
+func RenameJSONFieldAny(from []string, to string) func(io.ReadCloser) io.ReadCloser {
 	return func(body io.ReadCloser) io.ReadCloser {
 		pr, pw := io.Pipe()
 		go func() {
@@ -103,7 +107,14 @@ func RenameJSONField(from, to string) func(io.ReadCloser) io.ReadCloser {
 				pw.CloseWithError(err)
 				return
 			}
-			replaced := BytesReplaceKey(buf, from, to)
+			replaced := buf
+			for _, key := range from {
+				next := BytesReplaceKey(buf, key, to)
+				if !bytes.Equal(next, buf) {
+					replaced = next
+					break
+				}
+			}
 			pw.Write(replaced)
 		}()
 		return pr
