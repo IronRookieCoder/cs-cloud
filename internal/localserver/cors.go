@@ -1,6 +1,8 @@
 package localserver
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,6 +40,13 @@ func (w *corsWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (w *corsWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 func setCORSHeaders(headers http.Header, origin string) {
