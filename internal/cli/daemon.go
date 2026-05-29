@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/cloud"
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/localserver"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/provider"
 	"cs-cloud/internal/tunnel"
 	"cs-cloud/internal/updater"
 	"cs-cloud/internal/version"
@@ -177,6 +179,19 @@ func runDaemon(a *app.App) error {
 
 		deviceClient := device.NewClient(a.Config())
 		dispatcher.BindDeviceClient(deviceClient)
+		// Start notify forwarder for interactive notification loop
+		cloudClient := cloud.NewClient(a.Config())
+		var credBaseURL string
+		if cred, err := provider.LoadCredentials(); err == nil && cred != nil {
+			credBaseURL = cred.BaseURL
+		}
+		notifyForwarder := cloud.NewNotifyForwarder(srv.EventBus(), cloudClient, info.DeviceID, info.DeviceToken, credBaseURL, a.Config().NotifyBufferSeconds, a.Config().PermissionBufferSeconds)
+		if err := notifyForwarder.Validate(); err != nil {
+			logger.Warn("[daemon] notify forwarder not started: %v", err)
+		} else {
+			notifyForwarder.Start(cloudCtx)
+			logger.Info("[daemon] notify forwarder started deviceID=%s credBaseURL=%s", info.DeviceID, credBaseURL)
+		}
 
 		updaterMgr := updater.NewManager(
 			a.CloudBaseURL(), a.RootDir(),
@@ -184,6 +199,7 @@ func runDaemon(a *app.App) error {
 			updater.WithAutoCheck(a.Config().AutoUpgrade),
 		)
 		dispatcher.BindUpdater(updaterMgr)
+		srv.SetUpdateChecker(updater.NewChecker(a.CloudBaseURL()))
 		go updaterMgr.Run(cloudCtx)
 
 		if updaterMgr.DidVerifyOnStartup() {

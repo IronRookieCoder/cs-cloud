@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"cs-cloud/internal/platform"
 )
@@ -60,12 +61,37 @@ func Load() (*Config, error) {
 				if cfg.AgentWorkspace == "" {
 					cfg.AgentWorkspace = fileCfg.AgentWorkspace
 				}
+				if cfg.NotifyBufferSeconds == 0 {
+					cfg.NotifyBufferSeconds = fileCfg.NotifyBufferSeconds
+				}
+				if cfg.PermissionBufferSeconds == 0 {
+					cfg.PermissionBufferSeconds = fileCfg.PermissionBufferSeconds
+				}
 			}
 		}
 	}
 
 	if cfg.DefaultAgent == "" {
 		cfg.DefaultAgent = "csc"
+	}
+
+	// Environment variable overrides config file for buffer seconds
+	if env := platform.Getenv("CS_CLOUD_NOTIFY_BUFFER_SECONDS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil {
+			cfg.NotifyBufferSeconds = v
+		}
+	}
+	if cfg.NotifyBufferSeconds == 0 {
+		cfg.NotifyBufferSeconds = 60
+	}
+
+	if env := platform.Getenv("CS_CLOUD_PERMISSION_BUFFER_SECONDS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil {
+			cfg.PermissionBufferSeconds = v
+		}
+	}
+	if cfg.PermissionBufferSeconds == 0 {
+		cfg.PermissionBufferSeconds = 5
 	}
 
 	return cfg, nil

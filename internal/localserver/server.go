@@ -14,6 +14,7 @@ import (
 	"cs-cloud/internal/logger"
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/terminal"
+	"cs-cloud/internal/updater"
 )
 
 type TunnelStatus struct {
@@ -67,6 +68,8 @@ type Server struct {
 	// Host event watchers
 	fileWatcher *filewatcher.Watcher
 	gitWatcher  *gitwatcher.Watcher
+
+	updateChecker *updater.Checker
 }
 
 func New(opts ...Option) *Server {
@@ -117,6 +120,7 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("GET /runtime/diff/content", s.handleDiffContent)
 	api.HandleFunc("POST /runtime/dispose", s.handleInstanceDispose)
 	api.HandleFunc("GET /runtime/init-status", s.handleInitStatus)
+	api.HandleFunc("GET /runtime/update/check", s.handleUpdateCheck)
 
 	api.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
 	api.HandleFunc("GET /docs", s.handleSwaggerUI)

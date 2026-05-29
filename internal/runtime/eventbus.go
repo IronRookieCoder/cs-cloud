@@ -11,13 +11,16 @@ type SubFilter struct {
 }
 
 type EventBus struct {
-	mu          sync.RWMutex
-	subscribers map[chan agent.Event]*SubFilter
+	mu              sync.RWMutex
+	subscribers     map[chan agent.Event]*SubFilter
+	sessionCwds     map[string]string
+	activeWorkspace string
 }
 
 func NewEventBus() *EventBus {
 	return &EventBus{
 		subscribers: make(map[chan agent.Event]*SubFilter),
+		sessionCwds: make(map[string]string),
 	}
 }
 
@@ -55,4 +58,34 @@ func (b *EventBus) SubscriberCount() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.subscribers)
+}
+
+func (b *EventBus) RegisterSessionCwd(sessionID, cwd string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sessionCwds[sessionID] = cwd
+}
+
+func (b *EventBus) GetSessionCwd(sessionID string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.sessionCwds[sessionID]
+}
+
+func (b *EventBus) UnregisterSessionCwd(sessionID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.sessionCwds, sessionID)
+}
+
+func (b *EventBus) SetActiveWorkspace(cwd string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.activeWorkspace = cwd
+}
+
+func (b *EventBus) GetActiveWorkspace() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.activeWorkspace
 }

@@ -8,8 +8,10 @@ type Config struct {
 	AgentCommand   string            `json:"agent_command"`
 	AgentEnv       map[string]string `json:"agent_env,omitempty"`
 	AgentWorkspace string            `json:"agent_workspace,omitempty"`
-	AutoUpgrade    bool              `json:"auto_upgrade"`
-	Runtime        RuntimeConfig     `json:"runtime"`
+	AutoUpgrade           bool              `json:"auto_upgrade"`
+	NotifyBufferSeconds      int               `json:"notify_buffer_seconds"`
+	PermissionBufferSeconds  int               `json:"permission_buffer_seconds"`
+	Runtime               RuntimeConfig     `json:"runtime"`
 }
 
 type RuntimeConfig struct {

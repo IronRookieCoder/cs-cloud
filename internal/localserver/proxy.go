@@ -2,10 +2,12 @@ package localserver
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,6 +56,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	pathValues := extractPathValues(r)
 	target := rewriteFunc(pathValues)
 
+	// Track session→workspace for routes with {id} in path
+	if sessionID := pathValues["id"]; sessionID != "" {
+		if workspace := getWorkspaceDir(r); workspace != "" {
+			if abs, err := filepath.Abs(filepath.Clean(workspace)); err == nil {
+				s.eventBus.RegisterSessionCwd(sessionID, abs)
+			}
+		}
+	}
+
 	if transformFunc != nil && r.Body != nil {
 		r.Body = transformFunc(r.Body)
 		// 设置为未知长度，让 ReverseProxy 流式处理
@@ -87,8 +98,31 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}
 
+	isConversationCreate := r.Method == http.MethodPost && cleanPath == "/conversations"
+
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		stripCORSHeaders(resp.Header)
+
+		// Track session→workspace for conversation creation responses
+		if resp.StatusCode < 400 && isConversationCreate {
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr == nil {
+				var result map[string]any
+				if json.Unmarshal(body, &result) == nil {
+					if id, ok := result["id"].(string); ok && id != "" {
+						if workspace := getWorkspaceDir(r); workspace != "" {
+							if abs, absErr := filepath.Abs(filepath.Clean(workspace)); absErr == nil {
+								s.eventBus.RegisterSessionCwd(id, abs)
+							}
+						}
+					}
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(body))
+			}
+			logger.Info("proxy %s %s -> %s %d %s", r.Method, r.URL.Path, targetAddr, resp.StatusCode, time.Since(start))
+			return nil
+		}
+
 		if resp.StatusCode >= 400 {
 			body, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {

@@ -35,6 +35,7 @@ func (s *Server) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 	// Register file/git watchers for the workspace
 	if workspace != "" {
 		s.registerWorkspaceWatchers(workspace)
+		s.eventBus.SetActiveWorkspace(workspace)
 	}
 
 	// SSE headers
