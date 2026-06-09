@@ -121,6 +121,7 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /runtime/dispose", s.handleInstanceDispose)
 	api.HandleFunc("GET /runtime/init-status", s.handleInitStatus)
 	api.HandleFunc("GET /runtime/update/check", s.handleUpdateCheck)
+	api.HandleFunc("POST /runtime/update/apply", s.handleUpdateApply)
 
 	api.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
 	api.HandleFunc("GET /docs", s.handleSwaggerUI)

@@ -1,7 +1,10 @@
 package localserver
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"cs-cloud/internal/updater"
 	"cs-cloud/internal/version"
@@ -45,4 +48,50 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) SetUpdateChecker(c *updater.Checker) {
 	s.updateChecker = c
+}
+
+type updateApplyRequest struct {
+	Version string `json:"version,omitempty"`
+}
+
+// @Summary      Trigger upgrade
+// @Description  Triggers an asynchronous upgrade. Returns a command_id to poll progress via GET /commands/status.
+// @Tags         Runtime
+// @Accept       json
+// @Produce      json
+// @Param        body  body  updateApplyRequest  false  "Optional target version"
+// @Success      200  {object}  envelope{data=commandAck}
+// @Failure      409  {object}  envelope
+// @Failure      503  {object}  envelope
+// @Router       /runtime/update/apply [post]
+func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if s.dispatcher == nil {
+		writeErr(w, http.StatusServiceUnavailable, "NO_DISPATCHER", "command dispatcher not available")
+		return
+	}
+
+	var body updateApplyRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	var payload json.RawMessage
+	if body.Version != "" {
+		payload, _ = json.Marshal(map[string]string{"version": body.Version})
+	}
+
+	commandID := fmt.Sprintf("local-%d", time.Now().UnixMilli())
+	req := &commandRequest{
+		CommandID: commandID,
+		Type:      "upgrade",
+		Payload:   payload,
+	}
+
+	ack, err := s.dispatcher.Dispatch(r.Context(), req)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
+		return
+	}
+
+	writeOK(w, ack)
 }
