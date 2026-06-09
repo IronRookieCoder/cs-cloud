@@ -79,24 +79,7 @@ func (r *Replacer) replaceWindows(currentExe, newBinary string) error {
 		return fmt.Errorf("stage new binary: %w", err)
 	}
 
-	oldPath := currentExe + ".old"
-	if _, err := os.Stat(oldPath); err == nil {
-		os.Remove(oldPath)
-	}
-	logger.Info("[replacer] windows: renaming current -> %s", oldPath)
-	if err := os.Rename(currentExe, oldPath); err != nil {
-		return fmt.Errorf("rename current to old: %w", err)
-	}
-	logger.Info("[replacer] windows: activating new binary")
-	if err := os.Rename(newPath, currentExe); err != nil {
-		rerr := os.Rename(oldPath, currentExe)
-		if rerr != nil {
-			return fmt.Errorf("replace failed and rollback also failed: replace=%w, rollback=%v", err, rerr)
-		}
-		return fmt.Errorf("replace binary: %w", err)
-	}
-
-	logger.Info("[replacer] binary replaced successfully")
+	logger.Info("[replacer] windows: staged %s (swap deferred to restart helper)", newPath)
 	return nil
 }
 

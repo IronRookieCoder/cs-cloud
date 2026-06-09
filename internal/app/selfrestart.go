@@ -20,6 +20,11 @@ func SelfRestart(a *App) error {
 		return fmt.Errorf("resolve exe symlink: %w", err)
 	}
 
+	newPath := exe + ".new"
+	if _, err := os.Stat(newPath); err == nil {
+		return selfRestartWithUpgrade(a, exe, newPath)
+	}
+
 	args := a.LoadArgs()
 	if len(args) == 0 {
 		args = []string{"_daemon"}
