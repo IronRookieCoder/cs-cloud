@@ -83,6 +83,26 @@ func (r *Replacer) replaceWindows(currentExe, newBinary string) error {
 	return nil
 }
 
+func (r *Replacer) SwapStagedBinary(exe string) error {
+	newPath := exe + ".new"
+	if _, err := os.Stat(newPath); err != nil {
+		return nil
+	}
+	oldPath := exe + ".old"
+	os.Remove(oldPath)
+	logger.Info("[replacer] swapping staged binary: %s -> %s", newPath, exe)
+	if err := os.Rename(exe, oldPath); err != nil {
+		return fmt.Errorf("rename current binary: %w", err)
+	}
+	if err := os.Rename(newPath, exe); err != nil {
+		os.Rename(oldPath, exe)
+		return fmt.Errorf("activate new binary: %w", err)
+	}
+	os.Remove(oldPath)
+	logger.Info("[replacer] binary swapped successfully")
+	return nil
+}
+
 func (r *Replacer) Rollback(currentExe string) error {
 	backupPath := filepath.Join(r.upgradesDir, "cs-cloud.bak")
 	if _, err := os.Stat(backupPath); err != nil {
@@ -132,6 +152,12 @@ func (r *Replacer) LoadState() (*UpgradeState, error) {
 func (r *Replacer) Cleanup() {
 	os.Remove(filepath.Join(r.upgradesDir, "cs-cloud.bak"))
 	os.Remove(filepath.Join(r.upgradesDir, "cs-cloud-new"))
+	exe, err := os.Executable()
+	if err == nil {
+		exe, _ = filepath.EvalSymlinks(exe)
+		os.Remove(exe + ".old")
+		os.Remove(exe + ".new")
+	}
 }
 
 func (r *Replacer) stateFile() string {

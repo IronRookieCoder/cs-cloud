@@ -41,8 +41,9 @@ func selfRestartWithUpgrade(a *App, exe, newPath string) error {
 	}
 
 	script := fmt.Sprintf(`@echo off
+set /a SWAP_RETRY=0
 :wait_pid
-tasklist /FI "PID eq %d" /NH 2>NUL | findstr /C:"%d" >NUL
+tasklist /FI "PID eq %d" /NH 2>NUL | findstr /I /C:"%d " >NUL
 if not errorlevel 1 (
     timeout /t 1 /nobreak >NUL
     goto wait_pid
@@ -51,11 +52,18 @@ if not errorlevel 1 (
 timeout /t 1 /nobreak >NUL
 move /y "%s" "%s"
 if errorlevel 1 (
+    set /a SWAP_RETRY+=1
+    if %%SWAP_RETRY%% GEQ 30 goto swap_fail
     goto swap
 )
+if exist "%s.old" del /f /q "%s.old"
 start "" "%s"%s
 del "%%~f0"
-`, pid, pid, newPath, exe, exe, argsBuf.String())
+exit /b 0
+:swap_fail
+del "%%~f0"
+exit /b 1
+`, pid, pid, newPath, exe, exe, exe, exe, argsBuf.String())
 
 	scriptPath := exe + ".upgrade.cmd"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {

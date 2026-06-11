@@ -65,6 +65,11 @@ func upgradeCmd(a *app.App) error {
 		return err
 	}
 
+	if err := mgr.SwapStagedBinary(); err != nil {
+		printError("Binary swap failed: %v", err)
+		return err
+	}
+
 	printSuccess("Upgraded to %s", result.Version)
 
 	isRunning, _, _ := a.IsRunning()
@@ -78,6 +83,7 @@ func upgradeCmd(a *app.App) error {
 		return nil
 	}
 
+	os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
 	printInfo("Restarting daemon...")
 	if err := restart(a); err != nil {
 		printError("Restart failed: %v", err)

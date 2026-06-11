@@ -257,10 +257,30 @@ func checkAndApplyUpdates(a *app.App) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve exe symlink: %w", err)
+	}
+
+	if _, statErr := os.Stat(exe + ".new"); statErr == nil {
+		printInfo("Staged update detected, applying...")
+		if swapErr := updater.NewManager(a.CloudBaseURL(), a.RootDir()).SwapStagedBinary(); swapErr != nil {
+			return fmt.Errorf("swap staged binary: %w", swapErr)
+		}
+		printSuccess("Update applied successfully. Restarting to use new version...")
+		os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
+		restartWithNewBinary(exe)
+		return nil
+	}
+
 	updaterMgr := updater.NewManager(
 		a.CloudBaseURL(), a.RootDir(),
-		updater.WithPolicy(updater.PolicyAuto), // 自动检查、下载并应用更新
-		updater.WithAutoCheck(false),           // 手动触发，不需要后台自动检查
+		updater.WithPolicy(updater.PolicyAuto),
+		updater.WithAutoCheck(false),
 	)
 
 	result, err := updaterMgr.CheckNow(ctx)
@@ -290,35 +310,31 @@ func checkAndApplyUpdates(a *app.App) error {
 		return fmt.Errorf("apply update: %w", err)
 	}
 
-	printSuccess("Update applied successfully. Restarting to use new version...")
-
-	// 更新完成后，执行自重启
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("get executable: %w", err)
+	if err := updaterMgr.SwapStagedBinary(); err != nil {
+		return fmt.Errorf("swap staged binary: %w", err)
 	}
 
-	// 保存当前状态，避免重启后重复更新检查
+	printSuccess("Update applied successfully. Restarting to use new version...")
 	os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
+	restartWithNewBinary(exe)
+	return nil
+}
 
-	// 执行自重启，替换当前进程
+func restartWithNewBinary(exe string) {
 	args := os.Args
 	if len(args) > 1 && args[1] == "_daemon" {
-		// 如果是 daemon 进程，需要重新启动整个服务
 		args = []string{"start"}
 	}
 
-	// 启动新进程
 	cmd := newDaemonCmd(exe, args)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start updated process: %w", err)
+		printError("start updated process: %v", err)
+		os.Exit(1)
 	}
 
-	// 退出当前进程
 	os.Exit(0)
-	return nil
 }

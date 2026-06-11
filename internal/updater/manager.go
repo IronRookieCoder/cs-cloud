@@ -140,6 +140,18 @@ func (m *Manager) ApplyWithProgress(ctx context.Context, targetVersion string, o
 	return m.executeUpgradeWithProgress(ctx, result, onProgress)
 }
 
+func (m *Manager) SwapStagedBinary() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve exe: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve exe symlink: %w", err)
+	}
+	return m.replacer.SwapStagedBinary(exe)
+}
+
 func (m *Manager) Rollback() error {
 	exe, err := os.Executable()
 	if err != nil {
