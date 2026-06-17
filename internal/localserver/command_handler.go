@@ -61,7 +61,7 @@ func (s *Server) handleCommandDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validTypes := map[string]bool{"upgrade": true, "restart": true, "reconnect": true}
+	validTypes := map[string]bool{"upgrade": true, "restart": true, "reconnect": true, "restart-agent": true}
 	if !validTypes[req.Type] {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", fmt.Sprintf("unknown command type: %s", req.Type))
 		return

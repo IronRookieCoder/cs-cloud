@@ -129,6 +129,7 @@ func New(opts ...Option) *Server {
 
 	api.HandleFunc("GET /agents", s.handleListAgents)
 	api.HandleFunc("GET /agents/health", s.handleAgentHealth)
+	api.HandleFunc("GET /agents/version", s.handleAgentVersion)
 	api.HandleFunc("GET /agents/models", s.handleAgentModels)
 	api.HandleFunc("GET /agents/session-modes", s.handleAgentSessionModes)
 	api.HandleFunc("GET /agents/commands", s.handleCommands)

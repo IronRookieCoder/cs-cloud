@@ -21,6 +21,7 @@ type Driver interface {
 	HeaderMap() map[string]string
 	FetchCommands(endpoint string) ([]SlashCommand, error)
 	PrewarmPaths() []string
+	Version() (string, error)
 }
 
 type DetectedAgent struct {

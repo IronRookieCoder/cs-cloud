@@ -7,7 +7,7 @@ const (
 	PathDeviceGet            = "/api/devices/{deviceID}"
 	PathDeviceHeartbeat      = "/api/devices/{deviceID}/heartbeat"
 	PathDeviceTokenRotate    = "/api/devices/{deviceID}/token/rotate"
-	PathDeviceCommandResult  = "/api/devices/{deviceID}/commands/{commandID}/result"
+	PathDeviceCommandResult  = "/cloud/devices/{deviceID}/commands/{commandID}/result"
 	PathGatewayAssign        = "/cloud/device/gateway-assign"
 	PathUpdateCheck          = "/api/updates/check"
 	PathAuthMe               = "/api/auth/me"

@@ -69,17 +69,71 @@ func (s *Server) handleAgentHealth(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]any, 0, len(agents))
 	for _, a := range agents {
 		probe := probeAgentHealth(r.Context(), a)
-		results = append(results, map[string]any{
-			"id":        a.ID(),
-			"backend":   a.Backend(),
-			"driver":    a.Driver(),
-			"state":     a.State().String(),
-			"available": probe.Available,
+
+		entry := map[string]any{
+			"id":         a.ID(),
+			"backend":    a.Backend(),
+			"driver":     a.Driver(),
+			"state":      a.State().String(),
+			"available":  probe.Available,
 			"latency_ms": probe.LatencyMs,
-			"error":     probe.Error,
-		})
+			"error":      probe.Error,
+		}
+
+		results = append(results, entry)
 	}
 	writeOK(w, map[string]any{"agents": results})
+}
+
+type agentVersionEntry struct {
+	Backend string `json:"backend"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// @Summary      Get agent CLI version
+// @Description  Returns the version of each running agent's CLI binary. May return 404 if version information is unavailable.
+// @Tags         Agent
+// @Produce      json
+// @Success      200  {object}  envelope{data=map[string]any}
+// @Failure      404  {object}  envelope
+// @Router       /agents/version [get]
+func (s *Server) handleAgentVersion(w http.ResponseWriter, r *http.Request) {
+	agents := s.manager.ListAgents()
+	if len(agents) == 0 {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "no agent running")
+		return
+	}
+
+	results := make([]agentVersionEntry, 0, len(agents))
+	for _, a := range agents {
+		entry := agentVersionEntry{Backend: a.Backend()}
+
+		if d, ok := s.manager.GetDriver(a.Backend()); ok {
+			if ver, err := d.Version(); err == nil && ver != "" {
+				entry.Version = ver
+			} else if err != nil {
+				entry.Error = err.Error()
+			}
+		}
+
+		results = append(results, entry)
+	}
+
+	if len(results) == 0 || allEmptyVersion(results) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "version information unavailable")
+		return
+	}
+	writeOK(w, map[string]any{"agents": results})
+}
+
+func allEmptyVersion(results []agentVersionEntry) bool {
+	for _, r := range results {
+		if r.Version != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func probeAgentHealth(parent context.Context, a interface{}) agentHealthProbeResult {

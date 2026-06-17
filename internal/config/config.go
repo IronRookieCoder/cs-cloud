@@ -6,6 +6,7 @@ type Config struct {
 	DefaultShell   string            `json:"default_shell"`
 	DefaultAgent   string            `json:"default_agent"`
 	AgentCommand   string            `json:"agent_command"`
+	AgentVersionCommand string        `json:"agent_version_command,omitempty"`
 	AgentEnv       map[string]string `json:"agent_env,omitempty"`
 	AgentWorkspace string            `json:"agent_workspace,omitempty"`
 	AutoUpgrade           bool              `json:"auto_upgrade"`

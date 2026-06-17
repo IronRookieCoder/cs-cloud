@@ -2,6 +2,18 @@ package agent
 
 import "context"
 
+// ParseVersion extracts the version number from a version command output line.
+// The output format is typically: "<version> (commit: ..., built: ...)"
+// It returns the part before the first space, e.g. "4.2.3" or "4.2.3-beta".
+func ParseVersion(raw string) string {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == ' ' || raw[i] == '\t' {
+			return raw[:i]
+		}
+	}
+	return raw
+}
+
 type Agent interface {
 	ID() string
 	Backend() string

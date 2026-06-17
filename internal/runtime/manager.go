@@ -11,6 +11,9 @@ import (
 	agentcsc "cs-cloud/internal/agent/csc"
 )
 
+// ProgressFunc is a callback for reporting operation progress.
+type ProgressFunc func(phase string, progress float64, message string)
+
 type AgentManager struct {
 	mu       sync.RWMutex
 	agents   map[string]agent.Agent
@@ -222,7 +225,7 @@ func (m *AgentManager) WorkspaceHeaderName() string {
 	return ""
 }
 
-func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, agentCommand string, agentWorkspace string, agentEnv map[string]string) error {
+func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, agentCommand string, agentVersionCommand string, agentWorkspace string, agentEnv map[string]string) error {
 	if agentType == "" {
 		agentType = "cs"
 	}
@@ -242,9 +245,16 @@ func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, a
 		cmd = agent.ParseCommand(agentCommand)
 	}
 
+	csDriver := agentcs.NewDriver(cmd)
+	cscDriver := agentcsc.NewDriver(cmd)
+	if agentVersionCommand != "" {
+		csDriver.SetVersionCommand(agentVersionCommand)
+		cscDriver.SetVersionCommand(agentVersionCommand)
+	}
+
 	drivers := map[string]agent.Driver{
-		"cs":  agentcs.NewDriver(cmd),
-		"csc": agentcsc.NewDriver(cmd),
+		"cs":  csDriver,
+		"csc": cscDriver,
 	}
 
 	for name, d := range drivers {
@@ -275,6 +285,44 @@ func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, a
 		Extra:      extra,
 	}
 	return m.CreateAgent(ctx, "default", cfg)
+}
+
+// RestartDefaultAgent kills all running agents and re-initializes the default agent.
+// The onProgress callback receives phased progress updates during the operation.
+func (m *AgentManager) RestartDefaultAgent(ctx context.Context, agentType, agentCommand, agentVersionCommand, agentWorkspace string, agentEnv map[string]string, onProgress ProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(phase string, progress float64, message string) {}
+	}
+
+	onProgress("killing", 0.1, "Stopping running agents")
+	m.KillAll()
+	onProgress("killed", 0.3, "All agents stopped")
+
+	onProgress("detecting", 0.4, "Detecting agent binary")
+	if err := m.InitDefaultAgent(ctx, agentType, agentCommand, agentVersionCommand, agentWorkspace, agentEnv); err != nil {
+		onProgress("failed", 0.0, err.Error())
+		return err
+	}
+
+	// Emit restart event after agent is fully ready so all active SSE connections
+	// receive it and clients can safely rebootstrap.
+	if m.eventBus != nil {
+		m.eventBus.Emit(agent.Event{
+			Type: "agent.runtime.restarted",
+			Data: map[string]any{"backend": agentType},
+		})
+	}
+
+	onProgress("ready", 1.0, "Agent restart complete")
+	return nil
+}
+
+func (m *AgentManager) GetAgentVersion(backend string) (string, error) {
+	d, err := m.ResolveDriver(backend)
+	if err != nil {
+		return "", err
+	}
+	return d.Version()
 }
 
 func (m *AgentManager) HealthCheck(ctx context.Context, backend string) (*agent.HealthResult, error) {

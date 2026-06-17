@@ -167,3 +167,35 @@ func TestCommandDispatchNoDispatcher(t *testing.T) {
 		t.Errorf("status=%d, want 503", w.Code)
 	}
 }
+
+func TestCommandDispatchRestartAgentSuccess(t *testing.T) {
+	srv := newTestServerWithDispatcher()
+
+	body, _ := json.Marshal(commandRequest{CommandID: "cmd-ra-ok", Type: "restart-agent"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/commands", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200, body=%s", w.Code, w.Body.String())
+	}
+
+	var resp envelope
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.OK {
+		t.Errorf("ok=%v, want true", resp.OK)
+	}
+
+	data, ok := resp.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data type=%T", resp.Data)
+	}
+	if data["command_id"] != "cmd-ra-ok" {
+		t.Errorf("command_id=%v", data["command_id"])
+	}
+	if data["status"] != "accepted" {
+		t.Errorf("status=%v", data["status"])
+	}
+}
+
