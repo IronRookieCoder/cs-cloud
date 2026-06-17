@@ -11,11 +11,12 @@ import (
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		CloudBaseURL: platform.Getenv("CLOUD_BASE_URL"),
-		BaseURL:      platform.Getenv("COSTRICT_BASE_URL"),
-		DefaultShell: platform.Getenv("CS_CLOUD_SHELL"),
-		DefaultAgent: platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
-		AgentCommand: platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
+		CloudBaseURL:   platform.Getenv("CLOUD_BASE_URL"),
+		BaseURL:        platform.Getenv("COSTRICT_BASE_URL"),
+		DefaultShell:   platform.Getenv("CS_CLOUD_SHELL"),
+		DefaultAgent:   platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
+		AgentCommand:   platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
+		AgentVersionCommand: platform.Getenv("CS_CLOUD_AGENT_VERSION_COMMAND"),
 	}
 
 	if cfg.CloudBaseURL == "" {
@@ -60,6 +61,9 @@ func Load() (*Config, error) {
 				}
 				if cfg.AgentWorkspace == "" {
 					cfg.AgentWorkspace = fileCfg.AgentWorkspace
+				}
+				if cfg.AgentVersionCommand == "" {
+					cfg.AgentVersionCommand = fileCfg.AgentVersionCommand
 				}
 				if cfg.NotifyBufferSeconds == 0 {
 					cfg.NotifyBufferSeconds = fileCfg.NotifyBufferSeconds

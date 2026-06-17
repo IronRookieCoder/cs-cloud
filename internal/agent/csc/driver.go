@@ -5,16 +5,25 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"strings"
+	"sync"
 
 	"cs-cloud/internal/agent"
 )
 
 type Driver struct {
-	cmd agent.Command
+	cmd          agent.Command
+	versionCmd   string
+	versionCache string
+	versionOnce  sync.Once
 }
 
 func NewDriver(cmd agent.Command) *Driver {
 	return &Driver{cmd: cmd}
+}
+
+func (d *Driver) SetVersionCommand(v string) {
+	d.versionCmd = v
 }
 
 func (d *Driver) Name() string { return "csc" }
@@ -77,6 +86,26 @@ func (d *Driver) PrewarmPaths() []string {
 		"/command",
 		"/provider/capabilities",
 	}
+}
+
+func (d *Driver) Version() (string, error) {
+	d.versionOnce.Do(func() {
+		cmdStr := d.versionCmd
+		if cmdStr == "" {
+			cmdStr = CLIBinary + " --version"
+		}
+		parts := strings.Fields(cmdStr)
+		if len(parts) == 0 {
+			return
+		}
+		cmd := exec.Command(parts[0], parts[1:]...)
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		d.versionCache = agent.ParseVersion(strings.TrimSpace(string(out)))
+	})
+	return d.versionCache, nil
 }
 
 func (d *Driver) ProxyRoutes() []agent.ProxyRoute {

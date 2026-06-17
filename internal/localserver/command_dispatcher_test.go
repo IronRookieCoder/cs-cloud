@@ -2,6 +2,7 @@ package localserver
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -259,5 +260,123 @@ func TestDispatcherStatusReturnsTiming(t *testing.T) {
 	}
 	if status.CompletedAt == "" {
 		t.Error("expected completed_at to be set")
+	}
+}
+
+func TestDispatcherRestartAgentCommand(t *testing.T) {
+	d := NewCommandDispatcher(nil, nil)
+
+	restarted := false
+	var mu sync.Mutex
+	d.BindAgentRestarter(func(ctx context.Context, onProgress func(phase string, progress float64, message string)) error {
+		mu.Lock()
+		restarted = true
+		mu.Unlock()
+		onProgress("killing", 0.1, "Stopping agents")
+		onProgress("killed", 0.3, "Stopped")
+		onProgress("detecting", 0.4, "Detecting binary")
+		onProgress("ready", 1.0, "Done")
+		return nil
+	})
+
+	ack, err := d.Dispatch(context.Background(), &commandRequest{
+		CommandID: "cmd-restart-agent",
+		Type:      "restart-agent",
+	})
+	if err != nil {
+		t.Fatalf("dispatch failed: %v", err)
+	}
+	if ack.Status != "accepted" {
+		t.Fatalf("status=%q, want accepted", ack.Status)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if !restarted {
+		t.Error("expected agent restarter to be called")
+	}
+	mu.Unlock()
+
+	status, err := d.Status("cmd-restart-agent")
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.Status != "completed" {
+		t.Errorf("status=%q, want completed", status.Status)
+	}
+}
+
+func TestDispatcherRestartAgentNoRestarter(t *testing.T) {
+	d := NewCommandDispatcher(nil, nil)
+
+	d.Dispatch(context.Background(), &commandRequest{
+		CommandID: "cmd-no-restarter",
+		Type:      "restart-agent",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	status, _ := d.Status("cmd-no-restarter")
+	if status.Status != "failed" {
+		t.Errorf("status=%q, want failed", status.Status)
+	}
+	if status.Error == "" {
+		t.Error("expected error message when agent restarter not bound")
+	}
+}
+
+func TestDispatcherRestartAgentProgress(t *testing.T) {
+	d := NewCommandDispatcher(nil, nil)
+
+	d.BindAgentRestarter(func(ctx context.Context, onProgress func(phase string, progress float64, message string)) error {
+		onProgress("killing", 0.1, "Stopping agents")
+		onProgress("killed", 0.3, "Stopped")
+		onProgress("detecting", 0.4, "Detecting binary")
+		onProgress("ready", 1.0, "Done")
+		return nil
+	})
+
+	d.Dispatch(context.Background(), &commandRequest{
+		CommandID: "cmd-progress",
+		Type:      "restart-agent",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	status, _ := d.Status("cmd-progress")
+	if status.Status != "completed" {
+		t.Fatalf("status=%q, want completed", status.Status)
+	}
+	if status.Phase != "ready" {
+		t.Errorf("phase=%q, want ready", status.Phase)
+	}
+	if status.Progress != 1.0 {
+		t.Errorf("progress=%f, want 1.0", status.Progress)
+	}
+	if status.Message != "Done" {
+		t.Errorf("message=%q, want Done", status.Message)
+	}
+}
+
+func TestDispatcherRestartAgentError(t *testing.T) {
+	d := NewCommandDispatcher(nil, nil)
+
+	d.BindAgentRestarter(func(ctx context.Context, onProgress func(phase string, progress float64, message string)) error {
+		onProgress("killing", 0.1, "Starting")
+		onProgress("failed", 0.0, "something went wrong")
+		return errors.New("simulated failure")
+	})
+
+	d.Dispatch(context.Background(), &commandRequest{
+		CommandID: "cmd-restart-agent-fail",
+		Type:      "restart-agent",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	status, _ := d.Status("cmd-restart-agent-fail")
+	if status.Status != "failed" {
+		t.Errorf("status=%q, want failed", status.Status)
+	}
+	if status.Error != "simulated failure" {
+		t.Errorf("error=%q, want simulated failure", status.Error)
 	}
 }

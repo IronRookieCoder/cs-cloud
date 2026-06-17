@@ -19,6 +19,8 @@ type reconnecter interface {
 	Reconnect()
 }
 
+type agentRestarter func(ctx context.Context, onProgress func(phase string, progress float64, message string)) error
+
 type commandEntry struct {
 	req         *commandRequest
 	status      string
@@ -87,15 +89,16 @@ func (pe *persistedEntry) toEntry() *commandEntry {
 const commandStateFile = "command_status.json"
 
 type CommandDispatcher struct {
-	mu           sync.Mutex
-	active       map[string]*commandEntry
-	updater      *updater.Manager
-	tunnel       reconnecter
-	restarter    func()
-	reporter     *CommandReporter
-	app          *app.App
-	startedAt    time.Time
-	upgradeGrace bool
+	mu            sync.Mutex
+	active        map[string]*commandEntry
+	updater       *updater.Manager
+	tunnel        reconnecter
+	restarter     func()
+	agentRestarter agentRestarter
+	reporter      *CommandReporter
+	app           *app.App
+	startedAt     time.Time
+	upgradeGrace  bool
 }
 
 func NewCommandDispatcher(a *app.App, reporter *CommandReporter) *CommandDispatcher {
@@ -125,6 +128,12 @@ func (d *CommandDispatcher) BindRestarter(fn func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.restarter = fn
+}
+
+func (d *CommandDispatcher) BindAgentRestarter(fn agentRestarter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.agentRestarter = fn
 }
 
 func (d *CommandDispatcher) BindDeviceClient(c *device.Client) {
@@ -298,6 +307,8 @@ func (d *CommandDispatcher) execute(req *commandRequest) {
 		result, err = d.execUpgrade(req)
 	case "restart":
 		result, err = d.execRestart(req)
+	case "restart-agent":
+		result, err = d.execRestartAgent(req)
 	case "reconnect":
 		result, err = d.execReconnect(req)
 	default:
@@ -381,6 +392,27 @@ func (d *CommandDispatcher) execRestart(_ *commandRequest) (any, error) {
 	}()
 
 	return map[string]string{"status": "restart scheduled"}, nil
+}
+
+func (d *CommandDispatcher) execRestartAgent(req *commandRequest) (any, error) {
+	d.mu.Lock()
+	fn := d.agentRestarter
+	d.mu.Unlock()
+	if fn == nil {
+		return nil, fmt.Errorf("agent restarter not available")
+	}
+
+	commandID := req.CommandID
+	onProgress := func(phase string, progress float64, message string) {
+		d.UpdateProgress(commandID, phase, progress, message)
+	}
+
+	ctx := context.Background()
+	if err := fn(ctx, onProgress); err != nil {
+		return nil, err
+	}
+
+	return map[string]string{"status": "agent restarted"}, nil
 }
 
 func (d *CommandDispatcher) execReconnect(_ *commandRequest) (any, error) {

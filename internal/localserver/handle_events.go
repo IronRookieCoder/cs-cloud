@@ -75,7 +75,12 @@ func (s *Server) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 
 		case line, ok := <-backendCh:
 			if !ok {
-				return
+				// Backend agent disconnected (e.g. restart/shutdown).
+				// Don't terminate — keep EventBus subscription alive
+				// for system events so clients can be notified when
+				// the new agent is ready.
+				backendCh = nil
+				continue
 			}
 			fmt.Fprintf(w, "%s\n", line)
 			flusher.Flush()
@@ -84,7 +89,7 @@ func (s *Server) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !isHostEvent(evt.Type) {
+			if !isHostEvent(evt.Type) && !isSystemEvent(evt.Type) {
 				continue
 			}
 
@@ -231,6 +236,12 @@ func (s *Server) proxyBackendSSE(ctx context.Context, origReq *http.Request, out
 // isHostEvent returns true if the event type is a host.xxx event.
 func isHostEvent(eventType string) bool {
 	return strings.HasPrefix(eventType, "host.")
+}
+
+// isSystemEvent returns true if the event type is a runtime-level system event
+// that should be forwarded to all connected SSE clients regardless of workspace.
+func isSystemEvent(eventType string) bool {
+	return eventType == "agent.runtime.restarted"
 }
 
 // shouldSendEventToWorkspace checks if a host event should be sent to the given workspace.
