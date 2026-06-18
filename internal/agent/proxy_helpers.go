@@ -81,6 +81,11 @@ func TransformPromptBody(body io.ReadCloser) io.ReadCloser {
 		if agentVal, ok := payload["agent"]; ok {
 			transformed["agent"] = agentVal
 		}
+		// Preserve optional fields that downstream (csc) needs for ID
+		// consistency between SSE stream and API response.
+		if v, ok := payload["messageID"]; ok {
+			transformed["messageID"] = v
+		}
 
 		encoded, err := json.Marshal(transformed)
 		if err != nil {
