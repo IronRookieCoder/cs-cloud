@@ -36,6 +36,11 @@ func parseGlobalFlags() {
 			i++
 		case len(args[i]) > 11 && args[i][:11] == "--data-dir=":
 			platform.SetDataDir(args[i][11:])
+		case args[i] == "--agent-path" && i+1 < len(args):
+			os.Setenv("CS_CLOUD_AGENT_PATH", args[i+1])
+			i++
+		case len(args[i]) > 13 && args[i][:13] == "--agent-path=":
+			os.Setenv("CS_CLOUD_AGENT_PATH", args[i][13:])
 		case args[i] == "--no-auto-upgrade":
 			platform.SetNoAutoUpgrade(true)
 		}
@@ -65,6 +70,9 @@ func commandArgs() []string {
 			i++
 		case strings.HasPrefix(args[i], "--host="):
 		case args[i] == "--no-auto-upgrade":
+		case args[i] == "--agent-path" && i+1 < len(args):
+			i++
+		case len(args[i]) > 13 && args[i][:13] == "--agent-path=":
 		default:
 			rest = append(rest, args[i])
 		}

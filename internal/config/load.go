@@ -15,6 +15,7 @@ func Load() (*Config, error) {
 		BaseURL:        platform.Getenv("COSTRICT_BASE_URL"),
 		DefaultShell:   platform.Getenv("CS_CLOUD_SHELL"),
 		DefaultAgent:   platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
+		AgentPath:      platform.Getenv("CS_CLOUD_AGENT_PATH"),
 		AgentCommand:   platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
 		AgentVersionCommand: platform.Getenv("CS_CLOUD_AGENT_VERSION_COMMAND"),
 	}
@@ -53,6 +54,9 @@ func Load() (*Config, error) {
 				if cfg.AgentCommand == "" {
 					cfg.AgentCommand = fileCfg.AgentCommand
 				}
+				if cfg.AgentPath == "" {
+					cfg.AgentPath = fileCfg.AgentPath
+				}
 				if cfg.DefaultAgent == "" {
 					cfg.DefaultAgent = fileCfg.DefaultAgent
 				}
@@ -77,6 +81,14 @@ func Load() (*Config, error) {
 
 	if cfg.DefaultAgent == "" {
 		cfg.DefaultAgent = "csc"
+	}
+
+	// If AgentCommand is not set but AgentPath is, derive commands from AgentPath
+	if cfg.AgentCommand == "" && cfg.AgentPath != "" {
+		cfg.AgentCommand = cfg.AgentPath + " serve"
+		if cfg.AgentVersionCommand == "" {
+			cfg.AgentVersionCommand = cfg.AgentPath + " --version"
+		}
 	}
 
 	// Environment variable overrides config file for buffer seconds

@@ -5,6 +5,7 @@ type Config struct {
 	BaseURL        string            `json:"base_url"`
 	DefaultShell   string            `json:"default_shell"`
 	DefaultAgent   string            `json:"default_agent"`
+	AgentPath      string            `json:"agent_path,omitempty"`
 	AgentCommand   string            `json:"agent_command"`
 	AgentVersionCommand string        `json:"agent_version_command,omitempty"`
 	AgentEnv       map[string]string `json:"agent_env,omitempty"`
