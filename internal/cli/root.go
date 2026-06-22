@@ -199,7 +199,7 @@ func dispatch(a *app.App) error {
 	case "logout":
 		return logout(a)
 	case "version":
-		printVersion()
+		printVersion(a)
 		return nil
 	case "upgrade":
 		return upgradeCmd(a)
