@@ -238,15 +238,7 @@ func IsInvalidDeviceTokenError(err error) bool {
 	return contains(msg, "device token validation failed: 401") || contains(msg, "device token validation failed: 403")
 }
 
-// IsGatewayAssignAuthError 检查是否是 gateway-assign 的认证错误（需要重新注册）
-func IsGatewayAssignAuthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// gateway-assign 失败时返回的错误格式: "gateway-assign failed: 401 ..."
-	return contains(msg, "gateway-assign failed: 401") || contains(msg, "gateway-assign failed: 403")
-}
+
 
 func hostname() string {
 	h, err := os.Hostname()

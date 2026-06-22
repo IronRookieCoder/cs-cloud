@@ -175,3 +175,80 @@ func TestCheckGatewayConnectivity_ContextCancelled(t *testing.T) {
 		t.Fatal("expected error when context is cancelled")
 	}
 }
+
+// ── GatewayAssignError ─────────────────────────────────────────────────
+
+func TestGatewayAssignError_ErrorMessage(t *testing.T) {
+	err := &GatewayAssignError{StatusCode: 429, Message: "too many requests"}
+	want := "gateway-assign failed: 429 too many requests"
+	if got := err.Error(); got != want {
+		t.Errorf("GatewayAssignError.Error() = %q, want %q", got, want)
+	}
+}
+
+func TestGatewayAssignError_RetryAfterSeconds(t *testing.T) {
+	err := &GatewayAssignError{RetryAfter: "120"}
+	d, ok := err.RetryAfterDuration()
+	if !ok {
+		t.Fatal("RetryAfterDuration() should return true for seconds format")
+	}
+	if d != 120*time.Second {
+		t.Errorf("RetryAfterDuration() = %v, want %v", d, 120*time.Second)
+	}
+}
+
+func TestGatewayAssignError_RetryAfterHTTPDate(t *testing.T) {
+	future := time.Now().Add(5 * time.Minute)
+	err := &GatewayAssignError{RetryAfter: future.Format(time.RFC1123)}
+	d, ok := err.RetryAfterDuration()
+	if !ok {
+		t.Fatal("RetryAfterDuration() should return true for HTTP-date format")
+	}
+	if d <= 0 {
+		t.Fatal("RetryAfterDuration() should return positive duration for future date")
+	}
+}
+
+func TestGatewayAssignError_RetryAfterPastHTTPDate(t *testing.T) {
+	past := time.Now().Add(-1 * time.Hour)
+	err := &GatewayAssignError{RetryAfter: past.Format(time.RFC1123)}
+	d, ok := err.RetryAfterDuration()
+	if !ok {
+		t.Fatal("RetryAfterDuration() should return true for HTTP-date even if in the past")
+	}
+	if d != 0 {
+		t.Errorf("RetryAfterDuration() for past date = %v, want 0", d)
+	}
+}
+
+func TestGatewayAssignError_RetryAfterInvalid(t *testing.T) {
+	err := &GatewayAssignError{RetryAfter: "not-a-valid-value"}
+	_, ok := err.RetryAfterDuration()
+	if ok {
+		t.Error("RetryAfterDuration() should return false for invalid Retry-After")
+	}
+}
+
+func TestGatewayAssignError_RetryAfterEmpty(t *testing.T) {
+	err := &GatewayAssignError{RetryAfter: ""}
+	_, ok := err.RetryAfterDuration()
+	if ok {
+		t.Error("RetryAfterDuration() should return false for empty Retry-After")
+	}
+}
+
+func TestGatewayAssignError_RetryAfterZero(t *testing.T) {
+	err := &GatewayAssignError{RetryAfter: "0"}
+	_, ok := err.RetryAfterDuration()
+	if ok {
+		t.Error("RetryAfterDuration() should return false for Retry-After=0")
+	}
+}
+
+func TestGatewayAssignError_RetryAfterNegative(t *testing.T) {
+	err := &GatewayAssignError{RetryAfter: "-1"}
+	_, ok := err.RetryAfterDuration()
+	if ok {
+		t.Error("RetryAfterDuration() should return false for negative Retry-After")
+	}
+}

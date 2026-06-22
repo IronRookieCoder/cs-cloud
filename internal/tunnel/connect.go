@@ -3,8 +3,10 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/url"
 	"strings"
@@ -21,13 +23,16 @@ import (
 )
 
 const (
-	initialDelay     = 1 * time.Second
-	maxDelay         = 60 * time.Second
-	wsConnectTimeout = 15 * time.Second
+	initialDelay       = 1 * time.Second
+	maxDelay           = 60 * time.Second
+	wsConnectTimeout   = 15 * time.Second
+	rateLimitBaseDelay = 30 * time.Second  // 429 限流的基础等待时间（无 Retry-After 头时使用）
+	rateLimitMaxDelay  = 5 * time.Minute   // 429 限流的最大等待时间
 )
 
 func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionChange func(connected bool)) error {
 	attempt := 0
+	rateLimitAttempt := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -51,6 +56,20 @@ func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionCh
 
 		gatewayURL, err := device.AssignGateway(ctx, dev)
 		if err != nil {
+			// 检测是否是限流错误（429），使用 Retry-After 或较长的退避
+			if device.IsGatewayAssignRateLimitError(err) {
+				delay := rateLimitBackoff(err, rateLimitAttempt)
+				rateLimitAttempt++
+				logger.Warn("[tunnel] gateway-assign rate limited (429), waiting %v before retry (attempt=%d)", delay, rateLimitAttempt)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+				}
+				continue
+			}
+			rateLimitAttempt = 0
+
 			// 检测是否是认证错误（401/403），需要重新注册
 			if device.IsGatewayAssignAuthError(err) {
 				logger.Warn("[tunnel] device token invalid (%v), attempting re-registration...", err)
@@ -59,7 +78,7 @@ func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionCh
 					return fmt.Errorf("re-register failed: %w", err)
 				}
 				logger.Info("[tunnel] device re-registered successfully (device_id=%s)", dev.DeviceID)
-				attempt = 0 // 重置重试计数
+				attempt = 0
 				continue
 			}
 
@@ -74,6 +93,7 @@ func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionCh
 			}
 			continue
 		}
+		rateLimitAttempt = 0
 
 		err = runSession(ctx, gatewayURL, dev.DeviceID, dev.DeviceToken, localPort, onSessionChange)
 		if err != nil {
@@ -100,8 +120,16 @@ func runSession(ctx context.Context, gatewayURL, deviceID, deviceToken string, l
 	connectCtx, cancel := context.WithTimeout(ctx, wsConnectTimeout)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(connectCtx, wsURL, nil)
+	conn, resp, err := websocket.Dial(connectCtx, wsURL, nil)
 	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			if readErr == nil && len(body) > 0 {
+				return fmt.Errorf("ws connect failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			}
+			return fmt.Errorf("ws connect failed (HTTP %d): %w", resp.StatusCode, err)
+		}
 		return fmt.Errorf("ws connect failed: %w", err)
 	}
 
@@ -161,12 +189,62 @@ func runSession(ctx context.Context, gatewayURL, deviceID, deviceToken string, l
 	}
 }
 
+// backoff 计算通用指数退避延迟（1s → 2s → 4s → ... → 60s max）
+// 使用饱和乘法避免 int64 溢出
 func backoff(attempt int) time.Duration {
-	d := initialDelay * time.Duration(1<<uint(attempt))
-	if d > maxDelay {
-		d = maxDelay
+	if attempt < 0 {
+		attempt = 0
 	}
-	return d
+	// 循环加倍，一旦超过 maxDelay 立即饱和
+	d := initialDelay
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d > maxDelay || d <= 0 {
+			return applyJitter(maxDelay)
+		}
+	}
+	return applyJitter(d)
+}
+
+// rateLimitBackoff 计算 429 限流退避延迟
+// 优先使用服务器返回的 Retry-After 头，否则从 rateLimitBaseDelay 开始指数退避
+func rateLimitBackoff(err error, attempt int) time.Duration {
+	// 尝试从结构化错误中提取 Retry-After
+	var gwErr *device.GatewayAssignError
+	if !errors.As(err, &gwErr) {
+		// 退回到通用指数退避
+		return backoff(attempt)
+	}
+
+	// 优先使用 Retry-After 头
+	if d, ok := gwErr.RetryAfterDuration(); ok {
+		// 加 1 秒缓冲，防止精确到秒的竞态
+		d += time.Second
+		if d > rateLimitMaxDelay {
+			return applyJitter(rateLimitMaxDelay)
+		}
+		return applyJitter(d)
+	}
+
+	// 无 Retry-After 头时使用保守的独立退避，循环加倍防溢出
+	d := rateLimitBaseDelay
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d > rateLimitMaxDelay || d <= 0 {
+			return applyJitter(rateLimitMaxDelay)
+		}
+	}
+	return applyJitter(d)
+}
+
+// applyJitter 对退避延迟添加 ±25% 的随机抖动，防止惊群效应
+func applyJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	// ±25% 范围: [0.75d, 1.25d)
+	jitter := time.Duration(rand.Int63n(int64(d / 2))) - time.Duration(int64(d / 4))
+	return d + jitter
 }
 
 func redactToken(s string) string {
