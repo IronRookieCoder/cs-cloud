@@ -1,6 +1,7 @@
 package csc
 
 import (
+	"os/exec"
 	"runtime"
 	"testing"
 
@@ -53,6 +54,9 @@ func TestDriverVersionCached(t *testing.T) {
 
 func TestDriverVersionDefaultCli(t *testing.T) {
 	// Version uses CLIBinary directly, works even with empty command
+	if _, err := exec.LookPath(CLIBinary); err != nil {
+		t.Skipf("%q binary not found in PATH: %v", CLIBinary, err)
+	}
 	d := NewDriver(agent.Command{})
 
 	ver, err := d.Version()
