@@ -7,6 +7,7 @@ const (
 	PathDeviceGet            = "/api/devices/{deviceID}"
 	PathDeviceHeartbeat      = "/api/devices/{deviceID}/heartbeat"
 	PathDeviceTokenRotate    = "/api/devices/{deviceID}/token/rotate"
+	PathDeviceFingerprint    = "/api/devices/{deviceID}/fingerprint"
 	PathDeviceCommandResult  = "/cloud/devices/{deviceID}/commands/{commandID}/result"
 	PathGatewayAssign        = "/cloud/device/gateway-assign"
 	PathUpdateCheck          = "/api/updates/check"
@@ -24,6 +25,10 @@ func DeviceHeartbeatPath(deviceID string) string {
 
 func DeviceTokenRotatePath(deviceID string) string {
 	return strings.Replace(PathDeviceTokenRotate, "{deviceID}", deviceID, 1)
+}
+
+func DeviceFingerprintPath(deviceID string) string {
+	return strings.Replace(PathDeviceFingerprint, "{deviceID}", deviceID, 1)
 }
 
 func DeviceCommandResultPath(deviceID, commandID string) string {

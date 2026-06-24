@@ -185,7 +185,7 @@ func runDaemon(a *app.App) error {
 		if cred, err := provider.LoadCredentials(); err == nil && cred != nil {
 			credBaseURL = cred.BaseURL
 		}
-		notifyForwarder := cloud.NewNotifyForwarder(srv.EventBus(), cloudClient, info.DeviceID, info.DeviceToken, credBaseURL, a.Config().NotifyBufferSeconds, a.Config().PermissionBufferSeconds)
+		notifyForwarder := cloud.NewNotifyForwarder(srv.EventBus(), cloudClient, info.DeviceID, info.DeviceToken, credBaseURL, a.Config().PermissionBufferSeconds, a.Config().PermissionBufferSeconds)
 		if err := notifyForwarder.Validate(); err != nil {
 			logger.Warn("[daemon] notify forwarder not started: %v", err)
 		} else {

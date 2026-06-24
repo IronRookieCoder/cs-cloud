@@ -47,6 +47,9 @@ func login(a *app.App) error {
 		}
 	}
 	printSuccess("Device registered")
+	if info.MigratedFrom != "" {
+		printInfo("Migrated from legacy device %s", info.MigratedFrom)
+	}
 	printKV("device_id", info.DeviceID)
 
 	printInfo("Checking gateway connectivity...")

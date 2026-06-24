@@ -63,8 +63,10 @@ func start(a *app.App) error {
 			return err
 		}
 		printSuccess("Device registered")
+		if info.MigratedFrom != "" {
+			printInfo("Migrated from legacy device %s", info.MigratedFrom)
+		}
 		printKV("device_id", info.DeviceID)
-		printKV("legacy_device_id", device.GetLegacyDeviceID())
 
 		if err := device.ValidateDeviceToken(ctx, info); err != nil {
 			if device.IsInvalidDeviceTokenError(err) {
@@ -76,8 +78,10 @@ func start(a *app.App) error {
 				return err
 			}
 			printWarn("Device re-registered")
+			if info.MigratedFrom != "" {
+				printInfo("Migrated from legacy device %s", info.MigratedFrom)
+			}
 			printKV("device_id", info.DeviceID)
-			printKV("legacy_device_id", device.GetLegacyDeviceID())
 				if err := device.ValidateDeviceToken(ctx, info); err != nil {
 					printRegDebugInfo(a)
 					return err
