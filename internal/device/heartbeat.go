@@ -84,6 +84,9 @@ func HeartbeatLoop(ctx context.Context, cfg *config.Config, tunnelStatus func() 
 	defer ticker.Stop()
 
 	send := func(connected bool) {
+		if !connected {
+			logger.Info("[heartbeat] sending heartbeat with tunnelConnected=false")
+		}
 		resp, err := client.HeartbeatWithResponse(ctx, connected)
 		if err != nil {
 			logger.Warn("[heartbeat] failed: %v", err)
@@ -93,12 +96,6 @@ func HeartbeatLoop(ctx context.Context, cfg *config.Config, tunnelStatus func() 
 			onCommands(resp.PendingCommands)
 		}
 	}
-
-	connected := false
-	if tunnelStatus != nil {
-		connected = tunnelStatus()
-	}
-	send(connected)
 
 	go func() {
 		for {
