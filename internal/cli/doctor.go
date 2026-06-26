@@ -343,6 +343,7 @@ func checkDeviceOnCloud(ctx context.Context, a *app.App) *checkResult {
 
 func fixDeviceOnCloud(ctx context.Context, a *app.App) *checkResult {
 	_ = device.ClearDevice()
+	_ = device.ClearDeviceV2()
 	info, err := device.Register(ctx, a.Config())
 	if err != nil {
 		hint := ""
@@ -388,6 +389,7 @@ func checkDeviceToken(ctx context.Context, a *app.App) *checkResult {
 
 func fixDeviceToken(ctx context.Context, a *app.App) *checkResult {
 	_ = device.ClearDevice()
+	_ = device.ClearDeviceV2()
 	info, regErr := device.Register(ctx, a.Config())
 	if regErr != nil {
 		hint := ""

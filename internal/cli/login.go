@@ -40,6 +40,7 @@ func login(a *app.App) error {
 		}
 		printWarn("Device registration failed, retrying...")
 		_ = device.ClearDevice()
+		_ = device.ClearDeviceV2()
 		info, err = device.Register(ctx, a.Config())
 		if err != nil {
 			printRegDebugInfo(a)
@@ -77,6 +78,9 @@ func logout(a *app.App) error {
 	}
 	if err := device.ClearDevice(); err != nil {
 		return fmt.Errorf("clear device: %w", err)
+	}
+	if err := device.ClearDeviceV2(); err != nil {
+		return fmt.Errorf("clear device v2: %w", err)
 	}
 	printSuccess("Logged out")
 	return nil

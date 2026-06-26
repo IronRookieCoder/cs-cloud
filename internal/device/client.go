@@ -343,7 +343,7 @@ func handleConflict(resp *http.Response, base, authUserID string) (*DeviceInfo, 
 	}
 	if conflict.Token != "" && conflict.Device != nil && conflict.Device.DeviceID != "" {
 		info := &DeviceInfo{
-			DeviceID:     GetDeviceID(),
+			DeviceID:     conflict.Device.DeviceID,
 			DeviceToken:  conflict.Token,
 			AuthUserID:   authUserID,
 			RegisteredAt: time.Now().Format(time.RFC3339),
@@ -491,6 +491,7 @@ func ValidateDeviceOwner(info *DeviceInfo) error {
 
 func ReRegister(ctx context.Context, cfg *config.Config) (*DeviceInfo, error) {
 	_ = ClearDevice()
+	_ = ClearDeviceV2()
 	c := NewClient(cfg)
 	return c.Register(ctx)
 }
