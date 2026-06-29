@@ -22,4 +22,5 @@ const (
 	EventTypeHostGitCommit        = "host.git.commit"
 	EventTypeHostGitStatusChanged = "host.git.status.changed"
 	EventTypeHostGitRemoteChanged = "host.git.remote.changed"
+	EventTypeHostGitStashChanged  = "host.git.stash.changed"
 )

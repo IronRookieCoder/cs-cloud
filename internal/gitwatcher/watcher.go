@@ -38,6 +38,7 @@ type RepoState struct {
 	RemoteHead    string
 	LastCommit    string
 	LastStatus    string
+	LastStash     string
 	IsRepo        bool
 	hasUpstream   bool
 }
@@ -235,6 +236,12 @@ func (w *Watcher) watchGitInternals(repoPath string) {
 	if _, err := os.Stat(packedRefs); err == nil {
 		_ = w.fw.Add(packedRefs)
 	}
+
+	// .git/refs/stash — git stash storage (created/updated by git stash push/pop/drop)
+	stashRef := filepath.Join(gitDir, "refs", "stash")
+	if _, err := os.Stat(stashRef); err == nil {
+		_ = w.fw.Add(stashRef)
+	}
 }
 
 // unwatchGitInternals removes fsnotify watches for a repo.
@@ -260,6 +267,7 @@ func (w *Watcher) unwatchGitInternals(repoPath string) {
 
 	_ = w.fw.Remove(filepath.Join(gitDir, "index"))
 	_ = w.fw.Remove(filepath.Join(gitDir, "packed-refs"))
+	_ = w.fw.Remove(filepath.Join(gitDir, "refs", "stash"))
 }
 
 // checkRepo checks a single repo for branch, commit, and status changes.
@@ -275,6 +283,7 @@ func (w *Watcher) checkRepo(repoPath string) {
 	oldBranch := state.CurrentBranch
 	oldHead := state.CurrentHead
 	oldRemoteHead := state.RemoteHead
+	oldStash := state.LastStash
 
 	if err := w.updateRepoState(state); err != nil {
 		logger.Error("Failed to update repo state for %s: %v", repoPath, err)
@@ -295,6 +304,11 @@ func (w *Watcher) checkRepo(repoPath string) {
 	if state.RemoteHead != oldRemoteHead {
 		logger.Info("Remote HEAD changed in %s: %s -> %s", repoPath, oldRemoteHead, state.RemoteHead)
 		w.emitRemoteEvent(state, oldRemoteHead, repoPath)
+	}
+
+	// Check stash changes (stash push/pop/drop)
+	if state.LastStash != oldStash {
+		w.emitStashEvent(state, oldStash, repoPath)
 	}
 
 	// Check status changes
@@ -390,6 +404,15 @@ func (w *Watcher) updateRepoState(state *RepoState) error {
 	}
 	state.LastCommit = strings.TrimSpace(lastCommit)
 
+	// Read stash list for change detection (stash push/pop/drop).
+	// `git stash list` returns empty string with exit code 0 when no stashes exist.
+	stashList, err := w.runGitCommand(state.Path, "stash", "list")
+	if err == nil {
+		state.LastStash = strings.TrimSpace(stashList)
+	} else {
+		state.LastStash = ""
+	}
+
 	return nil
 }
 
@@ -461,6 +484,23 @@ func (w *Watcher) emitRemoteEvent(state *RepoState, oldRemoteHead, repoPath stri
 		},
 	})
 	logger.Debug("Git remote event emitted: %s -> %s in %s", oldRemoteHead, state.RemoteHead, repoPath)
+}
+
+func (w *Watcher) emitStashEvent(state *RepoState, oldStash, repoPath string) {
+	count := 0
+	if state.LastStash != "" {
+		count = strings.Count(state.LastStash, "\n") + 1
+	}
+	w.eventBus.Emit(agent.Event{
+		Type: model.EventTypeHostGitStashChanged,
+		Data: map[string]any{
+			"branch":     state.CurrentBranch,
+			"count":      count,
+			"repo_path":  repoPath,
+			"timestamp":  time.Now().Unix(),
+		},
+	})
+	logger.Debug("Git stash event emitted: %d stashes in %s", count, repoPath)
 }
 
 func (w *Watcher) runGitCommand(dir string, args ...string) (string, error) {
