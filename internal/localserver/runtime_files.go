@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,11 @@ type fileListData struct {
 // @Failure      404  {object}  envelope
 // @Router       /runtime/files [get]
 func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("roots") == "true" {
+		writeOK(w, fileListData{Path: "", Entries: listRoots()})
+		return
+	}
+
 	dirPath := decodeQueryParam(r.URL.Query().Get("path"))
 	if dirPath == "" {
 		dirPath = "."
@@ -86,6 +92,31 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 		Path:    absPath,
 		Entries: entries,
 	})
+}
+
+func listRoots() []fileEntry {
+	if runtime.GOOS == "windows" {
+		var entries []fileEntry
+		for c := 'A'; c <= 'Z'; c++ {
+			root := string(c) + `:\`
+			info, err := os.Stat(root)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			entries = append(entries, fileEntry{
+				Name:     string(c) + ":/",
+				Type:     "directory",
+				Modified: info.ModTime().UTC(),
+			})
+		}
+		return entries
+	}
+	info, _ := os.Stat("/")
+	modified := time.Time{}
+	if info != nil {
+		modified = info.ModTime().UTC()
+	}
+	return []fileEntry{{Name: "/", Type: "directory", Modified: modified}}
 }
 
 func readDir(dir string, limit int) ([]fileEntry, error) {
