@@ -69,6 +69,7 @@ func doctor(a *app.App) error {
 		{"device token", checkDeviceToken},
 		{"gateway", checkGateway},
 		{"tunnel", checkTunnel},
+		{"online consistency", checkDeviceOnlineConsistency},
 	}
 
 	for i, c := range checks {
@@ -343,6 +344,7 @@ func checkDeviceOnCloud(ctx context.Context, a *app.App) *checkResult {
 
 func fixDeviceOnCloud(ctx context.Context, a *app.App) *checkResult {
 	_ = device.ClearDevice()
+	_ = device.ClearDeviceV2()
 	info, err := device.Register(ctx, a.Config())
 	if err != nil {
 		hint := ""
@@ -388,6 +390,7 @@ func checkDeviceToken(ctx context.Context, a *app.App) *checkResult {
 
 func fixDeviceToken(ctx context.Context, a *app.App) *checkResult {
 	_ = device.ClearDevice()
+	_ = device.ClearDeviceV2()
 	info, regErr := device.Register(ctx, a.Config())
 	if regErr != nil {
 		hint := ""
@@ -443,17 +446,55 @@ func checkTunnel(ctx context.Context, a *app.App) *checkResult {
 		return &checkResult{name: "tunnel", ok: true, detail: "not in cloud mode"}
 	}
 
+	state, rawErr := queryLocalTunnel(ctx, a)
+	if rawErr != "" {
+		return &checkResult{name: "tunnel", ok: false, err: rawErr}
+	}
+
+	if state.connected {
+		detail := "connected"
+		if state.connectedAt != nil {
+			detail = fmt.Sprintf("connected since %s", state.connectedAt.Format(time.RFC3339))
+		}
+		return &checkResult{name: "tunnel", ok: true, detail: detail}
+	}
+
+	return &checkResult{
+		name: "tunnel",
+		err:  "tunnel not connected",
+		hint: "The device may appear offline on the cloud. Check 'logs' for tunnel connection errors.",
+	}
+}
+
+type localTunnelState struct {
+	connected   bool
+	connectedAt *time.Time
+}
+
+// queryLocalTunnel asks the local daemon for its tunnel health. Returns a non-empty
+// err string when the daemon is unreachable or the response cannot be parsed.
+func queryLocalTunnel(ctx context.Context, a *app.App) (localTunnelState, string) {
+	running, _, _ := a.DaemonStatus()
+	if !running {
+		return localTunnelState{}, "daemon not running"
+	}
+
+	serverURL, err := a.ServerURL()
+	if err != nil || serverURL == "" {
+		return localTunnelState{}, "daemon server URL not available"
+	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, serverURL+"/api/v1/runtime/health", nil)
 	if err != nil {
-		return &checkResult{name: "tunnel", ok: false, err: err.Error()}
+		return localTunnelState{}, err.Error()
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return &checkResult{name: "tunnel", ok: false, err: fmt.Sprintf("cannot reach daemon: %v", err)}
+		return localTunnelState{}, fmt.Sprintf("cannot reach daemon: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -467,22 +508,58 @@ func checkTunnel(ctx context.Context, a *app.App) *checkResult {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &health); err != nil {
-		return &checkResult{name: "tunnel", ok: false, err: "failed to parse health response"}
+		return localTunnelState{}, "failed to parse health response"
 	}
 
-	if health.Data.Tunnel.Connected {
-		detail := "connected"
-		if health.Data.Tunnel.ConnectedAt != nil {
-			detail = fmt.Sprintf("connected since %s", health.Data.Tunnel.ConnectedAt.Format(time.RFC3339))
+	return localTunnelState{connected: health.Data.Tunnel.Connected, connectedAt: health.Data.Tunnel.ConnectedAt}, ""
+}
+
+func checkDeviceOnlineConsistency(ctx context.Context, a *app.App) *checkResult {
+	mode := a.LoadMode()
+	if mode != "cloud" {
+		return &checkResult{name: "online consistency", ok: true, detail: "not in cloud mode"}
+	}
+
+	dev, err := a.Device()
+	if err != nil || dev == nil {
+		return &checkResult{name: "online consistency", ok: false, err: "no device"}
+	}
+	cred, err := a.Credentials()
+	if err != nil || cred == nil {
+		return &checkResult{name: "online consistency", ok: false, err: "no credentials"}
+	}
+
+	cloudStatus, err := device.GetDeviceCloudStatus(ctx, dev, cred.AccessToken)
+	if err != nil {
+		return &checkResult{name: "online consistency", ok: false, err: fmt.Sprintf("cloud status query failed: %v", err)}
+	}
+
+	state, rawErr := queryLocalTunnel(ctx, a)
+	if rawErr != "" {
+		return &checkResult{name: "online consistency", ok: false, err: fmt.Sprintf("local tunnel query failed: %s", rawErr)}
+	}
+
+	lastSeenDetail := ""
+	if cloudStatus.SecondsSinceLastSeen > 0 {
+		lastSeenDetail = fmt.Sprintf(", lastSeen=%ds ago", cloudStatus.SecondsSinceLastSeen)
+	}
+
+	if state.connected && !cloudStatus.Online {
+		return &checkResult{
+			name: "online consistency",
+			err:  fmt.Sprintf("local tunnel connected but cloud shows offline (status=%s%s)", cloudStatus.Status, lastSeenDetail),
+			hint: "Heartbeat may not be reaching the cloud. Check 'logs' for heartbeat or gateway errors.",
 		}
-		return &checkResult{name: "tunnel", ok: true, detail: detail}
+	}
+	if !state.connected && cloudStatus.Online {
+		return &checkResult{
+			name: "online consistency",
+			err:  "local tunnel disconnected but cloud still shows online",
+			hint: "Cloud status is stale; it should clear after the stale-device sweep. If it persists, restart the daemon.",
+		}
 	}
 
-	return &checkResult{
-		name: "tunnel",
-		err:  "tunnel not connected",
-		hint: "The device may appear offline on the cloud. Check 'logs' for tunnel connection errors.",
-	}
+	return &checkResult{name: "online consistency", ok: true, detail: fmt.Sprintf("cloud=%s, local=%v%s", cloudStatus.Status, state.connected, lastSeenDetail)}
 }
 
 func resolveUser(cred *provider.Credentials) string {

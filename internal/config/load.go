@@ -75,6 +75,9 @@ func Load() (*Config, error) {
 				if cfg.PermissionBufferSeconds == 0 {
 					cfg.PermissionBufferSeconds = fileCfg.PermissionBufferSeconds
 				}
+				if cfg.IdleBufferSeconds == 0 {
+					cfg.IdleBufferSeconds = fileCfg.IdleBufferSeconds
+				}
 			}
 		}
 	}
@@ -108,6 +111,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.PermissionBufferSeconds == 0 {
 		cfg.PermissionBufferSeconds = 5
+	}
+
+	if env := platform.Getenv("CS_CLOUD_IDLE_BUFFER_SECONDS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil {
+			cfg.IdleBufferSeconds = v
+		}
+	}
+	if cfg.IdleBufferSeconds == 0 {
+		cfg.IdleBufferSeconds = 30
 	}
 
 	return cfg, nil

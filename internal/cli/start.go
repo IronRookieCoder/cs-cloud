@@ -72,6 +72,7 @@ func start(a *app.App) error {
 			if device.IsInvalidDeviceTokenError(err) {
 		fmt.Println("device token is invalid, regenerating...")
 			_ = device.ClearDevice()
+			_ = device.ClearDeviceV2()
 			info, err = registerWithLogin(ctx, a)
 			if err != nil {
 				printRegDebugInfo(a)
@@ -231,6 +232,7 @@ func registerWithLogin(ctx context.Context, a *app.App) (*device.DeviceInfo, err
 		}
 		if device.IsInvalidDeviceTokenError(err) {
 			_ = device.ClearDevice()
+			_ = device.ClearDeviceV2()
 			if device.IsMissingAuthError(err) || device.IsExpiredAuthError(err) || device.IsAuthError(err) {
 				_, _ = provider.LoginCoStrict(ctx)
 			}

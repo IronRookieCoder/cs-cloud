@@ -32,17 +32,21 @@ type NotifyForwarder struct {
 	credBaseURL            string
 	bufferSeconds          int // question buffer (default 60)
 	permissionBufferSeconds int // permission batch window (default 5)
+	idleBufferSeconds      int // idle debounce window (default 30)
 
 	mu      sync.Mutex
 	pending map[string]*pendingBuffer // key = sessionID:eventPrefix
 }
 
-func NewNotifyForwarder(eventBus *runtime.EventBus, cloudClient *Client, deviceID, deviceToken, credBaseURL string, bufferSeconds, permissionBufferSeconds int) *NotifyForwarder {
+func NewNotifyForwarder(eventBus *runtime.EventBus, cloudClient *Client, deviceID, deviceToken, credBaseURL string, bufferSeconds, permissionBufferSeconds, idleBufferSeconds int) *NotifyForwarder {
 	if bufferSeconds <= 0 {
 		bufferSeconds = 60
 	}
 	if permissionBufferSeconds <= 0 {
 		permissionBufferSeconds = 5
+	}
+	if idleBufferSeconds <= 0 {
+		idleBufferSeconds = 30
 	}
 	return &NotifyForwarder{
 		eventBus:               eventBus,
@@ -52,13 +56,14 @@ func NewNotifyForwarder(eventBus *runtime.EventBus, cloudClient *Client, deviceI
 		credBaseURL:            credBaseURL,
 		bufferSeconds:          bufferSeconds,
 		permissionBufferSeconds: permissionBufferSeconds,
+		idleBufferSeconds:      idleBufferSeconds,
 		pending:                make(map[string]*pendingBuffer),
 	}
 }
 
 func (f *NotifyForwarder) Start(ctx context.Context) {
 	ch := f.eventBus.Subscribe(nil)
-	logger.Info("[notify-forwarder] subscribed to event bus, waiting for events (permission=%ds, question=%ds)...", f.permissionBufferSeconds, f.bufferSeconds)
+	logger.Info("[notify-forwarder] subscribed to event bus, waiting for events (permission=%ds, question=%ds, idle=%ds)...", f.permissionBufferSeconds, f.bufferSeconds, f.idleBufferSeconds)
 	go func() {
 		for {
 			select {
@@ -150,15 +155,7 @@ func (f *NotifyForwarder) handleEvent(event agent.Event) {
 		if path == "" {
 			path = f.eventBus.GetActiveWorkspace()
 		}
-		payload := map[string]any{
-			"deviceID":  f.deviceID,
-			"type":      "idle",
-			"sessionID": sessionID,
-			"path":      path,
-			"data":      map[string]any{"timestamp": time.Now().UnixMilli()},
-		}
-		logger.Info("[notify-forwarder] forwarding event: type=idle sessionID=%s path=%s", sessionID, path)
-		f.sendNotify(payload)
+		f.bufferIdleEvent(sessionID, path)
 	}
 }
 
@@ -236,6 +233,67 @@ func (f *NotifyForwarder) flushPermissionBatch(key string) {
 		logger.Info("[notify-forwarder] forwarding permission batch: sessionID=%s count=%d", buf.sessionID, count)
 		f.sendNotify(payload)
 	}
+}
+
+// bufferIdleEvent debounces session.idle per session. csc emits session.idle
+// at the end of every turn, so a back-to-back conversation would spam the
+// cloud — each new idle resets the timer, and only when no new idle arrives
+// for idleBufferSeconds is the notification actually forwarded.
+func (f *NotifyForwarder) bufferIdleEvent(sessionID, path string) {
+	key := pendingKey(sessionID, "idle")
+
+	payload := map[string]any{
+		"deviceID":  f.deviceID,
+		"type":      "idle",
+		"sessionID": sessionID,
+		"path":      path,
+		"data":      map[string]any{"timestamp": time.Now().UnixMilli()},
+	}
+
+	f.mu.Lock()
+	if existing, ok := f.pending[key]; ok {
+		existing.payload = payload
+		existing.path = path
+		existing.timer.Stop()
+		existing.timer = time.AfterFunc(time.Duration(f.idleBufferSeconds)*time.Second, func() {
+			f.flushIdle(key)
+		})
+		f.mu.Unlock()
+		logger.Info("[notify-forwarder] idle debounced: sessionID=%s reset=%ds", sessionID, f.idleBufferSeconds)
+		return
+	}
+	f.mu.Unlock()
+
+	buf := &pendingBuffer{
+		eventType: "idle",
+		sessionID: sessionID,
+		path:      path,
+		payload:   payload,
+	}
+	buf.timer = time.AfterFunc(time.Duration(f.idleBufferSeconds)*time.Second, func() {
+		f.flushIdle(key)
+	})
+
+	f.mu.Lock()
+	f.pending[key] = buf
+	f.mu.Unlock()
+
+	logger.Info("[notify-forwarder] idle buffered: sessionID=%s timeout=%ds", sessionID, f.idleBufferSeconds)
+}
+
+// flushIdle sends the debounced idle notification once the quiet window elapses.
+func (f *NotifyForwarder) flushIdle(key string) {
+	f.mu.Lock()
+	buf, ok := f.pending[key]
+	if !ok {
+		f.mu.Unlock()
+		return
+	}
+	delete(f.pending, key)
+	f.mu.Unlock()
+
+	logger.Info("[notify-forwarder] idle debounce settled, forwarding: sessionID=%s", buf.sessionID)
+	f.sendNotify(buf.payload)
 }
 
 // bufferQuestionEvent buffers a single question event with the longer timeout.

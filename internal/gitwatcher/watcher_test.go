@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,6 +92,17 @@ func runGitCommand(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("Git command failed: %v\nOutput: %s", err, string(output))
 	}
+}
+
+// runGitCommandOutput runs a git command and returns its stdout. Fails the test on error.
+func runGitCommandOutput(t *testing.T, dir string, args ...string) string {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Git command failed: %v\nOutput: %s", err, string(output))
+	}
+	return string(output)
 }
 
 func TestNewGitWatcher(t *testing.T) {
@@ -393,8 +405,9 @@ func TestGitWatcher_StatusDetection(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Wait for status poller fallback (10s interval)
-	time.Sleep(12 * time.Second)
+	// Directly trigger checkRepo instead of waiting 12s for the fallback poller.
+	// This matches the pattern used by other event tests and avoids flaky timing.
+	watcher.checkRepo(repoPath)
 
 	// Check for status changed event
 	events := mockBus.GetEventsByType(model.EventTypeHostGitStatusChanged)
@@ -414,6 +427,141 @@ func TestGitWatcher_StatusDetection(t *testing.T) {
 		if !found {
 			t.Error("Status changed event with changed files not found")
 		}
+	}
+}
+
+func TestGitWatcher_StashDetection(t *testing.T) {
+	mockBus := &MockEventBus{}
+	watcher := New(mockBus)
+
+	ctx := context.Background()
+	mockFileWatcher := &mockFileWatcher{}
+	watcher.Start(ctx, mockFileWatcher)
+	defer watcher.Stop()
+
+	// Create test git repository (already has an initial commit)
+	repoPath, cleanup := setupTestGitRepo(t)
+	defer cleanup()
+
+	// Add repository
+	err := watcher.AddRepository(repoPath)
+	if err != nil {
+		t.Fatalf("AddRepository() failed: %v", err)
+	}
+	mockBus.ClearEvents()
+
+	// Create a worktree change and stash it. We need a tracked/modified file
+	// so that `git stash` has something to store.
+	stashFile := filepath.Join(repoPath, "stash-me.txt")
+	err = os.WriteFile(stashFile, []byte("stash content"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create stash file: %v", err)
+	}
+	runGitCommand(t, repoPath, "add", "stash-me.txt")
+	runGitCommand(t, repoPath, "stash", "push", "-m", "test stash")
+
+	// Directly trigger checkRepo to detect the stash change.
+	watcher.checkRepo(repoPath)
+
+	// Expect a stash changed event with count == 1.
+	events := mockBus.GetEventsByType(model.EventTypeHostGitStashChanged)
+	if len(events) == 0 {
+		t.Fatal("Expected stash changed event after git stash push")
+	}
+	if len(events) > 1 {
+		t.Fatalf("Expected exactly 1 stash event, got %d", len(events))
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("Expected map[string]any, got %T", events[0].Data)
+	}
+	if count, ok := data["count"].(int); !ok || count != 1 {
+		t.Errorf("Expected count == 1, got %v", data["count"])
+	}
+
+	// Now drop the stash and verify a second event with count == 0 is emitted.
+	mockBus.ClearEvents()
+	runGitCommand(t, repoPath, "stash", "drop")
+	watcher.checkRepo(repoPath)
+
+	events = mockBus.GetEventsByType(model.EventTypeHostGitStashChanged)
+	if len(events) == 0 {
+		t.Fatal("Expected stash changed event after git stash drop")
+	}
+	data, ok = events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("Expected map[string]any, got %T", events[0].Data)
+	}
+	if count, ok := data["count"].(int); !ok || count != 0 {
+		t.Errorf("Expected count == 0 after drop, got %v", data["count"])
+	}
+}
+
+func TestGitWatcher_RemoteDetection(t *testing.T) {
+	mockBus := &MockEventBus{}
+	watcher := New(mockBus)
+
+	ctx := context.Background()
+	mockFileWatcher := &mockFileWatcher{}
+	watcher.Start(ctx, mockFileWatcher)
+	defer watcher.Stop()
+
+	// Create test git repository (already has an initial commit on main).
+	repoPath, cleanup := setupTestGitRepo(t)
+	defer cleanup()
+
+	// Create a bare remote repository.
+	remoteDir, remoteCleanup := func() (string, func()) {
+		d, err := os.MkdirTemp("", "gitwatcher_remote_test")
+		if err != nil {
+			t.Fatalf("Failed to create remote temp dir: %v", err)
+		}
+		runGitCommand(t, d, "init", "--bare")
+		return d, func() { os.RemoveAll(d) }
+	}()
+	defer remoteCleanup()
+
+	// Link local repo to the remote and push to set upstream.
+	runGitCommand(t, repoPath, "remote", "add", "origin", remoteDir)
+	// Determine current branch dynamically (avoid hardcoding main/master).
+	branch := strings.TrimSpace(runGitCommandOutput(t, repoPath, "symbolic-ref", "--short", "HEAD"))
+	runGitCommand(t, repoPath, "push", "-u", "origin", branch)
+
+	// Add repository to the watcher (this initializes RemoteHead).
+	err := watcher.AddRepository(repoPath)
+	if err != nil {
+		t.Fatalf("AddRepository() failed: %v", err)
+	}
+	mockBus.ClearEvents()
+
+	// Create a second commit and push to change the remote HEAD.
+	secondFile := filepath.Join(repoPath, "second.txt")
+	err = os.WriteFile(secondFile, []byte("second file"), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create second file: %v", err)
+	}
+	runGitCommand(t, repoPath, "add", "second.txt")
+	runGitCommand(t, repoPath, "commit", "-m", "Second commit")
+	runGitCommand(t, repoPath, "push", "origin", branch)
+
+	// Directly trigger checkRepo to detect the remote HEAD change.
+	watcher.checkRepo(repoPath)
+
+	events := mockBus.GetEventsByType(model.EventTypeHostGitRemoteChanged)
+	if len(events) == 0 {
+		t.Fatal("Expected remote changed event after push")
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("Expected map[string]any, got %T", events[0].Data)
+	}
+	oldHead, _ := data["old_head"].(string)
+	newHead, _ := data["new_head"].(string)
+	if oldHead == "" || newHead == "" {
+		t.Fatalf("Expected non-empty old_head and new_head, got old=%q new=%q", oldHead, newHead)
+	}
+	if oldHead == newHead {
+		t.Errorf("Expected old_head != new_head, both were %s", oldHead)
 	}
 }
 

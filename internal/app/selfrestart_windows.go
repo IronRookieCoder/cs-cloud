@@ -21,6 +21,39 @@ func newDaemonCmd(exe string, args []string) *exec.Cmd {
 	return cmd
 }
 
+func buildUpgradeScript(pid int, newPath, exe string, args []string) string {
+	var argsBuf strings.Builder
+	for _, arg := range args {
+		argsBuf.WriteString(" \"")
+		argsBuf.WriteString(arg)
+		argsBuf.WriteString("\"")
+	}
+	return fmt.Sprintf(`@echo off
+set /a SWAP_RETRY=0
+:wait_pid
+tasklist /FI "PID eq %d" /NH 2>/dev/null | findstr /I /C:"%d " >/dev/null
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >/dev/null
+    goto wait_pid
+)
+:swap
+timeout /t 1 /nobreak >/dev/null
+move /y "%s" "%s"
+if errorlevel 1 (
+    set /a SWAP_RETRY+=1
+    if %%SWAP_RETRY%% GEQ 30 goto swap_fail
+    goto swap
+)
+if exist "%s.old" del /f /q "%s.old"
+start "" /B "%s"%s
+del "%%~f0"
+exit /b 0
+:swap_fail
+del "%%~f0"
+exit /b 1
+`, pid, pid, newPath, exe, exe, exe, exe, argsBuf.String())
+}
+
 func selfRestartWithUpgrade(a *App, exe, newPath string) error {
 	args := a.LoadArgs()
 	if len(args) == 0 {
@@ -32,38 +65,7 @@ func selfRestartWithUpgrade(a *App, exe, newPath string) error {
 	}
 
 	pid := os.Getpid()
-
-	var argsBuf strings.Builder
-	for _, arg := range args {
-		argsBuf.WriteString(" \"")
-		argsBuf.WriteString(arg)
-		argsBuf.WriteString("\"")
-	}
-
-	script := fmt.Sprintf(`@echo off
-set /a SWAP_RETRY=0
-:wait_pid
-tasklist /FI "PID eq %d" /NH 2>NUL | findstr /I /C:"%d " >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >NUL
-    goto wait_pid
-)
-:swap
-timeout /t 1 /nobreak >NUL
-move /y "%s" "%s"
-if errorlevel 1 (
-    set /a SWAP_RETRY+=1
-    if %%SWAP_RETRY%% GEQ 30 goto swap_fail
-    goto swap
-)
-if exist "%s.old" del /f /q "%s.old"
-start "" "%s"%s
-del "%%~f0"
-exit /b 0
-:swap_fail
-del "%%~f0"
-exit /b 1
-`, pid, pid, newPath, exe, exe, exe, exe, argsBuf.String())
+	script := buildUpgradeScript(pid, newPath, exe, args)
 
 	scriptPath := exe + ".upgrade.cmd"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
