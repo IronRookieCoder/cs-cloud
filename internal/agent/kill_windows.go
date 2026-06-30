@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 func SetCmdProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x08000000,
+		HideWindow:    true,
+	}
 }
 
 func SignalTerminate(pid int) {
