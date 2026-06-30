@@ -13,6 +13,7 @@ type Config struct {
 	AutoUpgrade           bool              `json:"auto_upgrade"`
 	NotifyBufferSeconds      int               `json:"notify_buffer_seconds"`
 	PermissionBufferSeconds  int               `json:"permission_buffer_seconds"`
+	IdleBufferSeconds        int               `json:"idle_buffer_seconds"`
 	Runtime               RuntimeConfig     `json:"runtime"`
 }
 

@@ -148,3 +148,27 @@ func TestLoad_AgentPathEnvOverridesConfigFile(t *testing.T) {
 		t.Errorf("AgentPath = %q, want %q (env should override file)", cfg.AgentPath, "/from/env/csc")
 	}
 }
+
+func TestLoad_IdleBufferSeconds_DefaultAndEnv(t *testing.T) {
+	// Default when neither env nor file sets it
+	isolatedConfig(t, `{}`)
+	t.Setenv("CS_CLOUD_IDLE_BUFFER_SECONDS", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IdleBufferSeconds != 30 {
+		t.Errorf("default IdleBufferSeconds = %d, want 30", cfg.IdleBufferSeconds)
+	}
+
+	// Env override
+	t.Setenv("CS_CLOUD_IDLE_BUFFER_SECONDS", "120")
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.IdleBufferSeconds != 120 {
+		t.Errorf("env IdleBufferSeconds = %d, want 120", cfg2.IdleBufferSeconds)
+	}
+}

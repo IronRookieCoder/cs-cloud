@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -18,26 +19,32 @@ import (
 func TestNewNotifyForwarder(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	client := NewClient(nil)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-1", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-1", "", 60, 5, 30)
 	if f == nil {
 		t.Fatal("expected non-nil forwarder")
 	}
 }
 
 func TestNewNotifyForwarder_DefaultBufferSeconds(t *testing.T) {
-	f := NewNotifyForwarder(nil, nil, "dev-1", "token-1", "", 0, 0)
+	f := NewNotifyForwarder(nil, nil, "dev-1", "token-1", "", 0, 0, 0)
 	if f.bufferSeconds != 60 {
 		t.Errorf("expected default 60s, got %d", f.bufferSeconds)
 	}
 	if f.permissionBufferSeconds != 5 {
 		t.Errorf("expected default permission 5s, got %d", f.permissionBufferSeconds)
 	}
-	f2 := NewNotifyForwarder(nil, nil, "dev-1", "token-1", "", -1, -1)
+	if f.idleBufferSeconds != 30 {
+		t.Errorf("expected default idle 30s, got %d", f.idleBufferSeconds)
+	}
+	f2 := NewNotifyForwarder(nil, nil, "dev-1", "token-1", "", -1, -1, -1)
 	if f2.bufferSeconds != 60 {
 		t.Errorf("expected default 60s for negative, got %d", f2.bufferSeconds)
 	}
 	if f2.permissionBufferSeconds != 5 {
 		t.Errorf("expected default permission 5s for negative, got %d", f2.permissionBufferSeconds)
+	}
+	if f2.idleBufferSeconds != 30 {
+		t.Errorf("expected default idle 30s for negative, got %d", f2.idleBufferSeconds)
 	}
 }
 
@@ -56,7 +63,7 @@ func TestNotifyForwarder_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := NewNotifyForwarder(nil, nil, tt.deviceID, tt.deviceToken, "", 60, 5)
+			f := NewNotifyForwarder(nil, nil, tt.deviceID, tt.deviceToken, "", 60, 5, 30)
 			err := f.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -83,7 +90,7 @@ func TestNotifyForwarder_PermissionBatch_Window(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -152,7 +159,7 @@ func TestNotifyForwarder_PermissionSingle_SendsIndividual(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -199,7 +206,7 @@ func TestNotifyForwarder_PermissionBatch_CancelledByResponse(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -253,7 +260,7 @@ func TestNotifyForwarder_QuestionBuffer(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 1, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 1, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -302,7 +309,7 @@ func TestNotifyForwarder_ResponseEvent_NotBuffered(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -341,7 +348,7 @@ func TestNotifyForwarder_IgnoresOtherEvents(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -363,7 +370,7 @@ func TestNotifyForwarder_IgnoresOtherEvents(t *testing.T) {
 	}
 }
 
-func TestNotifyForwarder_SessionIdle_ImmediateForward(t *testing.T) {
+func TestNotifyForwarder_SessionIdle_Debounced(t *testing.T) {
 	var receivedPayload map[string]any
 	var mu sync.Mutex
 
@@ -379,7 +386,8 @@ func TestNotifyForwarder_SessionIdle_ImmediateForward(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	// idleBuffer=1s → fast test; permission/question values don't matter here
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -389,18 +397,85 @@ func TestNotifyForwarder_SessionIdle_ImmediateForward(t *testing.T) {
 
 	eventBus.Emit(agent.Event{
 		Type:           "session.idle",
-		ConversationID: "sess-5",
+		ConversationID: "sess-idle",
 	})
 
+	// Within the debounce window → NOT forwarded yet
 	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	if receivedPayload != nil {
+		t.Fatalf("expected no notification during debounce window, got %v", receivedPayload["type"])
+	}
+	mu.Unlock()
+
+	// After the window → forwarded
+	time.Sleep(1100 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
 	if receivedPayload == nil {
-		t.Fatal("expected server to receive idle notification")
+		t.Fatal("expected server to receive idle notification after debounce window")
 	}
 	if receivedPayload["type"] != "idle" {
 		t.Errorf("expected type=idle, got %v", receivedPayload["type"])
+	}
+	if receivedPayload["sessionID"] != "sess-idle" {
+		t.Errorf("expected sessionID=sess-idle, got %v", receivedPayload["sessionID"])
+	}
+}
+
+func TestNotifyForwarder_SessionIdle_ResetOnNewIdle(t *testing.T) {
+	var receivedCount int
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedCount++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eventBus := runtime.NewEventBus()
+	cfg := &config.Config{CloudBaseURL: server.URL}
+	client := NewClient(cfg)
+	// idleBuffer=1s
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.Start(ctx)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// First idle → starts 1s timer
+	eventBus.Emit(agent.Event{
+		Type:           "session.idle",
+		ConversationID: "sess-reset",
+	})
+	time.Sleep(600 * time.Millisecond)
+
+	// Second idle within window → resets timer
+	eventBus.Emit(agent.Event{
+		Type:           "session.idle",
+		ConversationID: "sess-reset",
+	})
+
+	// 600ms after the FIRST idle (= original timer expiry) → still nothing
+	// because the second idle reset the timer
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	if receivedCount != 0 {
+		t.Fatalf("expected 0 notifications (timer reset by second idle), got %d", receivedCount)
+	}
+	mu.Unlock()
+
+	// After the second idle's 1s window expires → exactly 1 notification
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if receivedCount != 1 {
+		t.Errorf("expected 1 notification after debounce, got %d", receivedCount)
 	}
 }
 
@@ -408,7 +483,7 @@ func TestNotifyForwarder_ContextCancellation(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: "http://127.0.0.1:1"}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	f.Start(ctx)
@@ -491,7 +566,7 @@ func TestNotifyForwarder_PathResolution(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1, 30)
 
 	eventBus.RegisterSessionCwd("sess-100", "/home/user/project")
 
@@ -541,7 +616,7 @@ func TestNotifyForwarder_ResponseEvent_SessionIDFromData(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 30)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -607,7 +682,7 @@ func TestNotifyForwarder_ActiveWorkspaceFallback(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 1, 30)
 
 	eventBus.SetActiveWorkspace("/home/user/my-project")
 
@@ -656,7 +731,7 @@ func TestNotifyForwarder_SessionCwdTakesPriorityOverActive(t *testing.T) {
 	eventBus := runtime.NewEventBus()
 	cfg := &config.Config{CloudBaseURL: server.URL}
 	client := NewClient(cfg)
-	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 1, 5)
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 1, 5, 30)
 
 	eventBus.SetActiveWorkspace("/home/user/default")
 	eventBus.RegisterSessionCwd("sess-300", "/home/user/specific-project")
@@ -706,5 +781,64 @@ func TestIsResponseEvent(t *testing.T) {
 				t.Errorf("isResponseEvent(%q) = %v, want %v", tt.eventType, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNotifyForwarder_SessionIdle_PerSessionIsolation(t *testing.T) {
+	var received []string
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var p map[string]any
+		json.Unmarshal(body, &p)
+		mu.Lock()
+		if sid, ok := p["sessionID"].(string); ok {
+			received = append(received, sid)
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	eventBus := runtime.NewEventBus()
+	cfg := &config.Config{CloudBaseURL: server.URL}
+	client := NewClient(cfg)
+	// idleBuffer=1s
+	f := NewNotifyForwarder(eventBus, client, "dev-1", "token-abc", "", 60, 5, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	// sess-A starts its own 1s timer
+	eventBus.Emit(agent.Event{Type: "session.idle", ConversationID: "sess-A"})
+
+	// 600ms later, sess-B emits. If the debounce key were shared (not per-session),
+	// this would reset sess-A's timer and delay its flush past 1s.
+	time.Sleep(600 * time.Millisecond)
+	eventBus.Emit(agent.Event{Type: "session.idle", ConversationID: "sess-B"})
+
+	// 600ms after sess-A's emit (= original 1s window expiry for A).
+	// If isolation holds, A already flushed; B has ~400ms left on its own timer.
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	gotA := slices.Contains(received, "sess-A")
+	gotB := slices.Contains(received, "sess-B")
+	mu.Unlock()
+	if !gotA {
+		t.Fatalf("sess-A should have flushed independently by now; received=%v", received)
+	}
+	if gotB {
+		t.Fatalf("sess-B should NOT have flushed yet (its own timer not expired); received=%v", received)
+	}
+
+	// Wait for sess-B's own 1s window to expire
+	time.Sleep(700 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(received, "sess-B") {
+		t.Errorf("sess-B should have flushed after its own window; received=%v", received)
 	}
 }
