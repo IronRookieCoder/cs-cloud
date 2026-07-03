@@ -191,6 +191,56 @@ func (s *Server) handleConversationCommandAsync(w http.ResponseWriter, r *http.R
 // --- Events ---
 // handleEvents is implemented in handle_events.go (merged SSE: backend proxy + host events)
 
+// --- Config ---
+
+// @Summary      Get agent config
+// @Description  Proxies to the agent backend to retrieve supported config descriptors and current values.
+// @Tags         Agent
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Failure      503  {object}  envelope
+// @Router       /agents/config [get]
+func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	s.handleProxy(w, r)
+}
+
+// @Summary      Patch agent config
+// @Description  Proxies to the agent backend to update supported config values.
+// @Tags         Agent
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Failure      503  {object}  envelope
+// @Router       /agents/config [patch]
+func (s *Server) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
+	s.handleProxy(w, r)
+}
+
+// @Summary      Get model config
+// @Description  Proxies to the agent backend to retrieve saved agent model/provider configuration.
+// @Tags         Agent
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Failure      503  {object}  envelope
+// @Router       /agents/models/config [get]
+func (s *Server) handleProviderConfigGet(w http.ResponseWriter, r *http.Request) {
+	s.handleProxy(w, r)
+}
+
+// @Summary      Patch model config
+// @Description  Proxies to the agent backend to update saved agent model/provider configuration.
+// @Tags         Agent
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Failure      503  {object}  envelope
+// @Router       /agents/models/config [patch]
+func (s *Server) handleProviderConfigPatch(w http.ResponseWriter, r *http.Request) {
+	s.handleProxy(w, r)
+}
+
 // --- Permissions ---
 
 // @Summary      List pending permissions

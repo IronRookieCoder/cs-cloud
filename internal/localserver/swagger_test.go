@@ -36,6 +36,8 @@ func TestGeneratedSpecContainsPaths(t *testing.T) {
 func TestGeneratedSpecAllEndpointsPresent(t *testing.T) {
 	expectedPaths := []string{
 		"/runtime/health",
+		"/agents/config",
+		"/agents/models/config",
 		"/runtime/config",
 		"/runtime/files",
 		"/runtime/files/content",

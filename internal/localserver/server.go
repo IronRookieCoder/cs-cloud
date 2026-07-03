@@ -62,8 +62,8 @@ type Server struct {
 
 	tunnelStatus TunnelStatusProvider
 
-	prewarmMu   sync.Mutex
-	prewarmMap  map[string]*prewarmState
+	prewarmMu  sync.Mutex
+	prewarmMap map[string]*prewarmState
 
 	// Host event watchers
 	fileWatcher *filewatcher.Watcher
@@ -135,6 +135,10 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("GET /agents/commands", s.handleCommands)
 	api.HandleFunc("GET /agents/mcp", s.handleAgentMCP)
 	api.HandleFunc("GET /agents/lsp", s.handleAgentLSP)
+	api.HandleFunc("GET /agents/config", s.handleConfigGet)
+	api.HandleFunc("PATCH /agents/config", s.handleConfigPatch)
+	api.HandleFunc("GET /agents/models/config", s.handleProviderConfigGet)
+	api.HandleFunc("PATCH /agents/models/config", s.handleProviderConfigPatch)
 
 	api.HandleFunc("POST /conversations", s.handleConversationCreate)
 	api.HandleFunc("GET /conversations", s.handleConversationList)

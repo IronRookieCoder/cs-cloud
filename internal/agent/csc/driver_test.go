@@ -1,6 +1,7 @@
 package csc
 
 import (
+	"net/http"
 	"os/exec"
 	"runtime"
 	"testing"
@@ -66,4 +67,37 @@ func TestDriverVersionDefaultCli(t *testing.T) {
 	if ver == "" {
 		t.Error("Version() with empty command should still detect csc CLI version")
 	}
+}
+
+func TestProxyRoutesIncludeConfig(t *testing.T) {
+	d := NewDriver(agent.ParseCommand("csc serve"))
+	routes := d.ProxyRoutes()
+
+	assertProxyRoute(t, routes, http.MethodGet, "/agents/config", "/config")
+	assertProxyRoute(t, routes, http.MethodPatch, "/agents/config", "/config")
+}
+
+func TestProxyRoutesIncludeProviderConfig(t *testing.T) {
+	d := NewDriver(agent.ParseCommand("csc serve"))
+	routes := d.ProxyRoutes()
+
+	assertProxyRoute(t, routes, http.MethodGet, "/agents/models/config", "/provider/config")
+	assertProxyRoute(t, routes, http.MethodPatch, "/agents/models/config", "/provider/config")
+}
+
+func assertProxyRoute(t *testing.T, routes []agent.ProxyRoute, method, prefix, wantRewrite string) {
+	t.Helper()
+	for _, route := range routes {
+		if route.Method != method || route.Prefix != prefix {
+			continue
+		}
+		if got := route.Rewrite(nil); got != wantRewrite {
+			t.Fatalf("%s %s rewrite = %q, want %s", method, prefix, got, wantRewrite)
+		}
+		if route.Transform != nil {
+			t.Fatalf("%s %s should proxy request bodies without transforming them", method, prefix)
+		}
+		return
+	}
+	t.Fatalf("missing %s %s proxy route", method, prefix)
 }

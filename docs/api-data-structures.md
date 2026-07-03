@@ -455,6 +455,8 @@
 | cs-cloud 路径 | agent 后端路径 | 说明 |
 |---------------|---------------|------|
 | `GET /agents/models` | `GET /provider/capabilities` | 获取可用模型列表 |
+| `GET /agents/models/config` | `GET /provider/config` | 获取当前 agent 后端/provider 配置 |
+| `PATCH /agents/models/config` | `PATCH /provider/config` | 更新当前agent 后端/provider 配置 |
 | `GET /agents/session-modes` | `GET /agent` | 获取 agent 会话模式 |
 | `GET /agents/commands` | `GET /command` | 获取可用命令列表 |
 | `GET /agents/mcp` | `GET /mcp` | 获取 MCP 状态 |
@@ -1051,7 +1053,9 @@ WebSocket 终端输入通道。
 | 10 | GET | `/api/v1/agents` | 本地 | `agent_handlers.go:16` |
 | 11 | GET | `/api/v1/agents/health` | 本地 | `agent_handlers.go:43` |
 | 12 | GET | `/api/v1/agents/models` | 代理→`/provider/capabilities` | `driver_opencode.go:97` |
-| 13 | GET | `/api/v1/agents/session-modes` | 代理→`/agent` | `driver_opencode.go:98` |
+| 12a | GET | `/api/v1/agents/models/config` | 代理→`/provider/config` | `driver_opencode.go:98` |
+| 12b | PATCH | `/api/v1/agents/models/config` | 代理→`/provider/config` | `driver_opencode.go:99` |
+| 13 | GET | `/api/v1/agents/session-modes` | 代理→`/agent` | `driver_opencode.go:100` |
 | 14 | GET | `/api/v1/agents/commands` | 代理→`/command` | `driver_opencode.go:99` |
 | 15 | GET | `/api/v1/agents/mcp` | 代理→`/mcp` | `driver_opencode.go:100` |
 | 16 | GET | `/api/v1/agents/lsp` | 代理→`/lsp` | `driver_opencode.go:101` |
