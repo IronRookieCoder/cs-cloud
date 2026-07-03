@@ -200,7 +200,7 @@ func (s *Server) handleConversationCommandAsync(w http.ResponseWriter, r *http.R
 // @Produce      json
 // @Success      200  {object}  map[string]any
 // @Failure      503  {object}  envelope
-// @Router       /config [get]
+// @Router       /agents/config [get]
 func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	s.handleProxy(w, r)
 }
@@ -212,31 +212,31 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 // @Produce      json
 // @Success      200  {object}  map[string]any
 // @Failure      503  {object}  envelope
-// @Router       /config [patch]
+// @Router       /agents/config [patch]
 func (s *Server) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	s.handleProxy(w, r)
 }
 
-// @Summary      Get provider config
-// @Description  Proxies to the agent backend to retrieve saved provider and model configuration.
+// @Summary      Get model config
+// @Description  Proxies to the agent backend to retrieve saved agent model/provider configuration.
 // @Tags         Agent
 // @Accept       json
 // @Produce      json
 // @Success      200  {object}  map[string]any
 // @Failure      503  {object}  envelope
-// @Router       /provider/config [get]
+// @Router       /agents/models/config [get]
 func (s *Server) handleProviderConfigGet(w http.ResponseWriter, r *http.Request) {
 	s.handleProxy(w, r)
 }
 
-// @Summary      Patch provider config
-// @Description  Proxies to the agent backend to update saved provider and model configuration.
+// @Summary      Patch model config
+// @Description  Proxies to the agent backend to update saved agent model/provider configuration.
 // @Tags         Agent
 // @Accept       json
 // @Produce      json
 // @Success      200  {object}  map[string]any
 // @Failure      503  {object}  envelope
-// @Router       /provider/config [patch]
+// @Router       /agents/models/config [patch]
 func (s *Server) handleProviderConfigPatch(w http.ResponseWriter, r *http.Request) {
 	s.handleProxy(w, r)
 }

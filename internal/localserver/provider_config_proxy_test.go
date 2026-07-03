@@ -38,8 +38,8 @@ func (d *providerConfigProxyDriver) HealthCheck(context.Context, string) (*agent
 
 func (d *providerConfigProxyDriver) ProxyRoutes() []agent.ProxyRoute {
 	return []agent.ProxyRoute{
-		{Method: http.MethodGet, Prefix: "/provider/config", Rewrite: agent.RewriteTo("/provider/config")},
-		{Method: http.MethodPatch, Prefix: "/provider/config", Rewrite: agent.RewriteTo("/provider/config")},
+		{Method: http.MethodGet, Prefix: "/agents/models/config", Rewrite: agent.RewriteTo("/provider/config")},
+		{Method: http.MethodPatch, Prefix: "/agents/models/config", Rewrite: agent.RewriteTo("/provider/config")},
 	}
 }
 
@@ -144,7 +144,7 @@ func TestProviderConfigProxyForwardsRequestsToBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "/api/v1/provider/config", strings.NewReader(tt.body))
+			req := httptest.NewRequest(tt.method, "/api/v1/agents/models/config", strings.NewReader(tt.body))
 			if tt.body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -167,4 +167,5 @@ func TestProviderConfigProxyForwardsRequestsToBackend(t *testing.T) {
 			}
 		})
 	}
+
 }

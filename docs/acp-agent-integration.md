@@ -1013,6 +1013,8 @@ Auto-inference rules when `X-Driver` is omitted:
 | `GET` | `/agents` | List all detected agent runtimes (aggregated from all drivers) |
 | `GET` | `/agents/health` | Health check for agent runtime (X-Backend selects, default if omitted) |
 | `GET` | `/agents/models` | Probe model info for agent runtime (X-Backend selects) |
+| `GET` | `/agents/models/config` | Get model/provider configuration for agent runtime (X-Backend selects) |
+| `PATCH` | `/agents/models/config` | Update model/provider configuration for agent runtime (X-Backend selects) |
 | `GET` | `/agents/session-modes` | List session modes for agent runtime (X-Backend selects) |
 | `GET` | `/agents/config` | Get/set agent runtime configuration (X-Backend selects) |
 | `GET` | `/drivers` | List registered drivers |

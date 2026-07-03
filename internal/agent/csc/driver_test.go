@@ -73,16 +73,16 @@ func TestProxyRoutesIncludeConfig(t *testing.T) {
 	d := NewDriver(agent.ParseCommand("csc serve"))
 	routes := d.ProxyRoutes()
 
-	assertProxyRoute(t, routes, http.MethodGet, "/config", "/config")
-	assertProxyRoute(t, routes, http.MethodPatch, "/config", "/config")
+	assertProxyRoute(t, routes, http.MethodGet, "/agents/config", "/config")
+	assertProxyRoute(t, routes, http.MethodPatch, "/agents/config", "/config")
 }
 
 func TestProxyRoutesIncludeProviderConfig(t *testing.T) {
 	d := NewDriver(agent.ParseCommand("csc serve"))
 	routes := d.ProxyRoutes()
 
-	assertProxyRoute(t, routes, http.MethodGet, "/provider/config", "/provider/config")
-	assertProxyRoute(t, routes, http.MethodPatch, "/provider/config", "/provider/config")
+	assertProxyRoute(t, routes, http.MethodGet, "/agents/models/config", "/provider/config")
+	assertProxyRoute(t, routes, http.MethodPatch, "/agents/models/config", "/provider/config")
 }
 
 func assertProxyRoute(t *testing.T, routes []agent.ProxyRoute, method, prefix, wantRewrite string) {

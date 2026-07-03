@@ -165,6 +165,8 @@ func New(opts ...Option) *Server {
     // Agent runtime 操作（X-Backend 可选，省略则用默认 runtime）
     api.Handle("GET /agents/health", agentMw(http.HandlerFunc(s.handleAgentHealth)))
     api.Handle("GET /agents/models", agentMw(http.HandlerFunc(s.handleAgentModels)))
+    api.Handle("GET /agents/models/config", agentMw(http.HandlerFunc(s.handleAgentModelConfigGet)))
+    api.Handle("PATCH /agents/models/config", agentMw(http.HandlerFunc(s.handleAgentModelConfigPatch)))
     api.Handle("GET /agents/session-modes", agentMw(http.HandlerFunc(s.handleAgentSessionModes)))
     api.Handle("GET /agents/config", agentMw(http.HandlerFunc(s.handleAgentConfig)))
 
@@ -422,6 +424,7 @@ device-client.ts 中的调用路径对应关系：
 | `/permission` | `/api/v1/interactions/permissions` | Agent | X-Backend 可选 |
 | `/question` | `/api/v1/interactions/questions` | Agent | X-Backend 可选 |
 | `/provider/capabilities` | `/api/v1/agents/models` | Agent | X-Backend 可选 |
+| `/provider/config` | `/api/v1/agents/models/config` | Agent | 模型/provider 配置，X-Backend 可选 |
 | `/agent` | `/api/v1/agents/session-modes` | Agent | 会话模式列表，X-Backend 可选 |
 | — | `/api/v1/agents` | Agent | 可用 runtime 列表 |
 

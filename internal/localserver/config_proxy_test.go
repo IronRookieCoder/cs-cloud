@@ -38,8 +38,8 @@ func (d *configProxyDriver) HealthCheck(context.Context, string) (*agent.HealthR
 
 func (d *configProxyDriver) ProxyRoutes() []agent.ProxyRoute {
 	return []agent.ProxyRoute{
-		{Method: http.MethodGet, Prefix: "/config", Rewrite: agent.RewriteTo("/config")},
-		{Method: http.MethodPatch, Prefix: "/config", Rewrite: agent.RewriteTo("/config")},
+		{Method: http.MethodGet, Prefix: "/agents/config", Rewrite: agent.RewriteTo("/config")},
+		{Method: http.MethodPatch, Prefix: "/agents/config", Rewrite: agent.RewriteTo("/config")},
 	}
 }
 
@@ -131,7 +131,7 @@ func TestConfigProxyForwardsRequestsToBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "/api/v1/config", strings.NewReader(tt.body))
+			req := httptest.NewRequest(tt.method, "/api/v1/agents/config", strings.NewReader(tt.body))
 			if tt.body != "" {
 				req.Header.Set("Content-Type", "application/json")
 			}
@@ -154,4 +154,5 @@ func TestConfigProxyForwardsRequestsToBackend(t *testing.T) {
 			}
 		})
 	}
+
 }
