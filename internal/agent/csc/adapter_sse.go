@@ -276,19 +276,11 @@ func adaptResultEvent(sessionID string, payload map[string]any, ss *streamingSta
 	ss.toolUseParts = make(map[string]*toolPartMeta)
 	ss.turnParentID = ""
 
-	frames = append(frames,
-		frame("session.status", map[string]any{
-			"sessionID": sessionID,
-			"status":    map[string]any{"type": "idle"},
-		}),
-		frame("session.idle", map[string]any{
-			"sessionID": sessionID,
-		}),
-		frame("session.diff", map[string]any{
-			"sessionID": sessionID,
-			"diff":      []any{},
-		}),
-	)
+	// Note: csc owns the idle event chain (session.status{idle},
+	// session.idle, session.diff) and emits them based on its own
+	// state machine (e.g. skipping them on compact-turn boundaries
+	// to avoid transient idle flicker). cs-cloud is a transparent
+	// proxy here — do not synthesize idle frames.
 	return frames
 }
 
