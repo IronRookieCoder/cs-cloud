@@ -133,6 +133,10 @@ func runSession(ctx context.Context, gatewayURL, deviceID, deviceToken string, l
 		return fmt.Errorf("ws connect failed: %w", err)
 	}
 
+	// Allow large WebSocket messages so yamux frames (which carry
+	// full HTTP request/response bodies) are not rejected.
+	conn.SetReadLimit(10 * 1024 * 1024)
+
 	logger.Info("[tunnel] connected, device_id=%s", deviceID)
 
 	if onSessionChange != nil {

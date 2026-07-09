@@ -161,6 +161,11 @@ func New(opts ...Option) *Server {
 
 	api.HandleFunc("GET /events", s.handleEvents)
 
+	api.HandleFunc("POST /attachments", s.handleAttachmentUpload)
+	api.HandleFunc("GET /attachments", s.handleAttachmentList)
+	api.HandleFunc("GET /attachments/{id}", s.handleAttachmentGet)
+	api.HandleFunc("DELETE /attachments", s.handleAttachmentGC)
+
 	api.HandleFunc("GET /agents/favorites", s.handleFavoriteList)
 	api.HandleFunc("POST /agents/favorites/{id}/load", s.handleFavoriteLoad)
 	api.HandleFunc("POST /agents/favorites/{id}/unload", s.handleFavoriteUnload)
@@ -247,6 +252,8 @@ func (s *Server) Start(addr string) error {
 			logger.Error("Failed to start git watcher: %v", err)
 		}
 	}
+
+	s.startAttachmentCleaner()
 
 	go func() {
 		_ = s.http.Serve(ln)

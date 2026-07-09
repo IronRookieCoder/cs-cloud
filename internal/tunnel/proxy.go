@@ -61,10 +61,6 @@ func handleStream(stream net.Conn, localPort int) {
 		return
 	}
 
-	if contentLength > 1024*1024 {
-		logger.Info("[tunnel] large request: %s %s, body=%d bytes", method, path, contentLength)
-	}
-
 	isWS := strings.ToLower(headers["upgrade"]) == "websocket"
 	if isWS {
 		var body []byte
