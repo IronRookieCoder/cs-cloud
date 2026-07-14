@@ -67,6 +67,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	if transformFunc != nil && r.Body != nil {
 		r.Body = transformFunc(r.Body)
+		// Prompt routes carry attachment URLs in the wire format
+		// (`{baseUrl}/api/v1/attachments/{id}`). When forwarding to a
+		// same-device agent, rewrite those URLs to file://${absPath} so
+		// csc's compat layer can stream bytes from disk instead of
+		// trying to fetch a cloud-proxy URL it has no auth for.
+		if isPromptRoute(cleanPath) {
+			r.Body = s.RewriteAttachmentURLs(r.Body)
+		}
 		// 设置为未知长度，让 ReverseProxy 流式处理
 		r.ContentLength = -1
 		r.Header.Set("Transfer-Encoding", "chunked")
@@ -148,6 +156,16 @@ func extractPathValues(r *http.Request) map[string]string {
 		}
 	}
 	return vals
+}
+
+// isPromptRoute reports whether cleanPath targets the prompt endpoint
+// (sync or async). Used to gate the attachment-URL rewrite pass to the
+// only routes whose bodies carry attachment references.
+func isPromptRoute(cleanPath string) bool {
+	if !strings.HasPrefix(cleanPath, "/conversations/") {
+		return false
+	}
+	return strings.HasSuffix(cleanPath, "/prompt") || strings.HasSuffix(cleanPath, "/prompt/async")
 }
 
 func matchRoute(path, pattern string) bool {
