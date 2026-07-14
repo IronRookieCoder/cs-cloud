@@ -213,6 +213,8 @@ func dispatch(a *app.App) error {
 		return upgradeCmd(a)
 	case "serve":
 		return serve(a)
+	case "gc":
+		return gc(a)
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
@@ -254,6 +256,7 @@ func printUsage() {
 		{"login", "Login via browser OAuth"},
 		{"logout", "Delete credentials and device info"},
 		{"serve", "Run server in foreground (no daemon)"},
+		{"gc", "Remove expired attachments and report freed bytes"},
 	}
 	fmt.Print(renderKV(cmds))
 }

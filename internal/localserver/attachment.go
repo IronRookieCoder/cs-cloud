@@ -18,9 +18,9 @@ import (
 
 // Attachment defaults — see docs/attachment-contract-v2.md §3.4 / §8.3.
 const (
-	attachmentMaxSize   = 10 << 20          // 10 MB per file
-	attachmentTTL       = 7 * 24 * time.Hour // default retention
-	attachmentCleanTick = 30 * time.Minute   // background gc cadence
+	attachmentMaxSize    = 10 << 20           // 10 MB per file
+	attachmentTTL        = 7 * 24 * time.Hour // default retention
+	attachmentSweepDeb   = 5 * time.Minute    // post-upload gc debounce window
 )
 
 // attachmentMeta is the on-disk metadata sidecar for each attachment.
@@ -163,6 +163,11 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 
 	logger.Info("[attachment] uploaded id=%s size=%d mime=%s sha256=%s",
 		id, written, mime, sha[:12])
+
+	// Post-upload sweep: cheap lazy GC. Skipped if a sweep ran within the
+	// debounce window, so burst uploads don't pay N× the scan cost. Runs
+	// async — the upload response isn't blocked on cleanup.
+	s.maybeSweepAttachments(dir)
 
 	writeOK(w, map[string]any{
 		"id":         meta.ID,
@@ -312,74 +317,44 @@ func (s *Server) handleAttachmentGC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type result struct {
-		DeletedCount int   `json:"deleted_count"`
-		FreedBytes   int64 `json:"freed_bytes"`
-	}
-	res := result{}
-	now := time.Now().Unix()
-
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		metaPath := filepath.Join(dir, e.Name(), "meta.json")
-		raw, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue
-		}
-		var m attachmentMeta
-		if json.Unmarshal(raw, &m) != nil {
-			continue
-		}
-		if m.ExpiresAt > now {
-			continue
-		}
-		if info, err := os.Stat(m.AbsPath); err == nil {
-			res.FreedBytes += info.Size()
-		}
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			logger.Warn("[attachment] failed to remove expired %s: %v", e.Name(), err)
-			continue
-		}
-		res.DeletedCount++
-	}
-
-	logger.Info("[attachment] gc: deleted=%d freed=%d bytes", res.DeletedCount, res.FreedBytes)
-	writeOK(w, res)
-}
-
-// startAttachmentCleaner launches a background goroutine that periodically
-// removes expired attachments from the cache directory.
-func (s *Server) startAttachmentCleaner() {
-	dir := s.attachmentsDir()
-	if dir == "" {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(attachmentCleanTick)
-		defer ticker.Stop()
-		for range ticker.C {
-			cleanExpiredAttachments(dir)
-		}
-	}()
-}
-
-func cleanExpiredAttachments(dir string) {
-	now := time.Now().Unix()
-	entries, err := os.ReadDir(dir)
+	deleted, freedBytes, err := GcExpiredAttachments(dir)
 	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "IO_ERROR", err.Error())
 		return
 	}
-	deleted := 0
+
+	logger.Info("[attachment] gc: deleted=%d freed=%d bytes", deleted, freedBytes)
+	writeOK(w, map[string]any{
+		"deleted_count": deleted,
+		"freed_bytes":   freedBytes,
+	})
+}
+
+// GcExpiredAttachments scans dir and removes every attachment whose meta.json
+// reports ExpiresAt ≤ now. Returns the count of removed entries and the total
+// bytes freed (sized from stat before removal). A missing directory is treated
+// as "nothing to GC" (0/0, no error) so callers running independently of the
+// daemon don't see spurious failures before any upload has happened. Other
+// read-dir errors are reported via err; per-entry failures are logged and
+// skipped so a single corrupted entry doesn't abort the sweep.
+func GcExpiredAttachments(dir string) (deleted int, freedBytes int64, err error) {
+	now := time.Now().Unix()
+
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return 0, 0, nil
+		}
+		return 0, 0, readErr
+	}
+
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		metaPath := filepath.Join(dir, e.Name(), "meta.json")
-		raw, err := os.ReadFile(metaPath)
-		if err != nil {
+		raw, ioErr := os.ReadFile(metaPath)
+		if ioErr != nil {
 			continue
 		}
 		var m attachmentMeta
@@ -389,12 +364,42 @@ func cleanExpiredAttachments(dir string) {
 		if m.ExpiresAt > now {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+		if info, statErr := os.Stat(m.AbsPath); statErr == nil {
+			freedBytes += info.Size()
+		}
+		if rmErr := os.RemoveAll(filepath.Join(dir, e.Name())); rmErr != nil {
+			logger.Warn("[attachment] failed to remove expired %s: %v", e.Name(), rmErr)
 			continue
 		}
 		deleted++
 	}
-	if deleted > 0 {
-		logger.Info("[attachment] periodic cleanup: removed %d expired entries", deleted)
+	return deleted, freedBytes, nil
+}
+
+// maybeSweepAttachments runs an async GC pass over the attachments directory,
+// but only if one hasn't run within the attachmentSweepDeb window. This makes
+// post-upload cleanup self-rate-limited: a burst of uploads pays the scan
+// cost at most once per debounce window. The caller (upload handler) is never
+// blocked — sweep runs in its own goroutine.
+func (s *Server) maybeSweepAttachments(dir string) {
+	if dir == "" {
+		return
 	}
+	s.gcSweepMu.Lock()
+	if time.Since(s.lastGcSweep) < attachmentSweepDeb {
+		s.gcSweepMu.Unlock()
+		return
+	}
+	s.lastGcSweep = time.Now()
+	s.gcSweepMu.Unlock()
+
+	go func() {
+		deleted, _, err := GcExpiredAttachments(dir)
+		if err != nil {
+			return
+		}
+		if deleted > 0 {
+			logger.Info("[attachment] post-upload sweep: removed %d expired entries", deleted)
+		}
+	}()
 }

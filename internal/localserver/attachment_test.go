@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestServer wires a Server with a temp rootDir for attachment tests.
@@ -286,5 +286,213 @@ func TestAttachmentUploadReturnsErrorWhenStorageUnconfigured(t *testing.T) {
 	}
 }
 
-// io.Reader sanity (avoids unused import if not directly needed).
-var _ = io.Discard
+// writeAttachmentOnDisk creates an attachment directory with meta.json and a
+// binary file. If expiresAt <= 0, the meta reports ExpiresAt = 1 (already
+// expired); otherwise it reports ExpiresAt = now + expiresAt.
+func writeAttachmentOnDisk(t *testing.T, root, id string, payload []byte, expiresAt int64) string {
+	t.Helper()
+	storeDir := filepath.Join(root, "attachments", id)
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", storeDir, err)
+	}
+	binPath := filepath.Join(storeDir, id+".bin")
+	if err := os.WriteFile(binPath, payload, 0o644); err != nil {
+		t.Fatalf("write bin %s: %v", binPath, err)
+	}
+	var exp int64
+	if expiresAt <= 0 {
+		exp = 1
+	} else {
+		exp = time.Now().Unix() + expiresAt
+	}
+	meta := attachmentMeta{
+		ID:        id,
+		AbsPath:   binPath,
+		Mime:      "application/octet-stream",
+		Size:      int64(len(payload)),
+		Sha256:    "",
+		Filename:  id + ".bin",
+		CreatedAt: time.Now().Unix(),
+		ExpiresAt: exp,
+	}
+	raw, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(storeDir, "meta.json"), raw, 0o644); err != nil {
+		t.Fatalf("write meta %s: %v", storeDir, err)
+	}
+	return binPath
+}
+
+// TestGcExpiredAttachmentsMissingDirReturnsOK covers the "nothing to GC yet"
+// contract: when the attachments directory doesn't exist (e.g. CLI gc run
+// before any upload), the function returns 0/0/nil rather than an error.
+func TestGcExpiredAttachmentsMissingDirReturnsOK(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "attachments", "does-not-exist")
+	deleted, freed, err := GcExpiredAttachments(missing)
+	if err != nil {
+		t.Fatalf("err = %v; want nil for missing dir", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d; want 0", deleted)
+	}
+	if freed != 0 {
+		t.Errorf("freed = %d; want 0", freed)
+	}
+}
+
+// TestGcExpiredAttachmentsPreservesFreshAndRemovesExpired mixes one expired
+// and one fresh entry in the same directory. Only the expired one should be
+// removed; the fresh one must survive and contribute nothing to freed bytes.
+func TestGcExpiredAttachmentsPreservesFreshAndRemovesExpired(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	expiredBytes := []byte("expired-payload-xxxx")
+	freshBytes := []byte("fresh-payload-yyyy")
+	writeAttachmentOnDisk(t, root, "expired-1", expiredBytes, 0)        // 0 → expired
+	writeAttachmentOnDisk(t, root, "fresh-1", freshBytes, 60*60)        // +1h fresh
+
+	deleted, freed, err := GcExpiredAttachments(dir)
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d; want 1", deleted)
+	}
+	if freed != int64(len(expiredBytes)) {
+		t.Errorf("freed = %d; want %d", freed, len(expiredBytes))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "expired-1")); err == nil {
+		t.Errorf("expired-1 dir still present after gc")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fresh-1")); err != nil {
+		t.Errorf("fresh-1 dir removed by gc; should have been preserved: %v", err)
+	}
+}
+
+// TestGcExpiredAttachmentsSkipsCorruptMeta verifies a single bad entry
+// (missing meta.json, malformed JSON) does not abort the sweep — other
+// expired entries are still cleaned up.
+func TestGcExpiredAttachmentsSkipsCorruptMeta(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Good expired entry — should be removed.
+	writeAttachmentOnDisk(t, root, "good-expired", []byte("good"), 0)
+
+	// Entry with no meta.json — must be skipped silently.
+	noMetaDir := filepath.Join(dir, "no-meta")
+	if err := os.MkdirAll(noMetaDir, 0o755); err != nil {
+		t.Fatalf("mkdir no-meta: %v", err)
+	}
+
+	// Entry with malformed JSON meta — must be skipped silently.
+	badDir := filepath.Join(dir, "bad-meta")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatalf("mkdir bad-meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "meta.json"), []byte("{not-json"), 0o644); err != nil {
+		t.Fatalf("write bad meta: %v", err)
+	}
+
+	deleted, _, err := GcExpiredAttachments(dir)
+	if err != nil {
+		t.Fatalf("err = %v; want nil even with corrupt entries", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d; want 1 (only the good expired entry)", deleted)
+	}
+	if _, err := os.Stat(noMetaDir); err != nil {
+		t.Errorf("no-meta dir state changed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(badDir); err != nil {
+		t.Errorf("bad-meta dir state changed unexpectedly: %v", err)
+	}
+}
+
+// TestGcExpiredAttachmentsIgnoresNonDirectoryEntries confirms stray files
+// at the attachments root (e.g. .DS_Store, leftovers) are ignored, not
+// treated as expired entries.
+func TestGcExpiredAttachmentsIgnoresNonDirectoryEntries(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Stray file at root level — must not crash, must not be counted.
+	if err := os.WriteFile(filepath.Join(dir, "stray.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("write stray: %v", err)
+	}
+
+	deleted, _, err := GcExpiredAttachments(dir)
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d; want 0 (stray file should not be treated as entry)", deleted)
+	}
+}
+
+// TestMaybeSweepAttachmentsEmptyDirIsNoOp confirms that passing "" short-
+// circuits without touching lastGcSweep (so the next real call still runs).
+func TestMaybeSweepAttachmentsEmptyDirIsNoOp(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.maybeSweepAttachments("")
+	if !s.lastGcSweep.IsZero() {
+		t.Errorf("lastGcSweep = %v; want zero (empty dir should not stamp)", s.lastGcSweep)
+	}
+}
+
+// TestMaybeSweepAttachmentsDebouncesSecondCallWithinWindow covers the
+// debounce contract: a second invocation within the debounce window must
+// not stamp lastGcSweep again, so bursty uploads pay at most one sweep.
+func TestMaybeSweepAttachmentsDebouncesSecondCallWithinWindow(t *testing.T) {
+	s, root := newTestServer(t)
+	dir := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	s.maybeSweepAttachments(dir)
+	first := s.lastGcSweep
+	if first.IsZero() {
+		t.Fatalf("first call did not stamp lastGcSweep")
+	}
+
+	// Simulate a call inside the debounce window by rewinding the stamp
+	// slightly so we don't depend on real-time tick granularity.
+	s.gcSweepMu.Lock()
+	s.lastGcSweep = time.Now().Add(-attachmentSweepDeb / 2)
+	s.gcSweepMu.Unlock()
+
+	s.maybeSweepAttachments(dir)
+	if !s.lastGcSweep.Equal(time.Now().Add(-attachmentSweepDeb / 2)) {
+		t.Errorf("lastGcSweep changed inside debounce window; debounce failed")
+	}
+}
+
+// TestMaybeSweepAttachmentsRunsAfterWindowExpires confirms the debounce
+// window eventually reopens. We pre-stamp lastGcSweep far enough in the past
+// to verify the next call restamps.
+func TestMaybeSweepAttachmentsRunsAfterWindowExpires(t *testing.T) {
+	s, root := newTestServer(t)
+	dir := filepath.Join(root, "attachments")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	s.gcSweepMu.Lock()
+	s.lastGcSweep = time.Now().Add(-attachmentSweepDeb - time.Second)
+	s.gcSweepMu.Unlock()
+
+	s.maybeSweepAttachments(dir)
+	oldStamp := time.Now().Add(-attachmentSweepDeb - time.Second)
+	if !s.lastGcSweep.After(oldStamp) {
+		t.Errorf("lastGcSweep not updated after debounce window expired")
+	}
+}

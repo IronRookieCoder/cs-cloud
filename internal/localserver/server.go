@@ -65,6 +65,11 @@ type Server struct {
 	prewarmMu  sync.Mutex
 	prewarmMap map[string]*prewarmState
 
+	// Post-upload attachment sweep debounce. Guards the lazy GC triggered by
+	// handleAttachmentUpload so bursty uploads don't pay N× the scan cost.
+	gcSweepMu    sync.Mutex
+	lastGcSweep  time.Time
+
 	// Host event watchers
 	fileWatcher *filewatcher.Watcher
 	gitWatcher  *gitwatcher.Watcher
@@ -252,8 +257,6 @@ func (s *Server) Start(addr string) error {
 			logger.Error("Failed to start git watcher: %v", err)
 		}
 	}
-
-	s.startAttachmentCleaner()
 
 	go func() {
 		_ = s.http.Serve(ln)
