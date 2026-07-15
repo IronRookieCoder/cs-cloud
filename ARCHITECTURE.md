@@ -241,6 +241,17 @@ updater.check_latest（Gitee Release API，含失败重试）
 
 当前已支持：`csc`、`cs`、`acp`（兼容协议）。
 
+### 接入新的常驻子系统（Persistent Driver）
+
+`internal/runtime/persistent_driver.go` 定义了 `PersistentDriver` 接口，用于生命周期与 cs-cloud daemon 等长的常驻子系统（如 workflow）。新增常驻子系统：
+
+1. 实现 `runtime.PersistentDriver` 接口（`Name / Start / Stop / Health`）
+2. 在 `internal/agent/{subsystem}/` 下新增实现包，保持与 cs-cloud 核心代码隔离
+3. 在 `internal/app/app.go` 中提供工厂方法，并在 `internal/localserver/server.go` 通过 `WithWorkflowDriver` 风格选项注册
+4. `AgentManager.StartPersistentDrivers` / `StopPersistentDrivers` 会在 daemon 启停时统一调度
+
+当前已接入：`workflow`（cs-workflow 迁移，调用 multica 后端并暴露 `/api/v1/workflow/*` 路由）。
+
 ### 接入新的本地 API
 
 `internal/localserver/router.go` 集中注册路由：
