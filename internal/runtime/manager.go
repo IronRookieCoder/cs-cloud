@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -65,10 +66,16 @@ func (m *AgentManager) StartPersistentDrivers() error {
 	}
 	m.mu.RUnlock()
 
+	var started []PersistentDriver
 	for _, d := range ds {
 		if err := d.Start(); err != nil {
+			// Best-effort rollback of already-started drivers.
+			for _, s := range started {
+				_ = s.Stop()
+			}
 			return fmt.Errorf("start persistent driver %s: %w", d.Name(), err)
 		}
+		started = append(started, d)
 	}
 	return nil
 }
@@ -87,10 +94,7 @@ func (m *AgentManager) StopPersistentDrivers() error {
 			errs = append(errs, fmt.Errorf("stop persistent driver %s: %w", d.Name(), err))
 		}
 	}
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (m *AgentManager) ResolveDriver(backend string) (agent.Driver, error) {

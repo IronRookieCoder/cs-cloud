@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -146,9 +148,66 @@ type trackingPersistentDriver struct {
 	name    string
 	started bool
 	stopped bool
+	fail    struct {
+		start bool
+		stop  bool
+	}
 }
 
-func (d *trackingPersistentDriver) Name() string  { return d.name }
-func (d *trackingPersistentDriver) Start() error  { d.started = true; return nil }
-func (d *trackingPersistentDriver) Stop() error   { d.stopped = true; return nil }
+func (d *trackingPersistentDriver) Name() string { return d.name }
+func (d *trackingPersistentDriver) Start() error {
+	if d.fail.start {
+		return fmt.Errorf("start failed")
+	}
+	d.started = true
+	return nil
+}
+func (d *trackingPersistentDriver) Stop() error {
+	if d.fail.stop {
+		return fmt.Errorf("stop failed")
+	}
+	d.stopped = true
+	return nil
+}
 func (d *trackingPersistentDriver) Health() error { return nil }
+
+func TestAgentManagerStartPersistentDriversRollback(t *testing.T) {
+	m := NewAgentManager(NewEventBus())
+	first := &trackingPersistentDriver{name: "first"}
+	second := &trackingPersistentDriver{name: "second", fail: struct{ start, stop bool }{start: true}}
+	m.RegisterPersistentDriver(first)
+	m.RegisterPersistentDriver(second)
+
+	err := m.StartPersistentDrivers()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !first.started {
+		t.Fatal("expected first driver to be started before failure")
+	}
+	if !first.stopped {
+		t.Fatal("expected first driver to be rolled back")
+	}
+	if second.started {
+		t.Fatal("expected second driver not to be started")
+	}
+}
+
+func TestAgentManagerStopPersistentDriversAggregatesErrors(t *testing.T) {
+	m := NewAgentManager(NewEventBus())
+	d1 := &trackingPersistentDriver{name: "d1", fail: struct{ start, stop bool }{stop: true}}
+	d2 := &trackingPersistentDriver{name: "d2", fail: struct{ start, stop bool }{stop: true}}
+	m.RegisterPersistentDriver(d1)
+	m.RegisterPersistentDriver(d2)
+
+	if err := m.StartPersistentDrivers(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	err := m.StopPersistentDrivers()
+	if err == nil {
+		t.Fatal("expected aggregated error")
+	}
+	if !strings.Contains(err.Error(), "d1") || !strings.Contains(err.Error(), "d2") {
+		t.Fatalf("expected errors from both drivers, got: %v", err)
+	}
+}
