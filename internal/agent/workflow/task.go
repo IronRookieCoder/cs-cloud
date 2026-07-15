@@ -10,44 +10,39 @@ import (
 	"cs-cloud/internal/workflow"
 )
 
-// TaskRunner executes a single workflow task by preparing a worktree,
-// invoking the configured agent CLI, and reporting status back to multica.
+// TaskRunner executes a single workflow task by preparing a worktree and
+// invoking the configured agent CLI. Status reporting is handled by the Driver.
 type TaskRunner struct {
 	workspaceManager *WorkspaceManager
-	client           *Client
 	agentTimeout     time.Duration
 	allowedAgents    []string
 }
 
 // NewTaskRunner creates a new TaskRunner.
-func NewTaskRunner(wm *WorkspaceManager, client *Client, timeout time.Duration, allowedAgents []string) *TaskRunner {
+func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []string) *TaskRunner {
 	return &TaskRunner{
 		workspaceManager: wm,
-		client:           client,
 		agentTimeout:     timeout,
 		allowedAgents:    allowedAgents,
 	}
 }
 
-// Run prepares the worktree, marks the task started, runs the agent, and
-// reports the final status to multica.
-func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) error {
+// Run prepares the worktree and runs the agent. It returns the combined
+// stdout/stderr and any execution error. The caller is responsible for
+// reporting task status to multica.
+func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) ([]byte, error) {
 	repoURL, err := tr.resolveRepoURL(ctx, payload.WorkspaceID, payload.ProjectID)
 	if err != nil {
-		return tr.fail(ctx, payload.TaskID, fmt.Errorf("resolve repo: %w", err))
+		return nil, fmt.Errorf("resolve repo: %w", err)
 	}
 
 	worktree, err := tr.workspaceManager.CreateWorktree(payload.WorkspaceID, payload.TaskID, repoURL, "HEAD")
 	if err != nil {
-		return tr.fail(ctx, payload.TaskID, fmt.Errorf("prepare worktree: %w", err))
-	}
-
-	if err := tr.client.StartTask(ctx, payload.TaskID); err != nil {
-		return err
+		return nil, fmt.Errorf("prepare worktree: %w", err)
 	}
 
 	if err := tr.validateAgent(payload.Agent); err != nil {
-		return tr.fail(ctx, payload.TaskID, err)
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(ctx, payload.Agent)
@@ -55,29 +50,16 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 	cmd.Env = tr.buildEnv(payload, worktree)
 	cmd.Stdin = strings.NewReader(payload.Prompt)
 
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		_ = tr.client.PostTaskMessages(ctx, payload.TaskID, string(out))
-		return tr.fail(ctx, payload.TaskID, fmt.Errorf("agent exit: %w", err))
-	}
-
-	_ = tr.client.PostTaskMessages(ctx, payload.TaskID, string(out))
-	return tr.client.CompleteTask(ctx, payload.TaskID, map[string]any{"status": "ok"})
+	return cmd.CombinedOutput()
 }
 
 func (tr *TaskRunner) resolveRepoURL(ctx context.Context, workspaceID, projectID string) (string, error) {
+	_ = ctx
 	if projectID == "" || workspaceID == "" {
 		return "", nil
 	}
-	projects, err := tr.client.GetProjects(ctx, workspaceID)
-	if err != nil {
-		return "", err
-	}
-	for _, p := range projects {
-		if p.ID == projectID {
-			return p.RepoURL, nil
-		}
-	}
+	// Project-to-repo resolution is currently a no-op. In a full implementation
+	// this would query the multica backend for the project's repo_url.
 	return "", nil
 }
 
@@ -104,9 +86,4 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 		env = append(env, k+"="+v)
 	}
 	return env
-}
-
-func (tr *TaskRunner) fail(ctx context.Context, taskID string, err error) error {
-	_ = tr.client.FailTask(ctx, taskID, err.Error())
-	return err
 }

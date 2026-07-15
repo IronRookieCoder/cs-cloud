@@ -1,7 +1,12 @@
 package workflow
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/runtime"
@@ -68,3 +73,51 @@ func TestDriverTokenProviderNilDeps(t *testing.T) {
 		t.Fatal("expected nil tokenProvider when deps is nil")
 	}
 }
+
+func TestDriverAbortTask(t *testing.T) {
+	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer multica.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"sh"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: multica.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var runErr error
+	go func() {
+		defer wg.Done()
+		runErr = d.RunTask(context.Background(), workflow.TaskRunPayload{
+			TaskID:      "task-1",
+			WorkspaceID: "ws-1",
+			Agent:       "sh",
+			Prompt:      "sleep 10",
+		})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := d.AbortTask("task-1"); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+
+	wg.Wait()
+	if runErr == nil {
+		t.Fatal("expected RunTask to return an error after abort")
+	}
+}
+

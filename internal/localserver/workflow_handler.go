@@ -14,6 +14,7 @@ import (
 type taskRunner interface {
 	runtime.PersistentDriver
 	RunTask(ctx context.Context, payload workflow.TaskRunPayload) error
+	AbortTask(taskID string) error
 }
 
 // handleWorkflowHealth reports whether the workflow driver is healthy.
@@ -56,4 +57,31 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, map[string]string{"status": "started"})
+}
+
+// handleWorkflowTaskAbort cancels a running workflow task.
+func (s *Server) handleWorkflowTaskAbort(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.manager.GetPersistentDriver("workflow")
+	if !ok {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
+		return
+	}
+
+	tr, ok := d.(taskRunner)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", "driver does not support tasks")
+		return
+	}
+
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task id")
+		return
+	}
+
+	if err := tr.AbortTask(taskID); err != nil {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "aborted"})
 }

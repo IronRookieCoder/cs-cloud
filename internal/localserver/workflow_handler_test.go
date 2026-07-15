@@ -103,3 +103,53 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestHandleWorkflowTaskAbort(t *testing.T) {
+	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer multica.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"sh"},
+	}
+	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+		MulticaBaseURL: multica.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	defer d.Stop()
+
+	s := New(WithWorkflowDriver(d))
+
+	// Start a long-running task in the background.
+	go func() {
+		payload := workflow.TaskRunPayload{
+			TaskID:      "task-1",
+			WorkspaceID: "ws-1",
+			Agent:       "sh",
+			Prompt:      "sleep 10",
+		}
+		b, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-1/run", bytes.NewReader(b))
+		rec := httptest.NewRecorder()
+		s.handleWorkflowTaskRun(rec, req)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-1/abort", nil)
+	req.SetPathValue("id", "task-1")
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskAbort(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}

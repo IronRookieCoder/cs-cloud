@@ -13,6 +13,12 @@ import (
 // Compile-time check that Driver implements runtime.PersistentDriver.
 var _ runtime.PersistentDriver = (*Driver)(nil)
 
+// taskRecord tracks a running task so it can be aborted.
+type taskRecord struct {
+	cancel  context.CancelFunc
+	aborted bool
+}
+
 // Driver is a persistent driver for the cs-workflow subsystem.
 type Driver struct {
 	cfg              workflow.Config
@@ -23,6 +29,7 @@ type Driver struct {
 	runner           *TaskRunner
 	state            driverState
 	sem              chan struct{}
+	running          map[string]*taskRecord
 	mu               sync.Mutex
 }
 
@@ -63,8 +70,9 @@ func (d *Driver) Start() error {
 	cache := workflow.NewCache(d.cfg.CacheDir)
 	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
-	d.runner = NewTaskRunner(d.workspaceManager, d.client, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
+	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
+	d.running = make(map[string]*taskRecord)
 
 	if err := d.runtime.Start(); err != nil {
 		d.cleanupOnError()
@@ -84,6 +92,7 @@ func (d *Driver) cleanupOnError() {
 	d.runtime = nil
 	d.runner = nil
 	d.sem = nil
+	d.running = nil
 	d.state = driverStateError
 }
 
@@ -94,6 +103,12 @@ func (d *Driver) Stop() error {
 	if d.runtime != nil {
 		_ = d.runtime.Stop()
 	}
+	for _, rec := range d.running {
+		if rec.cancel != nil {
+			rec.cancel()
+		}
+	}
+	d.running = make(map[string]*taskRecord)
 	d.state = driverStateIdle
 	return nil
 }
@@ -123,8 +138,64 @@ func (d *Driver) RunTask(ctx context.Context, payload workflow.TaskRunPayload) e
 	defer func() { <-d.sem }()
 
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.AgentTimeout)
-	defer cancel()
-	return d.runner.Run(ctx, payload)
+
+	d.mu.Lock()
+	if _, exists := d.running[payload.TaskID]; exists {
+		d.mu.Unlock()
+		cancel()
+		return fmt.Errorf("task %s is already running", payload.TaskID)
+	}
+	rec := &taskRecord{cancel: cancel}
+	d.running[payload.TaskID] = rec
+	d.mu.Unlock()
+
+	defer func() {
+		d.mu.Lock()
+		delete(d.running, payload.TaskID)
+		d.mu.Unlock()
+		cancel()
+	}()
+
+	if err := d.client.StartTask(ctx, payload.TaskID); err != nil {
+		return err
+	}
+
+	out, err := d.runner.Run(ctx, payload)
+	if err != nil {
+		_ = d.client.PostTaskMessages(ctx, payload.TaskID, string(out))
+		if d.aborted(payload.TaskID) {
+			_ = d.client.FailTask(ctx, payload.TaskID, "aborted")
+		} else {
+			_ = d.client.FailTask(ctx, payload.TaskID, err.Error())
+		}
+		return err
+	}
+
+	_ = d.client.PostTaskMessages(ctx, payload.TaskID, string(out))
+	return d.client.CompleteTask(ctx, payload.TaskID, map[string]any{"status": "ok"})
+}
+
+// AbortTask cancels a running task and reports it as aborted to multica.
+func (d *Driver) AbortTask(taskID string) error {
+	d.mu.Lock()
+	rec, ok := d.running[taskID]
+	if !ok {
+		d.mu.Unlock()
+		return fmt.Errorf("task %s is not running", taskID)
+	}
+	rec.aborted = true
+	if rec.cancel != nil {
+		rec.cancel()
+	}
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *Driver) aborted(taskID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rec, ok := d.running[taskID]
+	return ok && rec.aborted
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps
