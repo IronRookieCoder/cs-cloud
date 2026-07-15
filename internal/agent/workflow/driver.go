@@ -32,14 +32,9 @@ func (d *Driver) Stop() error { return nil }
 // Health is a no-op skeleton for Phase 2.
 func (d *Driver) Health() error { return nil }
 
-// Config returns the driver configuration.
-func (d *Driver) Config() workflow.Config { return d.cfg }
-
-// Dependencies returns the driver dependencies.
-func (d *Driver) Dependencies() *Dependencies { return d.deps }
-
-// TokenProvider returns the configured credential provider.
-func (d *Driver) TokenProvider() func() (*provider.Credentials, error) {
+// tokenProvider returns the configured credential provider, or nil if deps
+// have not been supplied.
+func (d *Driver) tokenProvider() func() (*provider.Credentials, error) {
 	if d.deps == nil {
 		return nil
 	}

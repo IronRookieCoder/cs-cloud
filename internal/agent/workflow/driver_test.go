@@ -54,3 +54,10 @@ func TestDriverHoldsConfigAndDeps(t *testing.T) {
 		t.Error("deps mismatch")
 	}
 }
+
+func TestDriverTokenProviderNilDeps(t *testing.T) {
+	d := NewDriver(workflow.DefaultConfig(), nil)
+	if d.tokenProvider() != nil {
+		t.Fatal("expected nil tokenProvider when deps is nil")
+	}
+}

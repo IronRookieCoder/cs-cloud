@@ -68,8 +68,8 @@ type Server struct {
 
 	// Post-upload attachment sweep debounce. Guards the lazy GC triggered by
 	// handleAttachmentUpload so bursty uploads don't pay N× the scan cost.
-	gcSweepMu    sync.Mutex
-	lastGcSweep  time.Time
+	gcSweepMu   sync.Mutex
+	lastGcSweep time.Time
 
 	// Host event watchers
 	fileWatcher *filewatcher.Watcher
@@ -220,7 +220,12 @@ func WithRootDir(dir string) Option {
 }
 
 func WithWorkflowDriver(d *workflow.Driver) Option {
-	return func(s *Server) { s.manager.RegisterPersistentDriver(d) }
+	return func(s *Server) {
+		if d == nil {
+			return
+		}
+		s.manager.RegisterPersistentDriver(d)
+	}
 }
 
 func (s *Server) Manager() *runtime.AgentManager {
@@ -264,6 +269,8 @@ func (s *Server) Start(addr string) error {
 	}
 
 	if err := s.manager.StartPersistentDrivers(); err != nil {
+		// TODO: once persistent drivers perform real initialization, decide
+		// whether a failure should prevent the server from starting.
 		logger.Error("Failed to start persistent drivers: %v", err)
 	}
 
