@@ -1,11 +1,16 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
+
+const gitTimeout = 5 * time.Minute
 
 // WorkspaceManager manages workspace directories and repo caches.
 type WorkspaceManager struct {
@@ -51,7 +56,13 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 	name := repoName(repoURL)
 	cache := filepath.Join(cacheDir, name)
 
-	if _, err := os.Stat(filepath.Join(cache, "HEAD")); err != nil {
+	head := filepath.Join(cache, "HEAD")
+	if _, err := os.Stat(head); err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		// Remove any incomplete cache left by an interrupted clone, then clone.
+		_ = os.RemoveAll(cache)
 		if err := runGit("clone", "--mirror", repoURL, cache); err != nil {
 			return "", fmt.Errorf("clone repo: %w", err)
 		}
@@ -83,11 +94,22 @@ func (wm *WorkspaceManager) CreateWorktree(workspaceID, taskID, repoURL, ref str
 	if err != nil {
 		return "", err
 	}
+
+	// If the worktree exists but was created for a different ref, remove it
+	// so the worktree matches the requested ref.
+	if existingRef, _ := readWorktreeRef(dir); existingRef != "" && existingRef != ref {
+		_ = runGit("-C", cache, "worktree", "remove", "--force", dir)
+		_ = os.RemoveAll(dir)
+	}
+
 	if _, err := os.Stat(dir); err == nil {
 		return dir, nil
 	}
 	if err := runGit("-C", cache, "worktree", "add", dir, ref); err != nil {
 		return "", fmt.Errorf("add worktree: %w", err)
+	}
+	if err := writeWorktreeRef(dir, ref); err != nil {
+		return "", fmt.Errorf("write worktree ref marker: %w", err)
 	}
 	return dir, nil
 }
@@ -101,11 +123,35 @@ func repoName(url string) string {
 	return base
 }
 
-// runGit runs a git command and returns a wrapped error on failure.
+// runGit runs a git command with a default timeout and returns a wrapped error
+// on failure.
 func runGit(args ...string) error {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	return runGitCtx(ctx, args...)
+}
+
+// runGitCtx runs a git command under the provided context.
+func runGitCtx(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git %v: %w: %s", args, err, out)
 	}
 	return nil
+}
+
+func worktreeRefPath(dir string) string {
+	return filepath.Join(dir, ".cs-workflow-ref")
+}
+
+func readWorktreeRef(dir string) (string, error) {
+	b, err := os.ReadFile(worktreeRefPath(dir))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func writeWorktreeRef(dir, ref string) error {
+	return os.WriteFile(worktreeRefPath(dir), []byte(ref+"\n"), 0o644)
 }

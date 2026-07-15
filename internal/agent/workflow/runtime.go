@@ -16,9 +16,11 @@ type runtimeLoop struct {
 	syncFunc func() error
 	gcFunc   func() error
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu      sync.Mutex
+	started bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // newRuntime creates a new runtimeLoop.
@@ -32,8 +34,16 @@ func newRuntime(cfg workflow.Config, client *Client, cache *workflow.Cache) *run
 
 // Start begins the background sync and GC loops.
 func (r *runtimeLoop) Start() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.started {
+		return nil
+	}
+
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.wg.Add(2)
+	r.started = true
 	go r.loop(r.cfg.SyncInterval, r.doSync)
 	go r.loop(r.cfg.GCInterval, r.doGC)
 	return nil
@@ -41,9 +51,16 @@ func (r *runtimeLoop) Start() error {
 
 // Stop cancels the background loops and waits for them to finish.
 func (r *runtimeLoop) Stop() error {
+	r.mu.Lock()
+	if !r.started {
+		r.mu.Unlock()
+		return nil
+	}
 	if r.cancel != nil {
 		r.cancel()
 	}
+	r.started = false
+	r.mu.Unlock()
 	r.wg.Wait()
 	return nil
 }
