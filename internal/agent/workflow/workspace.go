@@ -64,14 +64,23 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 }
 
 // CreateWorktree ensures the repo cache is ready and creates a git worktree
-// for the task at the given ref.
+// for the task at the given ref. If repoURL is empty, it simply creates the
+// task directory without a git worktree.
 func (wm *WorkspaceManager) CreateWorktree(workspaceID, taskID, repoURL, ref string) (string, error) {
-	cache, err := wm.EnsureRepoReady(workspaceID, repoURL)
-	if err != nil {
-		return "", err
-	}
 	dir := wm.TaskWorktreeDir(workspaceID, taskID)
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+
+	if repoURL == "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+
+	cache, err := wm.EnsureRepoReady(workspaceID, repoURL)
+	if err != nil {
 		return "", err
 	}
 	if _, err := os.Stat(dir); err == nil {

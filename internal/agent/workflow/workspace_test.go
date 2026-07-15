@@ -106,6 +106,19 @@ func TestWorkspaceManagerCreateWorktree(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManagerCreateWorktreeWithoutRepo(t *testing.T) {
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+
+	dir, err := wm.CreateWorktree("ws-1", "task-1", "", "HEAD")
+	if err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("task dir not created: %v", err)
+	}
+}
+
 func initTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
