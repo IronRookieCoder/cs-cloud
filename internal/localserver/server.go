@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/filewatcher"
 	"cs-cloud/internal/gitwatcher"
@@ -222,7 +221,7 @@ func WithRootDir(dir string) Option {
 	return func(s *Server) { s.rootDir = dir }
 }
 
-func WithWorkflowDriver(d *workflow.Driver) Option {
+func WithWorkflowDriver(d runtime.PersistentDriver) Option {
 	return func(s *Server) {
 		if d == nil {
 			return

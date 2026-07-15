@@ -15,6 +15,7 @@ type Config struct {
 	GCInterval         time.Duration `json:"gc_interval"`
 	AgentTimeout       time.Duration `json:"agent_timeout"`
 	MaxConcurrentTasks int           `json:"max_concurrent_tasks"`
+	AllowedAgents      []string      `json:"allowed_agents"`
 }
 
 func DefaultConfig() Config {
@@ -27,5 +28,12 @@ func DefaultConfig() Config {
 		GCInterval:         24 * time.Hour,
 		AgentTimeout:       30 * time.Minute,
 		MaxConcurrentTasks: 20,
+		AllowedAgents: []string{
+			"claude",
+			"codex",
+			"csc",
+			"cs",
+			"acp",
+		},
 	}
 }

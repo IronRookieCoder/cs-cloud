@@ -1,12 +1,20 @@
 package localserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
+
+// taskRunner is the subset of the workflow driver used by the HTTP handlers.
+// It is implemented by *workflowagent.Driver.
+type taskRunner interface {
+	runtime.PersistentDriver
+	RunTask(ctx context.Context, payload workflow.TaskRunPayload) error
+}
 
 // handleWorkflowHealth reports whether the workflow driver is healthy.
 func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
@@ -37,13 +45,13 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tr, ok := d.(*workflowagent.Driver)
+	tr, ok := d.(taskRunner)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", "driver does not support tasks")
 		return
 	}
 
-	if err := tr.RunTask(payload); err != nil {
+	if err := tr.RunTask(r.Context(), payload); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}

@@ -85,32 +85,40 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 }
 
 // GetWorkspaces fetches all workspaces from multica.
-func (c *Client) GetWorkspaces() ([]workflow.Workspace, error) {
+func (c *Client) GetWorkspaces(ctx context.Context) ([]workflow.Workspace, error) {
 	var out []workflow.Workspace
-	err := c.request(context.Background(), http.MethodGet, workflow.MulticaWorkspacesEndpoint, nil, &out)
+	err := c.request(ctx, http.MethodGet, workflow.MulticaWorkspacesEndpoint, nil, &out)
+	return out, err
+}
+
+// GetProjects fetches all projects for a workspace from multica.
+func (c *Client) GetProjects(ctx context.Context, workspaceID string) ([]workflow.Project, error) {
+	var out []workflow.Project
+	path := fmt.Sprintf(workflow.MulticaProjectsEndpoint, workspaceID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
 	return out, err
 }
 
 // StartTask marks a task as started.
-func (c *Client) StartTask(taskID string) error {
+func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskStartEndpoint, taskID)
-	return c.request(context.Background(), http.MethodPost, path, nil, nil)
+	return c.request(ctx, http.MethodPost, path, nil, nil)
 }
 
 // CompleteTask marks a task as complete with the given result.
-func (c *Client) CompleteTask(taskID string, result any) error {
+func (c *Client) CompleteTask(ctx context.Context, taskID string, result any) error {
 	path := fmt.Sprintf(workflow.MulticaTaskCompleteEndpoint, taskID)
-	return c.request(context.Background(), http.MethodPost, path, map[string]any{"result": result}, nil)
+	return c.request(ctx, http.MethodPost, path, map[string]any{"result": result}, nil)
 }
 
 // FailTask marks a task as failed with the given reason.
-func (c *Client) FailTask(taskID string, reason string) error {
+func (c *Client) FailTask(ctx context.Context, taskID string, reason string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskFailEndpoint, taskID)
-	return c.request(context.Background(), http.MethodPost, path, map[string]any{"error": reason}, nil)
+	return c.request(ctx, http.MethodPost, path, map[string]any{"error": reason}, nil)
 }
 
 // PostTaskMessages uploads task output messages.
-func (c *Client) PostTaskMessages(taskID string, messages string) error {
+func (c *Client) PostTaskMessages(ctx context.Context, taskID string, messages string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskMessagesEndpoint, taskID)
-	return c.request(context.Background(), http.MethodPost, path, map[string]any{"messages": messages}, nil)
+	return c.request(ctx, http.MethodPost, path, map[string]any{"messages": messages}, nil)
 }

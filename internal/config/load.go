@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"cs-cloud/internal/platform"
@@ -56,6 +57,9 @@ func Load() (*Config, error) {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Workflow.MaxConcurrentTasks = n
 		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_ALLOWED_AGENTS"); v != "" {
+		cfg.Workflow.AllowedAgents = strings.Split(v, ",")
 	}
 
 	if envJSON := platform.Getenv("CS_CLOUD_AGENT_ENV"); envJSON != "" {
@@ -182,6 +186,9 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	}
 	if file.MaxConcurrentTasks != 0 && current.MaxConcurrentTasks == defaults.MaxConcurrentTasks {
 		current.MaxConcurrentTasks = file.MaxConcurrentTasks
+	}
+	if len(file.AllowedAgents) > 0 && len(current.AllowedAgents) == len(defaults.AllowedAgents) {
+		current.AllowedAgents = file.AllowedAgents
 	}
 	return current
 }

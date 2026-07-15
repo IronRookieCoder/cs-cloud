@@ -89,7 +89,9 @@ func (r *runtimeLoop) doSync() error {
 	if r.client == nil || r.cache == nil {
 		return nil
 	}
-	wss, err := r.client.GetWorkspaces()
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.AgentTimeout)
+	defer cancel()
+	wss, err := r.client.GetWorkspaces(ctx)
 	if err != nil {
 		return err
 	}

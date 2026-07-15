@@ -22,6 +22,7 @@ type Driver struct {
 	runtime          *runtimeLoop
 	runner           *TaskRunner
 	state            driverState
+	sem              chan struct{}
 	mu               sync.Mutex
 }
 
@@ -46,24 +47,44 @@ func (d *Driver) Start() error {
 		return fmt.Errorf("workflow driver dependencies not provided")
 	}
 
+	if d.cfg.MaxConcurrentTasks <= 0 {
+		d.cfg.MaxConcurrentTasks = workflow.DefaultConfig().MaxConcurrentTasks
+	}
+	if d.cfg.AgentTimeout <= 0 {
+		d.cfg.AgentTimeout = workflow.DefaultConfig().AgentTimeout
+	}
+
 	d.workspaceManager = NewWorkspaceManager(d.cfg.WorkspacesRoot)
 	if err := d.workspaceManager.EnsureRoot(); err != nil {
-		d.state = driverStateError
+		d.cleanupOnError()
 		return err
 	}
 
 	cache := workflow.NewCache(d.cfg.CacheDir)
 	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
-	d.runner = NewTaskRunner(d.workspaceManager, d.client, d.cfg.AgentTimeout)
+	d.runner = NewTaskRunner(d.workspaceManager, d.client, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
+	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 
 	if err := d.runtime.Start(); err != nil {
-		d.state = driverStateError
+		d.cleanupOnError()
 		return err
 	}
 
 	d.state = driverStateRunning
 	return nil
+}
+
+func (d *Driver) cleanupOnError() {
+	if d.runtime != nil {
+		_ = d.runtime.Stop()
+	}
+	d.workspaceManager = nil
+	d.client = nil
+	d.runtime = nil
+	d.runner = nil
+	d.sem = nil
+	d.state = driverStateError
 }
 
 // Stop halts the runtime loop and clears the running state.
@@ -89,11 +110,19 @@ func (d *Driver) Health() error {
 
 // RunTask executes a task payload. It returns an error if the driver is not
 // running or if task execution fails.
-func (d *Driver) RunTask(payload workflow.TaskRunPayload) error {
+func (d *Driver) RunTask(ctx context.Context, payload workflow.TaskRunPayload) error {
 	if err := d.Health(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+
+	select {
+	case d.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-d.sem }()
+
+	ctx, cancel := context.WithTimeout(ctx, d.cfg.AgentTimeout)
 	defer cancel()
 	return d.runner.Run(ctx, payload)
 }

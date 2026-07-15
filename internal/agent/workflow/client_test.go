@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -36,7 +37,7 @@ func TestClientGetWorkspaces(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	wss, err := c.GetWorkspaces()
+	wss, err := c.GetWorkspaces(context.Background())
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -64,7 +65,7 @@ func TestClientStartTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	if err := c.StartTask("task-1"); err != nil {
+	if err := c.StartTask(context.Background(), "task-1"); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
@@ -96,7 +97,7 @@ func TestClientCompleteTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	if err := c.CompleteTask("task-1", "done"); err != nil {
+	if err := c.CompleteTask(context.Background(), "task-1", "done"); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
@@ -128,7 +129,7 @@ func TestClientFailTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	if err := c.FailTask("task-1", "something went wrong"); err != nil {
+	if err := c.FailTask(context.Background(), "task-1", "something went wrong"); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
@@ -160,7 +161,7 @@ func TestClientPostTaskMessages(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	if err := c.PostTaskMessages("task-1", "hello world"); err != nil {
+	if err := c.PostTaskMessages(context.Background(), "task-1", "hello world"); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
@@ -176,7 +177,7 @@ func TestClientRequestReturnsErrorOnStatus(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	_, err := c.GetWorkspaces()
+	_, err := c.GetWorkspaces(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
 	}

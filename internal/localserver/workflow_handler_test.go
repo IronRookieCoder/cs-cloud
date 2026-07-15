@@ -75,6 +75,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"true"},
 	}
 	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
 		MulticaBaseURL: multica.URL,

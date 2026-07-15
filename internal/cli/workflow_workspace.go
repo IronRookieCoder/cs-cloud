@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"cs-cloud/internal/app"
@@ -45,7 +46,9 @@ func workflowWorkspaceSync(a *app.App) error {
 	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, func() (*provider.Credentials, error) {
 		return creds, nil
 	})
-	wss, err := client.GetWorkspaces()
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Workflow.AgentTimeout)
+	defer cancel()
+	wss, err := client.GetWorkspaces(ctx)
 	if err != nil {
 		return err
 	}

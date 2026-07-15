@@ -53,7 +53,7 @@ func TestRuntimeDoSyncWritesToCache(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	cfg := workflow.Config{SyncInterval: time.Hour}
+	cfg := workflow.Config{SyncInterval: time.Hour, AgentTimeout: time.Minute}
 	client := NewClient(ts.URL, func() (*provider.Credentials, error) {
 		return &provider.Credentials{AccessToken: "x"}, nil
 	})
