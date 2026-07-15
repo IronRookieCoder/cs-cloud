@@ -5,23 +5,57 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"cs-cloud/internal/platform"
+	"cs-cloud/internal/workflow"
 )
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		CloudBaseURL:   platform.Getenv("CLOUD_BASE_URL"),
-		BaseURL:        platform.Getenv("COSTRICT_BASE_URL"),
-		DefaultShell:   platform.Getenv("CS_CLOUD_SHELL"),
-		DefaultAgent:   platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
-		AgentPath:      platform.Getenv("CS_CLOUD_AGENT_PATH"),
-		AgentCommand:   platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
+		CloudBaseURL:        platform.Getenv("CLOUD_BASE_URL"),
+		BaseURL:             platform.Getenv("COSTRICT_BASE_URL"),
+		DefaultShell:        platform.Getenv("CS_CLOUD_SHELL"),
+		DefaultAgent:        platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
+		AgentPath:           platform.Getenv("CS_CLOUD_AGENT_PATH"),
+		AgentCommand:        platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
 		AgentVersionCommand: platform.Getenv("CS_CLOUD_AGENT_VERSION_COMMAND"),
+		Workflow:            workflow.DefaultConfig(),
 	}
 
 	if cfg.CloudBaseURL == "" {
 		cfg.CloudBaseURL = platform.Getenv("COSTRICT_CLOUD_BASE_URL")
+	}
+
+	// Workflow config from environment variables.
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL"); v != "" {
+		cfg.Workflow.MulticaBaseURL = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_WORKSPACES_ROOT"); v != "" {
+		cfg.Workflow.WorkspacesRoot = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_CACHE_DIR"); v != "" {
+		cfg.Workflow.CacheDir = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_SYNC_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Workflow.SyncInterval = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Workflow.GCInterval = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Workflow.AgentTimeout = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Workflow.MaxConcurrentTasks = n
+		}
 	}
 
 	if envJSON := platform.Getenv("CS_CLOUD_AGENT_ENV"); envJSON != "" {
@@ -78,6 +112,7 @@ func Load() (*Config, error) {
 				if cfg.IdleBufferSeconds == 0 {
 					cfg.IdleBufferSeconds = fileCfg.IdleBufferSeconds
 				}
+				cfg.Workflow = mergeWorkflowConfig(cfg.Workflow, fileCfg.Workflow)
 			}
 		}
 	}
@@ -123,6 +158,31 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
+	if file.MulticaBaseURL != "" {
+		current.MulticaBaseURL = file.MulticaBaseURL
+	}
+	if file.WorkspacesRoot != "" {
+		current.WorkspacesRoot = file.WorkspacesRoot
+	}
+	if file.CacheDir != "" {
+		current.CacheDir = file.CacheDir
+	}
+	if file.SyncInterval != 0 {
+		current.SyncInterval = file.SyncInterval
+	}
+	if file.GCInterval != 0 {
+		current.GCInterval = file.GCInterval
+	}
+	if file.AgentTimeout != 0 {
+		current.AgentTimeout = file.AgentTimeout
+	}
+	if file.MaxConcurrentTasks != 0 {
+		current.MaxConcurrentTasks = file.MaxConcurrentTasks
+	}
+	return current
 }
 
 func configFilePath() (string, error) {

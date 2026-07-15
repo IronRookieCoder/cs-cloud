@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cs-cloud/internal/platform"
 )
@@ -170,5 +171,32 @@ func TestLoad_IdleBufferSeconds_DefaultAndEnv(t *testing.T) {
 	}
 	if cfg2.IdleBufferSeconds != 120 {
 		t.Errorf("env IdleBufferSeconds = %d, want 120", cfg2.IdleBufferSeconds)
+	}
+}
+
+func TestLoadWorkflowConfigFromEnv(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_WORKSPACES_ROOT", "/tmp/wf-workspaces")
+	t.Setenv("CS_CLOUD_WORKFLOW_SYNC_INTERVAL", "10m")
+	t.Setenv("CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS", "42")
+
+	// Clear other workflow env vars so defaults don't interfere with assertions.
+	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_CACHE_DIR", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_INTERVAL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Workflow.WorkspacesRoot != "/tmp/wf-workspaces" {
+		t.Fatalf("WorkspacesRoot = %q", cfg.Workflow.WorkspacesRoot)
+	}
+	if cfg.Workflow.SyncInterval != 10*time.Minute {
+		t.Fatalf("SyncInterval = %v", cfg.Workflow.SyncInterval)
+	}
+	if cfg.Workflow.MaxConcurrentTasks != 42 {
+		t.Fatalf("MaxConcurrentTasks = %d", cfg.Workflow.MaxConcurrentTasks)
 	}
 }
