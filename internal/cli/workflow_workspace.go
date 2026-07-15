@@ -1,0 +1,58 @@
+package cli
+
+import (
+	"fmt"
+
+	"cs-cloud/internal/app"
+	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/provider"
+	"cs-cloud/internal/workflow"
+)
+
+func workflowWorkspaceCmd(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return workflowWorkspaceList(a)
+	}
+	switch args[0] {
+	case "list":
+		return workflowWorkspaceList(a)
+	case "sync":
+		return workflowWorkspaceSync(a)
+	default:
+		return fmt.Errorf("unknown workspace action: %s", args[0])
+	}
+}
+
+func workflowWorkspaceList(a *app.App) error {
+	cfg := a.Config()
+	cache := workflow.NewCache(cfg.Workflow.CacheDir)
+	wss, err := cache.ReadWorkspaces()
+	if err != nil {
+		return err
+	}
+	for _, ws := range wss {
+		fmt.Printf("%s  %s\n", ws.ID, ws.Name)
+	}
+	return nil
+}
+
+func workflowWorkspaceSync(a *app.App) error {
+	cfg := a.Config()
+	creds, err := a.Credentials()
+	if err != nil {
+		return err
+	}
+	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, func() (*provider.Credentials, error) {
+		return creds, nil
+	})
+	wss, err := client.GetWorkspaces()
+	if err != nil {
+		return err
+	}
+	cache := workflow.NewCache(cfg.Workflow.CacheDir)
+	if err := cache.WriteWorkspaces(wss); err != nil {
+		return err
+	}
+	fmt.Printf("Synced %d workspaces\n", len(wss))
+	return nil
+}
