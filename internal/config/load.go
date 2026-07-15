@@ -161,25 +161,26 @@ func Load() (*Config, error) {
 }
 
 func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
-	if file.MulticaBaseURL != "" {
+	defaults := workflow.DefaultConfig()
+	if file.MulticaBaseURL != "" && current.MulticaBaseURL == defaults.MulticaBaseURL {
 		current.MulticaBaseURL = file.MulticaBaseURL
 	}
-	if file.WorkspacesRoot != "" {
+	if file.WorkspacesRoot != "" && current.WorkspacesRoot == defaults.WorkspacesRoot {
 		current.WorkspacesRoot = file.WorkspacesRoot
 	}
-	if file.CacheDir != "" {
+	if file.CacheDir != "" && current.CacheDir == defaults.CacheDir {
 		current.CacheDir = file.CacheDir
 	}
-	if file.SyncInterval != 0 {
+	if file.SyncInterval != 0 && current.SyncInterval == defaults.SyncInterval {
 		current.SyncInterval = file.SyncInterval
 	}
-	if file.GCInterval != 0 {
+	if file.GCInterval != 0 && current.GCInterval == defaults.GCInterval {
 		current.GCInterval = file.GCInterval
 	}
-	if file.AgentTimeout != 0 {
+	if file.AgentTimeout != 0 && current.AgentTimeout == defaults.AgentTimeout {
 		current.AgentTimeout = file.AgentTimeout
 	}
-	if file.MaxConcurrentTasks != 0 {
+	if file.MaxConcurrentTasks != 0 && current.MaxConcurrentTasks == defaults.MaxConcurrentTasks {
 		current.MaxConcurrentTasks = file.MaxConcurrentTasks
 	}
 	return current
