@@ -86,10 +86,10 @@ func New(opts ...Option) *Server {
 		runtimeCfg: defaultRuntimeConfig(),
 		prewarmMap: make(map[string]*prewarmState),
 	}
+	s.manager = runtime.NewAgentManager(s.eventBus)
 	for _, o := range opts {
 		o(s)
 	}
-	s.manager = runtime.NewAgentManager(s.eventBus)
 
 	// Initialize host event watchers
 	s.fileWatcher = filewatcher.New(s.eventBus)
@@ -193,6 +193,9 @@ func New(opts ...Option) *Server {
 
 	api.HandleFunc("POST /commands", s.handleCommandDispatch)
 	api.HandleFunc("GET /commands/status", s.handleCommandStatus)
+
+	api.HandleFunc("GET /workflow/health", s.handleWorkflowHealth)
+	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 
 	s.http = &http.Server{
 		Handler:           mux,
