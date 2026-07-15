@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 
+	"cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/cloud"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/device"
@@ -42,6 +43,14 @@ func (a *App) OIDCBaseURL(credBaseURL string) string {
 
 func (a *App) Credentials() (*provider.Credentials, error) {
 	return provider.LoadCredentials()
+}
+
+func (a *App) NewWorkflowDriver() *workflow.Driver {
+	deps := &workflow.Dependencies{
+		MulticaBaseURL: a.cfg.Workflow.MulticaBaseURL,
+		TokenProvider:  a.Credentials,
+	}
+	return workflow.NewDriver(a.cfg.Workflow, deps)
 }
 
 func (a *App) Device() (*device.DeviceInfo, error) {

@@ -90,7 +90,12 @@ func runDaemon(a *app.App) error {
 	}
 
 	logger.Info("[debug] initializing local server...")
-	srv := localserver.New(localserver.WithVersion(version.Get()), localserver.WithConfig(a.Config()), localserver.WithRootDir(a.RootDir()))
+	srv := localserver.New(
+		localserver.WithVersion(version.Get()),
+		localserver.WithConfig(a.Config()),
+		localserver.WithRootDir(a.RootDir()),
+		localserver.WithWorkflowDriver(a.NewWorkflowDriver()),
+	)
 
 	ctx := context.Background()
 	agentType := a.Config().DefaultAgent

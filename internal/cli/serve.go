@@ -27,7 +27,12 @@ func serve(a *app.App) error {
 		return err
 	}
 
-	srv := localserver.New(localserver.WithVersion(version.Get()), localserver.WithConfig(a.Config()), localserver.WithRootDir(a.RootDir()))
+	srv := localserver.New(
+		localserver.WithVersion(version.Get()),
+		localserver.WithConfig(a.Config()),
+		localserver.WithRootDir(a.RootDir()),
+		localserver.WithWorkflowDriver(a.NewWorkflowDriver()),
+	)
 
 	if err := srv.Manager().InitDefaultAgent(ctx, a.Config().DefaultAgent, a.Config().AgentCommand, a.Config().AgentVersionCommand, a.Config().AgentWorkspace, a.Config().AgentEnv); err != nil {
 		return fmt.Errorf("failed to init agent: %w", err)

@@ -20,3 +20,4 @@ device.json
 data/
 internal/localserver/apidocs/
 .claude/
+cs-cloud

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/filewatcher"
 	"cs-cloud/internal/gitwatcher"
@@ -218,6 +219,10 @@ func WithRootDir(dir string) Option {
 	return func(s *Server) { s.rootDir = dir }
 }
 
+func WithWorkflowDriver(d *workflow.Driver) Option {
+	return func(s *Server) { s.manager.RegisterPersistentDriver(d) }
+}
+
 func (s *Server) Manager() *runtime.AgentManager {
 	return s.manager
 }
@@ -258,6 +263,10 @@ func (s *Server) Start(addr string) error {
 		}
 	}
 
+	if err := s.manager.StartPersistentDrivers(); err != nil {
+		logger.Error("Failed to start persistent drivers: %v", err)
+	}
+
 	go func() {
 		_ = s.http.Serve(ln)
 	}()
@@ -282,6 +291,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.fileWatcher != nil {
 		s.fileWatcher.Stop()
+	}
+
+	if err := s.manager.StopPersistentDrivers(); err != nil {
+		logger.Error("Failed to stop persistent drivers: %v", err)
 	}
 
 	s.manager.KillAll()
