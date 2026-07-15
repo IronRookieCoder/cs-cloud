@@ -41,6 +41,10 @@ func (d *Driver) Start() error {
 	if d.state == driverStateRunning {
 		return nil
 	}
+	if d.deps == nil {
+		d.state = driverStateError
+		return fmt.Errorf("workflow driver dependencies not provided")
+	}
 
 	d.workspaceManager = NewWorkspaceManager(d.cfg.WorkspacesRoot)
 	if err := d.workspaceManager.EnsureRoot(); err != nil {

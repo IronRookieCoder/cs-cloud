@@ -55,6 +55,13 @@ func TestDriverHoldsConfigAndDeps(t *testing.T) {
 	}
 }
 
+func TestDriverStartRequiresDeps(t *testing.T) {
+	d := NewDriver(workflow.DefaultConfig(), nil)
+	if err := d.Start(); err == nil {
+		t.Fatal("expected error when deps nil")
+	}
+}
+
 func TestDriverTokenProviderNilDeps(t *testing.T) {
 	d := NewDriver(workflow.DefaultConfig(), nil)
 	if d.tokenProvider() != nil {
