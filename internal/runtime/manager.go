@@ -15,17 +15,19 @@ import (
 type ProgressFunc func(phase string, progress float64, message string)
 
 type AgentManager struct {
-	mu       sync.RWMutex
-	agents   map[string]agent.Agent
-	drivers  map[string]agent.Driver
-	eventBus *EventBus
+	mu                sync.RWMutex
+	agents            map[string]agent.Agent
+	drivers           map[string]agent.Driver
+	persistentDrivers map[string]PersistentDriver
+	eventBus          *EventBus
 }
 
 func NewAgentManager(eventBus *EventBus) *AgentManager {
 	return &AgentManager{
-		agents:   make(map[string]agent.Agent),
-		drivers:  make(map[string]agent.Driver),
-		eventBus: eventBus,
+		agents:            make(map[string]agent.Agent),
+		drivers:           make(map[string]agent.Driver),
+		persistentDrivers: make(map[string]PersistentDriver),
+		eventBus:          eventBus,
 	}
 }
 
@@ -40,6 +42,55 @@ func (m *AgentManager) GetDriver(name string) (agent.Driver, bool) {
 	defer m.mu.RUnlock()
 	d, ok := m.drivers[name]
 	return d, ok
+}
+
+func (m *AgentManager) RegisterPersistentDriver(d PersistentDriver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.persistentDrivers[d.Name()] = d
+}
+
+func (m *AgentManager) GetPersistentDriver(name string) (PersistentDriver, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	d, ok := m.persistentDrivers[name]
+	return d, ok
+}
+
+func (m *AgentManager) StartPersistentDrivers() error {
+	m.mu.RLock()
+	ds := make([]PersistentDriver, 0, len(m.persistentDrivers))
+	for _, d := range m.persistentDrivers {
+		ds = append(ds, d)
+	}
+	m.mu.RUnlock()
+
+	for _, d := range ds {
+		if err := d.Start(); err != nil {
+			return fmt.Errorf("start persistent driver %s: %w", d.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (m *AgentManager) StopPersistentDrivers() error {
+	m.mu.RLock()
+	ds := make([]PersistentDriver, 0, len(m.persistentDrivers))
+	for _, d := range m.persistentDrivers {
+		ds = append(ds, d)
+	}
+	m.mu.RUnlock()
+
+	var errs []error
+	for _, d := range ds {
+		if err := d.Stop(); err != nil {
+			errs = append(errs, fmt.Errorf("stop persistent driver %s: %w", d.Name(), err))
+		}
+	}
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
 }
 
 func (m *AgentManager) ResolveDriver(backend string) (agent.Driver, error) {

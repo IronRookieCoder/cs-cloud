@@ -107,3 +107,48 @@ func TestRestartDefaultAgentNonNilMessage(t *testing.T) {
 		t.Error("expected non-empty progress message")
 	}
 }
+
+func TestAgentManagerPersistentDriver(t *testing.T) {
+	m := NewAgentManager(NewEventBus())
+	d := &mockPersistentDriver{}
+	m.RegisterPersistentDriver(d)
+
+	got, ok := m.GetPersistentDriver("mock")
+	if !ok {
+		t.Fatal("expected driver registered")
+	}
+	if got.Name() != "mock" {
+		t.Fatalf("name = %q", got.Name())
+	}
+}
+
+func TestAgentManagerStartStopPersistentDrivers(t *testing.T) {
+	m := NewAgentManager(NewEventBus())
+	d := &trackingPersistentDriver{name: "tracker"}
+	m.RegisterPersistentDriver(d)
+
+	if err := m.StartPersistentDrivers(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if !d.started {
+		t.Fatal("expected driver started")
+	}
+
+	if err := m.StopPersistentDrivers(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !d.stopped {
+		t.Fatal("expected driver stopped")
+	}
+}
+
+type trackingPersistentDriver struct {
+	name    string
+	started bool
+	stopped bool
+}
+
+func (d *trackingPersistentDriver) Name() string  { return d.name }
+func (d *trackingPersistentDriver) Start() error  { d.started = true; return nil }
+func (d *trackingPersistentDriver) Stop() error   { d.stopped = true; return nil }
+func (d *trackingPersistentDriver) Health() error { return nil }
