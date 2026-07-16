@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,7 +15,107 @@ import (
 	"cs-cloud/internal/provider"
 )
 
+// parseStatusJSONFlag reports whether `cs-cloud status --json` was requested.
+// Accepts `--json`, `--json=true`, `--json=false` (the latter two are explicit).
+func parseStatusJSONFlag() bool {
+	for _, arg := range os.Args[1:] {
+		switch {
+		case arg == "--json":
+			return true
+		case strings.HasPrefix(arg, "--json="):
+			val := strings.TrimPrefix(arg, "--json=")
+			return val == "true" || val == "1"
+		}
+	}
+	return false
+}
+
+// statusJSONSchema is the wire contract for `cs-cloud status --json`.
+// Fields are additive; consumers MUST tolerate new fields (semver-minor).
+type statusJSONSchema struct {
+	Running          bool   `json:"running"`
+	Pid              int    `json:"pid,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	Root             string `json:"root,omitempty"`
+	CloudURL         string `json:"cloud_url,omitempty"`
+	LocalURL         string `json:"local_url,omitempty"`
+	Authenticated    bool   `json:"authenticated"`
+	User             string `json:"user,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	DeviceID         string `json:"device_id,omitempty"`
+	LegacyDeviceID   string `json:"legacy_device_id,omitempty"`
+	// csc_serve_running must NOT use omitempty — clients rely on the
+	// explicit false to distinguish "probed and not running" from "unknown".
+	CSCServeRunning  bool   `json:"csc_serve_running"`
+}
+
+// statusJSON emits machine-readable status for csc TUI's cloudNotify
+// bootstrap detection. All fields are best-effort: errors degrade to empty
+// strings rather than failing the whole payload.
+func statusJSON(a *app.App) error {
+	running, pid, reason := a.DaemonStatus()
+
+	out := statusJSONSchema{
+		Running: running,
+		Pid:     pid,
+		Reason:  reason,
+		Mode:    a.LoadMode(),
+		Root:    a.RootDir(),
+	}
+
+	if cred, err := provider.LoadCredentials(); err == nil && cred != nil {
+		out.Authenticated = true
+		if claims, err := provider.ParseJWT(cred.AccessToken); err == nil {
+			out.User = claims.ResolveDisplayName()
+			out.Provider = claims.ResolveProvider()
+		}
+	}
+
+	if dev, err := a.Device(); err == nil && dev != nil {
+		out.DeviceID = dev.DeviceID
+	} else {
+		out.DeviceID = provider.GenerateMachineID()
+	}
+	out.LegacyDeviceID = device.GetLegacyDeviceID()
+
+	if serverURL, err := a.ServerURL(); err == nil {
+		out.LocalURL = serverURL
+	}
+	out.CloudURL = a.CloudBaseURL()
+
+	// csc_serve_running is best-effort: probe the local daemon health endpoint.
+	if running && out.LocalURL != "" {
+		out.CSCServeRunning = probeCSCServeRunning(out.LocalURL)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// probeCSCServeRunning pings the local daemon's agent health endpoint.
+// Returns false on any error (daemon down, csc adapter not yet booted, etc.).
+// Timeout is short to keep `status --json` snappy for csc TUI callers.
+func probeCSCServeRunning(localURL string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, localURL+"/api/v1/agents/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 func status(a *app.App) error {
+	if parseStatusJSONFlag() {
+		return statusJSON(a)
+	}
 	running, pid, reason := a.DaemonStatus()
 	cred, err := provider.LoadCredentials()
 	if err != nil {

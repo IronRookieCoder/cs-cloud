@@ -73,6 +73,7 @@ func commandArgs() []string {
 		case args[i] == "--agent-path" && i+1 < len(args):
 			i++
 		case len(args[i]) > 13 && args[i][:13] == "--agent-path=":
+		case args[i] == "--json", strings.HasPrefix(args[i], "--json="):
 		default:
 			rest = append(rest, args[i])
 		}
