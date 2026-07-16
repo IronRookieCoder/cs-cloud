@@ -65,6 +65,11 @@ type Server struct {
 	prewarmMu  sync.Mutex
 	prewarmMap map[string]*prewarmState
 
+	// Ring buffer backing GET /api/v1/runtime/events. Subscribes to
+	// EventBus on Start, drains on Shutdown.
+	ringBuffer  *RingBuffer
+	tuiRegistry *TUIRegistry // Phase 1: nil stub; Phase 2: real instance
+
 	// Post-upload attachment sweep debounce. Guards the lazy GC triggered by
 	// handleAttachmentUpload so bursty uploads don't pay N× the scan cost.
 	gcSweepMu    sync.Mutex
@@ -81,13 +86,15 @@ func New(opts ...Option) *Server {
 	initStartTime()
 
 	s := &Server{
-		eventBus:   runtime.NewEventBus(),
-		runtimeCfg: defaultRuntimeConfig(),
-		prewarmMap: make(map[string]*prewarmState),
+		eventBus:    runtime.NewEventBus(),
+		runtimeCfg:  defaultRuntimeConfig(),
+		prewarmMap:  make(map[string]*prewarmState),
+		tuiRegistry: NewTUIRegistry(),
 	}
 	for _, o := range opts {
 		o(s)
 	}
+	s.ringBuffer = NewRingBuffer(s.eventBus)
 	s.manager = runtime.NewAgentManager(s.eventBus)
 
 	// Initialize host event watchers
@@ -127,6 +134,11 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("GET /runtime/init-status", s.handleInitStatus)
 	api.HandleFunc("GET /runtime/update/check", s.handleUpdateCheck)
 	api.HandleFunc("POST /runtime/update/apply", s.handleUpdateApply)
+
+	// Public event ingress/egress for csc TUI and future local clients.
+	// Ring-buffer backed; reply dispatch arrives in Phase 2.
+	api.HandleFunc("POST /runtime/events", s.handleRuntimeEventPost)
+	api.HandleFunc("GET /runtime/events", s.handleRuntimeEventList)
 
 	api.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
 	api.HandleFunc("GET /docs", s.handleSwaggerUI)
@@ -258,6 +270,11 @@ func (s *Server) Start(addr string) error {
 		}
 	}
 
+	// Start the ring buffer drain goroutine (subscribes to EventBus).
+	if s.ringBuffer != nil {
+		s.ringBuffer.Start(ctx)
+	}
+
 	go func() {
 		_ = s.http.Serve(ln)
 	}()
@@ -282,6 +299,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.fileWatcher != nil {
 		s.fileWatcher.Stop()
+	}
+	// Stop the ring buffer drain goroutine before tearing down the bus.
+	if s.ringBuffer != nil {
+		s.ringBuffer.Stop()
 	}
 
 	s.manager.KillAll()
