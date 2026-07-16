@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,28 +12,41 @@ import (
 	"cs-cloud/internal/runtime"
 )
 
-// subscribeFor collects events emitted on the bus into a slice. Returns a
-// stop function that must be called to release the subscriber. The filter
-// is nil — we want every event so the test can assert exact types.
-func subscribeFor(t *testing.T, bus *runtime.EventBus) (events *[]agent.Event, stop func()) {
-	t.Helper()
+// eventCollector drains a subscription channel into a mutex-guarded slice
+// so tests can read the captured events without racing the drain goroutine.
+type eventCollector struct {
+	mu      sync.Mutex
+	events  []agent.Event
+	stopped chan struct{}
+}
+
+func newEventCollector(bus *runtime.EventBus) (*eventCollector, func()) {
 	ch := bus.Subscribe(nil)
-	collected := &[]agent.Event{}
-	done := make(chan struct{})
+	c := &eventCollector{stopped: make(chan struct{})}
 	go func() {
 		for {
 			select {
 			case evt := <-ch:
-				*collected = append(*collected, evt)
-			case <-done:
+				c.mu.Lock()
+				c.events = append(c.events, evt)
+				c.mu.Unlock()
+			case <-c.stopped:
 				return
 			}
 		}
 	}()
-	return collected, func() {
-		close(done)
+	return c, func() {
+		close(c.stopped)
 		bus.Unsubscribe(ch)
 	}
+}
+
+func (c *eventCollector) snapshot() []agent.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]agent.Event, len(c.events))
+	copy(out, c.events)
+	return out
 }
 
 func TestPermissionReplyTUISourcedEmitsEventAnd204(t *testing.T) {
@@ -41,7 +55,7 @@ func TestPermissionReplyTUISourcedEmitsEventAnd204(t *testing.T) {
 		t.Fatalf("registry: %v", err)
 	}
 
-	events, stop := subscribeFor(t, s.eventBus)
+	coll, stop := newEventCollector(s.eventBus)
 	defer stop()
 
 	body := `{"decision":"allow","reason":"looks good"}`
@@ -54,13 +68,20 @@ func TestPermissionReplyTUISourcedEmitsEventAnd204(t *testing.T) {
 		t.Fatalf("status: want 204, got %d (body=%s)", w.Code, w.Body.String())
 	}
 
-	// Drain the subscriber goroutine.
-	time.Sleep(20 * time.Millisecond)
-
-	if len(*events) != 1 {
-		t.Fatalf("emitted events: want 1, got %d", len(*events))
+	// Wait for the subscriber goroutine to observe the emitted event.
+	deadline := time.Now().Add(time.Second)
+	var events []agent.Event
+	for time.Now().Before(deadline) {
+		events = coll.snapshot()
+		if len(events) >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	evt := (*events)[0]
+	if len(events) != 1 {
+		t.Fatalf("emitted events: want 1, got %d", len(events))
+	}
+	evt := events[0]
 	if evt.Type != "permission.replied" {
 		t.Errorf("type: want permission.replied, got %s", evt.Type)
 	}
@@ -88,7 +109,7 @@ func TestQuestionReplyTUISourcedEmitsReplied(t *testing.T) {
 	s := newTestServerWithBus(t)
 	s.tuiRegistry.Register(questionEvt("q-7", "conv-2"))
 
-	events, stop := subscribeFor(t, s.eventBus)
+	coll, stop := newEventCollector(s.eventBus)
 	defer stop()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/questions/q-7/reply", bytes.NewReader([]byte(`{"text":"42"}`)))
@@ -99,11 +120,20 @@ func TestQuestionReplyTUISourcedEmitsReplied(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("status: want 204, got %d", w.Code)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if len(*events) != 1 || (*events)[0].Type != "question.replied" {
-		t.Fatalf("emitted: want 1 question.replied, got %v", *events)
+	// Drain the subscriber goroutine.
+	deadline := time.Now().Add(time.Second)
+	var events []agent.Event
+	for time.Now().Before(deadline) {
+		events = coll.snapshot()
+		if len(events) >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	data, _ := (*events)[0].Data.(map[string]any)
+	if len(events) != 1 || events[0].Type != "question.replied" {
+		t.Fatalf("emitted: want 1 question.replied, got %v", events)
+	}
+	data, _ := events[0].Data.(map[string]any)
 	if data["kind"] != "question" {
 		t.Errorf("kind: want question, got %v", data["kind"])
 	}
@@ -116,7 +146,7 @@ func TestQuestionRejectTUISourcedEmitsRejected(t *testing.T) {
 	s := newTestServerWithBus(t)
 	s.tuiRegistry.Register(questionEvt("q-8", "conv-3"))
 
-	events, stop := subscribeFor(t, s.eventBus)
+	coll, stop := newEventCollector(s.eventBus)
 	defer stop()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/questions/q-8/reject", bytes.NewReader([]byte(`{}`)))
@@ -127,9 +157,17 @@ func TestQuestionRejectTUISourcedEmitsRejected(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("status: want 204, got %d", w.Code)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if len(*events) != 1 || (*events)[0].Type != "question.rejected" {
-		t.Fatalf("emitted: want 1 question.rejected, got %v", *events)
+	deadline := time.Now().Add(time.Second)
+	var events []agent.Event
+	for time.Now().Before(deadline) {
+		events = coll.snapshot()
+		if len(events) >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(events) != 1 || events[0].Type != "question.rejected" {
+		t.Fatalf("emitted: want 1 question.rejected, got %v", events)
 	}
 }
 
@@ -162,7 +200,7 @@ func TestReplyEmptyBody(t *testing.T) {
 	s := newTestServerWithBus(t)
 	s.tuiRegistry.Register(permEvt("perm-10", "conv"))
 
-	events, stop := subscribeFor(t, s.eventBus)
+	coll, stop := newEventCollector(s.eventBus)
 	defer stop()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/permissions/perm-10/reply", nil)
@@ -174,10 +212,14 @@ func TestReplyEmptyBody(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Errorf("empty body: want 204, got %d", w.Code)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if len(*events) != 1 {
-		t.Errorf("emitted: want 1, got %d", len(*events))
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(coll.snapshot()) >= 1 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	t.Errorf("emitted: want 1, got %d", len(coll.snapshot()))
 }
 
 func TestReplyWrongMethod(t *testing.T) {
