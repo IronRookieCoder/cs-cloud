@@ -16,12 +16,84 @@ type JWTPayload struct {
 	PreferredUsername string         `json:"preferred_username,omitempty"`
 	DisplayName       string         `json:"displayName,omitempty"`
 	Provider          string         `json:"provider,omitempty"`
+	PrimaryProvider   string         `json:"primary_provider,omitempty"`
 	Owner             string         `json:"owner,omitempty"`
 	Email             string         `json:"email,omitempty"`
 	Phone             string         `json:"phone,omitempty"`
 	PhoneNumber       string         `json:"phone_number,omitempty"`
 	UniversalID       string         `json:"universal_id,omitempty"`
 	Properties        map[string]any `json:"properties,omitempty"`
+	User              *JWTUser       `json:"user,omitempty"`
+}
+
+// JWTUser 对应 MULTI_TENANCY §12.1 canonical claims 的嵌套 user Map。
+// 旧 Casdoor JWT 无此字段；新 cs-user JWT 在嵌套 user Map 内携带用户基本身份。
+// 字段访问走 JWTPayload 的 OrFallback 系列方法（flat first → nested fallback）。
+type JWTUser struct {
+	ID          string `json:"id,omitempty"`
+	Username    string `json:"username,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Email       string `json:"email,omitempty"`
+	Phone       string `json:"phone,omitempty"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
+}
+
+// 一组 flat first → nested fallback 的访问器。
+// 旧 token（仅 flat）走第一段；新 strict canonical token（仅 nested）走第二段；
+// 新 compat 模式两段都有，flat 优先以保旧兼容。
+func (p *JWTPayload) emailOrFallback() string {
+	if p.Email != "" {
+		return p.Email
+	}
+	if p.User != nil {
+		return p.User.Email
+	}
+	return ""
+}
+
+func (p *JWTPayload) nameOrFallback() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	if p.User != nil {
+		return p.User.DisplayName
+	}
+	return ""
+}
+
+func (p *JWTPayload) displayNameOrFallback() string {
+	if p.DisplayName != "" {
+		return p.DisplayName
+	}
+	if p.User != nil {
+		return p.User.DisplayName
+	}
+	return ""
+}
+
+func (p *JWTPayload) preferredUsernameOrFallback() string {
+	if p.PreferredUsername != "" {
+		return p.PreferredUsername
+	}
+	if p.User != nil {
+		return p.User.Username
+	}
+	return ""
+}
+
+func (p *JWTPayload) phoneOrFallback() string {
+	return firstNonEmptyStr(p.PhoneNumber, p.Phone, p.userPhone())
+}
+
+func (p *JWTPayload) userPhone() string {
+	if p.User != nil {
+		return p.User.Phone
+	}
+	return ""
+}
+
+func (p *JWTPayload) providerOrFallback() string {
+	return firstNonEmptyStr(p.Provider, p.PrimaryProvider)
 }
 
 func (p *JWTPayload) UserID() string {
@@ -32,10 +104,10 @@ func (p *JWTPayload) UserID() string {
 }
 
 func (p *JWTPayload) ResolveProvider() string {
-	if p.Provider != "" {
-		return strings.ToLower(strings.TrimSpace(p.Provider))
+	if prov := p.providerOrFallback(); prov != "" {
+		return strings.ToLower(strings.TrimSpace(prov))
 	}
-	phone := firstNonEmptyStr(p.PhoneNumber, p.Phone)
+	phone := p.phoneOrFallback()
 	if phone != "" {
 		return "phone"
 	}
@@ -50,7 +122,8 @@ func (p *JWTPayload) ResolveProvider() string {
 			}
 		}
 	}
-	if p.Email != "" && strings.Contains(p.Email, "@") {
+	email := p.emailOrFallback()
+	if email != "" && strings.Contains(email, "@") {
 		return "email"
 	}
 	return ""
@@ -70,13 +143,13 @@ func (p *JWTPayload) ResolveDisplayName() string {
 		}
 	}
 
-	email := p.Email
+	email := p.emailOrFallback()
 	if email != "" && !strings.Contains(email, "@") {
 		email = ""
 	}
 
-	name := p.Name
-	displayName := firstNonEmptyStr(providerDisplayName, p.PreferredUsername, p.DisplayName, name)
+	name := p.nameOrFallback()
+	displayName := firstNonEmptyStr(providerDisplayName, p.preferredUsernameOrFallback(), p.displayNameOrFallback(), name)
 	username := ""
 
 	switch provider {
@@ -84,16 +157,16 @@ func (p *JWTPayload) ResolveDisplayName() string {
 		username = firstNonEmptyStr(providerUsername, name, usernameFromEmail(email))
 	case "idtrust":
 		username = firstNonEmptyStr(providerUsername)
-		displayName = firstNonEmptyStr(providerDisplayName, p.DisplayName, username)
+		displayName = firstNonEmptyStr(providerDisplayName, p.displayNameOrFallback(), username)
 		name = username
 	case "phone":
-		phone := firstNonEmptyStr(p.PhoneNumber, p.Phone)
+		phone := p.phoneOrFallback()
 		if phone != "" {
 			username = "phone_" + phone
 		}
-		displayName = firstNonEmptyStr(p.DisplayName, username)
+		displayName = firstNonEmptyStr(p.displayNameOrFallback(), username)
 	default:
-		username = firstNonEmptyStr(providerUsername, p.PreferredUsername, name, usernameFromEmail(email))
+		username = firstNonEmptyStr(providerUsername, p.preferredUsernameOrFallback(), name, usernameFromEmail(email))
 	}
 
 	if username == "" {
