@@ -14,11 +14,13 @@ import (
 
 func newTestServerWithBus(t *testing.T) *Server {
 	t.Helper()
+	bus := runtime.NewEventBus()
 	s := &Server{
-		eventBus:    runtime.NewEventBus(),
+		eventBus:    bus,
 		tuiRegistry: NewTUIRegistry(),
 	}
-	s.ringBuffer = NewRingBuffer(s.eventBus)
+	s.manager = runtime.NewAgentManager(bus)
+	s.ringBuffer = NewRingBuffer(bus)
 	s.ringBuffer.Start(context.Background())
 	t.Cleanup(s.ringBuffer.Stop)
 	return s

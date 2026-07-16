@@ -241,67 +241,9 @@ func (s *Server) handleProviderConfigPatch(w http.ResponseWriter, r *http.Reques
 	s.handleProxy(w, r)
 }
 
-// --- Permissions ---
-
-// @Summary      List pending permissions
-// @Description  Proxies to the agent backend to list pending permission requests.
-// @Tags         Permission
-// @Produce      json
-// @Success      200  {object}  envelope{data=map[string]any}
-// @Failure      503  {object}  envelope
-// @Router       /permissions [get]
-func (s *Server) handlePermissionList(w http.ResponseWriter, r *http.Request) {
-	s.handleProxy(w, r)
-}
-
-// @Summary      Reply to permission
-// @Description  Proxies to the agent backend to reply to a pending permission request.
-// @Tags         Permission
-// @Accept       json
-// @Produce      json
-// @Param        id   path      string  true  "Permission ID"
-// @Success      200  {object}  envelope{data=map[string]any}
-// @Failure      503  {object}  envelope
-// @Router       /permissions/{id}/reply [post]
-func (s *Server) handlePermissionReply(w http.ResponseWriter, r *http.Request) {
-	s.handleProxy(w, r)
-}
-
-// --- Questions ---
-
-// @Summary      List pending questions
-// @Description  Proxies to the agent backend to list pending question requests.
-// @Tags         Question
-// @Produce      json
-// @Success      200  {object}  envelope{data=map[string]any}
-// @Failure      503  {object}  envelope
-// @Router       /questions [get]
-func (s *Server) handleQuestionList(w http.ResponseWriter, r *http.Request) {
-	s.handleProxy(w, r)
-}
-
-// @Summary      Reply to question
-// @Description  Proxies to the agent backend to reply to a pending question.
-// @Tags         Question
-// @Accept       json
-// @Produce      json
-// @Param        id   path      string  true  "Question ID"
-// @Success      200  {object}  envelope{data=map[string]any}
-// @Failure      503  {object}  envelope
-// @Router       /questions/{id}/reply [post]
-func (s *Server) handleQuestionReply(w http.ResponseWriter, r *http.Request) {
-	s.handleProxy(w, r)
-}
-
-// @Summary      Reject question
-// @Description  Proxies to the agent backend to reject a pending question.
-// @Tags         Question
-// @Accept       json
-// @Produce      json
-// @Param        id   path      string  true  "Question ID"
-// @Success      200  {object}  envelope{data=map[string]any}
-// @Failure      503  {object}  envelope
-// @Router       /questions/{id}/reject [post]
-func (s *Server) handleQuestionReject(w http.ResponseWriter, r *http.Request) {
-	s.handleProxy(w, r)
-}
+// --- Permissions / Questions ---
+// The five permission/question handlers (handlePermissionList,
+// handlePermissionReply, handleQuestionList, handleQuestionReply,
+// handleQuestionReject) live in query_dispatcher.go and reply_dispatcher.go.
+// They were thin handleProxy wrappers in Phase 1; Phase 2 turned them into
+// source-aware dispatchers (TUI registry vs csc-serve proxy).

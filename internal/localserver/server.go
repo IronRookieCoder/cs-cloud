@@ -274,6 +274,13 @@ func (s *Server) Start(addr string) error {
 	if s.ringBuffer != nil {
 		s.ringBuffer.Start(ctx)
 	}
+	// Start the TUI registry's TTL cleanup goroutine (ticks every minute).
+	// Without this, expired permission/question entries leak until the
+	// process restarts; the dispatcher's expiry-aware reads still work,
+	// but re-registration of a TTL'd id would waste a map slot.
+	if s.tuiRegistry != nil {
+		s.tuiRegistry.Start(ctx)
+	}
 
 	go func() {
 		_ = s.http.Serve(ln)
@@ -303,6 +310,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Stop the ring buffer drain goroutine before tearing down the bus.
 	if s.ringBuffer != nil {
 		s.ringBuffer.Stop()
+	}
+	// Stop the TUI registry's cleanup goroutine.
+	if s.tuiRegistry != nil {
+		s.tuiRegistry.Stop()
 	}
 
 	s.manager.KillAll()
