@@ -161,10 +161,6 @@ GET /api/workspaces/{workspaceID}/issues/{issueID}/session
 }
 ```
 
-> 兼容说明：响应同时保留 `events_url` / `questions_url` /
-> `permissions_url` 三个字段（均标记 deprecated），前端应统一使用
-> `proxy_base_url` 自行派生或走 device client 封装。
-
 **响应 404**：issue 不存在或用户无权限。  
 **响应 503**：cs-cloud 设备不在线，无法创建 conversation。
 
