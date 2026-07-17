@@ -21,7 +21,7 @@
 | # | 问题 | 选择 |
 |---|------|------|
 | 1 | issue → conversation 映射存在哪里 | **multica 后端** |
-| 2 | event 流如何返回 | **multica 只返回 Gateway event URL，前端直连 Gateway** |
+| 2 | 对话 API 如何暴露给前端 | **multica 返回设备代理前缀 `proxy_base_url`，前端经 Gateway 直连设备全部对话 API** |
 | 3 | conversation 创建方式 | **multica 同步调 cs-cloud `POST /conversations` 创建** |
 
 ---
@@ -44,9 +44,13 @@ GET /api/workspaces/{workspaceID}/issues/{issueID}/session
    {
      "conversation_id": "conv-xxx",
      "workspace_directory": "/path/to/repo",
-     "events_url": "/cloud-api/cloud/device/{deviceID}/proxy/api/v1/events?conversation_id=conv-xxx"
+     "proxy_base_url": "/cloud-api/cloud/device/{deviceID}/proxy"
    }
    ```
+
+   `proxy_base_url` 是设备代理前缀，所有 cs-cloud 对话 API 都是
+   `{proxy_base_url}/api/v1/...` 形式。前端拿到后配合现有的 device client
+   封装（`createDeviceClient`）即可调用全部对话接口，无需自行拼接 URL。
 
 cs-cloud 侧**不新增业务代码**，只复用现有接口：
 
@@ -54,7 +58,7 @@ cs-cloud 侧**不新增业务代码**，只复用现有接口：
 - `GET /api/v1/events`
 - `X-Workspace-Directory` 请求头
 
-前端拿到 `conversation_id` 和 `events_url` 后，复用现有 workspace 对话组件。
+前端拿到 `conversation_id`、`workspace_directory` 和 `proxy_base_url` 后，复用现有 workspace 对话组件。
 
 ---
 
@@ -85,7 +89,7 @@ Body:
    ▼ multica 保存 issue_id → conv-xxx
    │
    ▼ 返回给前端
-   { conversation_id, workspace_directory, events_url }
+   { conversation_id, workspace_directory, proxy_base_url }
 ```
 
 ### 4.2 后续打开 issue 页面
@@ -98,22 +102,40 @@ GET multica /api/workspaces/{ws}/issues/{issueID}/session
    │
    ▼ multica 查到已有 conv-xxx
    │
-   ▼ 直接返回 { conversation_id, workspace_directory, events_url }
+   ▼ 直接返回 { conversation_id, workspace_directory, proxy_base_url }
 ```
 
 ### 4.3 前端对话交互
 
-前端复用 workspace 对话组件：
+前端拿到 `conversation_id`、`workspace_directory`、`proxy_base_url` 后，
+用现有 device client 封装实例化对话 client，复用 workspace 对话组件：
 
 ```text
-Issue 页面聊天窗口
-   │
-   ├── 发送消息 ──► POST Gateway /proxy/api/v1/conversations/{convID}/prompt
-   │
-   ├── 获取历史 ──► GET  Gateway /proxy/api/v1/conversations/{convID}/messages
-   │
-   └── 实时事件 ──► GET  Gateway /proxy/api/v1/events?conversation_id=convID
+const client = createDeviceClient({
+  baseUrl: origin + proxy_base_url,
+  directory: workspace_directory,  // transport 自动编码为 X-Workspace-Directory 头
+})
 ```
+
+之后的所有交互由 client 内部完成（路径均为 `{proxy_base_url}/api/v1/...`）：
+
+```text
+发送消息 ──► POST /conversations/{convID}/prompt/async
+停止生成 ──► POST /conversations/{convID}/abort
+获取历史 ──► GET  /conversations/{convID}/messages?limit=N
+todo 列表 ──► GET  /conversations/{convID}/todo
+实时事件 ──► GET  /events  (SSE，前端按 payload.sessionID 过滤)
+问卷回复 ──► POST /questions/{requestID}/reply | /reject
+权限回复 ──► POST /permissions/{requestID}/reply
+```
+
+注意：
+
+1. **每个请求都带 `X-Workspace-Directory` 头**（device transport 自动完成）。
+2. **事件流按 workspace directory 过滤，不按会话过滤**——流里包含该目录下
+   所有会话的事件，前端必须按 payload 里的 `sessionID` 过滤出本会话。
+3. SSE 走 Cookie 鉴权（`withCredentials`），REST 走 Cookie 或
+   `Authorization` 头。
 
 ---
 
@@ -135,9 +157,13 @@ GET /api/workspaces/{workspaceID}/issues/{issueID}/session
 {
   "conversation_id": "conv-xxx",
   "workspace_directory": "/path/to/repo",
-  "events_url": "/cloud-api/cloud/device/{deviceID}/proxy/api/v1/events?conversation_id=conv-xxx"
+  "proxy_base_url": "/cloud-api/cloud/device/{deviceID}/proxy"
 }
 ```
+
+> 兼容说明：响应同时保留 `events_url` / `questions_url` /
+> `permissions_url` 三个字段（均标记 deprecated），前端应统一使用
+> `proxy_base_url` 自行派生或走 device client 封装。
 
 **响应 404**：issue 不存在或用户无权限。  
 **响应 503**：cs-cloud 设备不在线，无法创建 conversation。
@@ -173,7 +199,7 @@ GET /api/workspaces/{workspaceID}/issues/{issueID}/session
 |------|----------|
 | multica 后端单元测试 | mock Gateway 响应，验证映射创建、查询、重建 |
 | 集成测试 | 启动真实 cs-cloud + Agent 后端，验证首次请求创建 conversation，后续请求复用 |
-| 前端测试 | 验证拿到 `conversation_id` 和 `events_url` 后能正确挂载现有对话组件 |
+| 前端测试 | 验证拿到 `conversation_id` 和 `proxy_base_url` 后能正确挂载现有对话组件 |
 
 ---
 
