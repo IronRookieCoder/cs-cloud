@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -76,14 +77,24 @@ func (tr *TaskRunner) validateAgent(agent string) error {
 }
 
 func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string) []string {
-	env := []string{
-		"MULTICA_WORKSPACE_ID=" + payload.WorkspaceID,
-		"MULTICA_TASK_ID=" + payload.TaskID,
-		"MULTICA_PROMPT=" + payload.Prompt,
-		"CS_CLOUD_WORKTREE=" + worktree,
-	}
+	env := os.Environ()
 	for k, v := range payload.Env {
-		env = append(env, k+"="+v)
+		env = setEnv(env, k, v)
 	}
+	env = setEnv(env, "MULTICA_WORKSPACE_ID", payload.WorkspaceID)
+	env = setEnv(env, "MULTICA_TASK_ID", payload.TaskID)
+	env = setEnv(env, "MULTICA_PROMPT", payload.Prompt)
+	env = setEnv(env, "CS_CLOUD_WORKTREE", worktree)
 	return env
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }

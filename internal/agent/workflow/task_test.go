@@ -7,13 +7,16 @@ import (
 )
 
 func TestTaskRunnerBuildEnv(t *testing.T) {
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
+	t.Setenv("MULTICA_TASK_ID", "parent-task")
 	tr := &TaskRunner{}
 	env := tr.buildEnv(workflow.TaskRunPayload{
 		WorkspaceID: "ws-1",
 		TaskID:      "task-1",
 		Agent:       "claude",
 		Env: map[string]string{
-			"CUSTOM_VAR": "custom-value",
+			"CUSTOM_VAR":     "custom-value",
+			"MULTICA_TASK_ID": "override-task",
 		},
 	}, "/tmp/ws")
 
@@ -31,12 +34,15 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 		t.Fatalf("MULTICA_WORKSPACE_ID = %q", got["MULTICA_WORKSPACE_ID"])
 	}
 	if got["MULTICA_TASK_ID"] != "task-1" {
-		t.Fatalf("MULTICA_TASK_ID = %q", got["MULTICA_TASK_ID"])
+		t.Fatalf("MULTICA_TASK_ID = %q, want task-1 (override failed)", got["MULTICA_TASK_ID"])
 	}
 	if got["CS_CLOUD_WORKTREE"] != "/tmp/ws" {
 		t.Fatalf("CS_CLOUD_WORKTREE = %q", got["CS_CLOUD_WORKTREE"])
 	}
 	if got["CUSTOM_VAR"] != "custom-value" {
 		t.Fatalf("CUSTOM_VAR = %q", got["CUSTOM_VAR"])
+	}
+	if got["PATH"] != "/usr/local/bin:/usr/bin" {
+		t.Fatalf("PATH not inherited: %q", got["PATH"])
 	}
 }
