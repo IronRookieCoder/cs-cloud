@@ -49,6 +49,13 @@ func (a *App) NewWorkflowDriver() *workflow.Driver {
 	deps := &workflow.Dependencies{
 		MulticaBaseURL: a.cfg.Workflow.MulticaBaseURL,
 		TokenProvider:  a.Credentials,
+		DeviceID: func() (string, error) {
+			dev, err := a.Device()
+			if err != nil {
+				return "", err
+			}
+			return dev.DeviceID, nil
+		},
 	}
 	return workflow.NewDriver(a.cfg.Workflow, deps)
 }

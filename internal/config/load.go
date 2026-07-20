@@ -48,6 +48,11 @@ func Load() (*Config, error) {
 			cfg.Workflow.GCInterval = d
 		}
 	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Workflow.HeartbeatInterval = d
+		}
+	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Workflow.AgentTimeout = d

@@ -13,6 +13,7 @@ type Config struct {
 	CacheDir           string        `json:"cache_dir"`
 	SyncInterval       time.Duration `json:"sync_interval"`
 	GCInterval         time.Duration `json:"gc_interval"`
+	HeartbeatInterval  time.Duration `json:"heartbeat_interval"`
 	AgentTimeout       time.Duration `json:"agent_timeout"`
 	MaxConcurrentTasks int           `json:"max_concurrent_tasks"`
 	AllowedAgents      []string      `json:"allowed_agents"`
@@ -26,6 +27,7 @@ func DefaultConfig() Config {
 		CacheDir:           filepath.Join(appDir, "workflow", "cache"),
 		SyncInterval:       5 * time.Minute,
 		GCInterval:         24 * time.Hour,
+		HeartbeatInterval:  15 * time.Second,
 		AgentTimeout:       30 * time.Minute,
 		MaxConcurrentTasks: 20,
 		AllowedAgents: []string{

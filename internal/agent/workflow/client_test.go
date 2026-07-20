@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -180,5 +181,134 @@ func TestClientRequestReturnsErrorOnStatus(t *testing.T) {
 	_, err := c.GetWorkspaces(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
+	}
+	var stErr *StatusError
+	if !errors.As(err, &stErr) {
+		t.Fatalf("expected *StatusError, got %T", err)
+	}
+	if stErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d", stErr.StatusCode)
+	}
+}
+
+func TestClientRegisterDaemon(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q", r.Method)
+		}
+		if r.URL.Path != workflow.MulticaDaemonRegisterEndpoint {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer token-123" {
+			t.Fatalf("missing auth header")
+		}
+		var req workflow.DaemonRegisterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if req.WorkspaceID != "ws-1" || req.DaemonID != "dev-1" {
+			t.Fatalf("unexpected body: %+v", req)
+		}
+		if len(req.Runtimes) != 1 || req.Runtimes[0].Type != "cs-cloud" {
+			t.Fatalf("unexpected runtimes: %+v", req.Runtimes)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"id":"rt-1","workspace_id":"ws-1","provider":"cs-cloud","status":"online"}]`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, tokenProvider("token-123"))
+	rts, err := c.RegisterDaemon(context.Background(), workflow.DaemonRegisterRequest{
+		WorkspaceID: "ws-1",
+		DaemonID:    "dev-1",
+		Runtimes: []workflow.DaemonRuntime{
+			{Name: "cs-cloud", Type: "cs-cloud", Version: "1.0.0", Status: "online"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !called {
+		t.Fatal("server not called")
+	}
+	if len(rts) != 1 || rts[0].ID != "rt-1" {
+		t.Fatalf("unexpected runtimes: %+v", rts)
+	}
+}
+
+func TestClientHeartbeat(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q", r.Method)
+		}
+		if r.URL.Path != workflow.MulticaDaemonHeartbeatEndpoint {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["runtime_id"] != "rt-1" {
+			t.Fatalf("unexpected body: %v", body)
+		}
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, tokenProvider("token-123"))
+	if err := c.Heartbeat(context.Background(), "rt-1"); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !called {
+		t.Fatal("server not called")
+	}
+}
+
+func TestClientHeartbeatRuntimeGone(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"runtime not found"}`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, tokenProvider("token-123"))
+	err := c.Heartbeat(context.Background(), "rt-gone")
+	if !errors.Is(err, ErrRuntimeGone) {
+		t.Fatalf("expected ErrRuntimeGone, got %v", err)
+	}
+}
+
+func TestClientDeregisterDaemon(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q", r.Method)
+		}
+		if r.URL.Path != workflow.MulticaDaemonDeregisterEndpoint {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		ids, _ := body["runtime_ids"].([]any)
+		if len(ids) != 2 {
+			t.Fatalf("unexpected body: %v", body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, tokenProvider("token-123"))
+	if err := c.DeregisterDaemon(context.Background(), []string{"rt-1", "rt-2"}); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !called {
+		t.Fatal("server not called")
 	}
 }

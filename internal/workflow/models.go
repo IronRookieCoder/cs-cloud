@@ -74,3 +74,31 @@ type TaskRunPayload struct {
 	Prompt      string            `json:"prompt"`
 	Env         map[string]string `json:"env,omitempty"`
 }
+
+// DaemonRuntime describes one runtime reported during daemon registration.
+// Type becomes the multica provider field; it must be "cs-cloud" for the
+// issue-conversation flow to discover this device.
+type DaemonRuntime struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Version string `json:"version"`
+	Status  string `json:"status"`
+}
+
+// DaemonRegisterRequest mirrors multica's POST /api/daemon/register body.
+type DaemonRegisterRequest struct {
+	WorkspaceID string          `json:"workspace_id"`
+	DaemonID    string          `json:"daemon_id"`
+	DeviceName  string          `json:"device_name,omitempty"`
+	CLIVersion  string          `json:"cli_version,omitempty"`
+	Runtimes    []DaemonRuntime `json:"runtimes"`
+}
+
+// DaemonRuntimeResponse is one registered runtime row returned by multica.
+// Only the fields cs-cloud needs are decoded.
+type DaemonRuntimeResponse struct {
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	Provider    string `json:"provider"`
+	Status      string `json:"status"`
+}

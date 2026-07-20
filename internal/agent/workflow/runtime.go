@@ -15,6 +15,9 @@ type runtimeLoop struct {
 	cache    *workflow.Cache
 	syncFunc func() error
 	gcFunc   func() error
+	// maintainFunc keeps multica daemon registrations alive (register +
+	// heartbeat + re-register). Nil disables the maintain loop.
+	maintainFunc func() error
 
 	mu      sync.Mutex
 	started bool
@@ -42,10 +45,11 @@ func (r *runtimeLoop) Start() error {
 	}
 
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	r.wg.Add(2)
+	r.wg.Add(3)
 	r.started = true
 	go r.loop(r.cfg.SyncInterval, r.doSync)
 	go r.loop(r.cfg.GCInterval, r.doGC)
+	go r.loop(r.cfg.HeartbeatInterval, r.doMaintain)
 	return nil
 }
 
@@ -101,6 +105,13 @@ func (r *runtimeLoop) doSync() error {
 func (r *runtimeLoop) doGC() error {
 	if r.gcFunc != nil {
 		return r.gcFunc()
+	}
+	return nil
+}
+
+func (r *runtimeLoop) doMaintain() error {
+	if r.maintainFunc != nil {
+		return r.maintainFunc()
 	}
 	return nil
 }

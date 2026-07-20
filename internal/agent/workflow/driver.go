@@ -2,16 +2,28 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
+	"time"
 
+	"cs-cloud/internal/logger"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/runtime"
+	"cs-cloud/internal/version"
 	"cs-cloud/internal/workflow"
 )
 
 // Compile-time check that Driver implements runtime.PersistentDriver.
 var _ runtime.PersistentDriver = (*Driver)(nil)
+
+// providerCSCloud is the multica runtime provider value the issue-conversation
+// flow searches for; registration must use exactly this string.
+const providerCSCloud = "cs-cloud"
+
+// deregisterTimeout bounds the best-effort deregister call on Stop.
+const deregisterTimeout = 10 * time.Second
 
 // taskRecord tracks a running task so it can be aborted.
 type taskRecord struct {
@@ -30,7 +42,10 @@ type Driver struct {
 	state            driverState
 	sem              chan struct{}
 	running          map[string]*taskRecord
-	mu               sync.Mutex
+	// registrations maps workspace ID → multica runtime row ID, kept alive
+	// by the maintain loop.
+	registrations map[string]string
+	mu            sync.Mutex
 }
 
 // NewDriver creates a new workflow driver.
@@ -70,14 +85,25 @@ func (d *Driver) Start() error {
 	cache := workflow.NewCache(d.cfg.CacheDir)
 	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
+	d.runtime.maintainFunc = d.maintainRegistrations
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
+	d.registrations = make(map[string]string)
 
 	if err := d.runtime.Start(); err != nil {
 		d.cleanupOnError()
 		return err
 	}
+
+	// Register with multica right away instead of waiting for the first
+	// heartbeat tick. Async so a slow/unreachable multica doesn't block
+	// daemon startup; failures are retried by the maintain loop.
+	go func() {
+		if err := d.maintainRegistrations(); err != nil {
+			logger.Warn("workflow: initial multica registration failed: %v", err)
+		}
+	}()
 
 	d.state = driverStateRunning
 	return nil
@@ -103,6 +129,23 @@ func (d *Driver) Stop() error {
 	if d.runtime != nil {
 		_ = d.runtime.Stop()
 	}
+
+	// Tell multica these runtimes went away so the runtime page doesn't
+	// wait for the sweeper to mark them offline. Best-effort: a
+	// dead multica must not delay daemon shutdown.
+	ids := make([]string, 0, len(d.registrations))
+	for _, id := range d.registrations {
+		ids = append(ids, id)
+	}
+	d.registrations = make(map[string]string)
+	if len(ids) > 0 && d.client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
+		defer cancel()
+		if err := d.client.DeregisterDaemon(ctx, ids); err != nil {
+			logger.Warn("workflow: multica deregister failed: %v", err)
+		}
+	}
+
 	for _, rec := range d.running {
 		if rec.cancel != nil {
 			rec.cancel()
@@ -205,4 +248,113 @@ func (d *Driver) tokenProvider() func() (*provider.Credentials, error) {
 		return nil
 	}
 	return d.deps.TokenProvider
+}
+
+// maintainRegistrations keeps the multica runtime rows for every workspace
+// alive: register the missing ones, heartbeat the rest, and re-register any
+// row multica dropped (heartbeat 404). Called once at startup and then on
+// every heartbeat tick by the runtime loop.
+func (d *Driver) maintainRegistrations() error {
+	if d.deps == nil || d.deps.DeviceID == nil || d.client == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+	defer cancel()
+
+	deviceID, err := d.deps.DeviceID()
+	if err != nil {
+		return fmt.Errorf("resolve device id: %w", err)
+	}
+
+	workspaces, err := d.client.GetWorkspaces(ctx)
+	if err != nil {
+		return fmt.Errorf("list workspaces: %w", err)
+	}
+
+	listed := make(map[string]bool, len(workspaces))
+	for _, ws := range workspaces {
+		listed[ws.ID] = true
+	}
+
+	d.mu.Lock()
+	for workspaceID, runtimeID := range d.registrations {
+		if listed[workspaceID] {
+			continue
+		}
+		// Workspace disappeared from the listing (token scope changed?);
+		// stop heartbeating it but leave the row for the sweeper.
+		delete(d.registrations, workspaceID)
+		logger.Warn("workflow: workspace %s no longer listed, dropping registration %s", workspaceID, runtimeID)
+	}
+	d.mu.Unlock()
+
+	var firstErr error
+	for _, ws := range workspaces {
+		if err := d.maintainWorkspace(ctx, ws.ID, deviceID); err != nil {
+			logger.Warn("workflow: maintain registration for workspace %s: %v", ws.ID, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// maintainWorkspace heartbeats an existing registration or registers the
+// workspace if it has none. A 404 from heartbeat means multica deleted the
+// runtime row (sweeper or restart), so re-register immediately.
+func (d *Driver) maintainWorkspace(ctx context.Context, workspaceID, deviceID string) error {
+	d.mu.Lock()
+	runtimeID, registered := d.registrations[workspaceID]
+	d.mu.Unlock()
+
+	if registered {
+		err := d.client.Heartbeat(ctx, runtimeID)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrRuntimeGone) {
+			return err
+		}
+		d.mu.Lock()
+		delete(d.registrations, workspaceID)
+		d.mu.Unlock()
+	}
+
+	return d.registerWorkspace(ctx, workspaceID, deviceID)
+}
+
+// registerWorkspace registers this daemon's cs-cloud runtime for one
+// workspace and records the returned runtime row ID.
+func (d *Driver) registerWorkspace(ctx context.Context, workspaceID, deviceID string) error {
+	hostname, _ := os.Hostname()
+	req := workflow.DaemonRegisterRequest{
+		WorkspaceID: workspaceID,
+		DaemonID:    deviceID,
+		DeviceName:  hostname,
+		CLIVersion:  version.Get(),
+		Runtimes: []workflow.DaemonRuntime{
+			{
+				Name:    providerCSCloud,
+				Type:    providerCSCloud,
+				Version: version.Get(),
+				Status:  "online",
+			},
+		},
+	}
+
+	rows, err := d.client.RegisterDaemon(ctx, req)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 || rows[0].ID == "" {
+		return fmt.Errorf("register daemon returned no runtime id")
+	}
+
+	d.mu.Lock()
+	d.registrations[workspaceID] = rows[0].ID
+	d.mu.Unlock()
+	logger.Info("workflow: registered cs-cloud runtime %s for workspace %s", rows[0].ID, workspaceID)
+	return nil
 }

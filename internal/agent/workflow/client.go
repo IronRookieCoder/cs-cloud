@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,23 @@ type Client struct {
 	tokenProvider func() (*provider.Credentials, error)
 	http          *http.Client
 }
+
+// StatusError carries the HTTP status of a failed multica call so callers
+// can react to specific codes (e.g. 404 → re-register).
+type StatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// ErrRuntimeGone is returned (wrapped) when multica reports the runtime row
+// no longer exists; the driver should re-register.
+var ErrRuntimeGone = errors.New("runtime gone")
 
 // NewClient creates a new multica REST client.
 func NewClient(baseURL string, tp func() (*provider.Credentials, error)) *Client {
@@ -75,7 +93,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s %s returned %d: %s", method, path, resp.StatusCode, string(b))
+		return &StatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: string(b)}
 	}
 
 	if out != nil {
@@ -121,4 +139,31 @@ func (c *Client) FailTask(ctx context.Context, taskID string, reason string) err
 func (c *Client) PostTaskMessages(ctx context.Context, taskID string, messages string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskMessagesEndpoint, taskID)
 	return c.request(ctx, http.MethodPost, path, map[string]any{"messages": messages}, nil)
+}
+
+// RegisterDaemon registers this device as a cs-cloud runtime in the given
+// workspace and returns the registered runtime rows (with their IDs).
+func (c *Client) RegisterDaemon(ctx context.Context, req workflow.DaemonRegisterRequest) ([]workflow.DaemonRuntimeResponse, error) {
+	var out []workflow.DaemonRuntimeResponse
+	err := c.request(ctx, http.MethodPost, workflow.MulticaDaemonRegisterEndpoint, req, &out)
+	return out, err
+}
+
+// Heartbeat keeps a registered runtime alive. It returns ErrRuntimeGone
+// (wrapped) when multica responds 404, meaning the row was deleted and the
+// caller should re-register.
+func (c *Client) Heartbeat(ctx context.Context, runtimeID string) error {
+	err := c.request(ctx, http.MethodPost, workflow.MulticaDaemonHeartbeatEndpoint, map[string]any{"runtime_id": runtimeID}, nil)
+	if err != nil {
+		var stErr *StatusError
+		if errors.As(err, &stErr) && stErr.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %s", ErrRuntimeGone, err)
+		}
+	}
+	return err
+}
+
+// DeregisterDaemon removes the given runtime rows (best-effort shutdown).
+func (c *Client) DeregisterDaemon(ctx context.Context, runtimeIDs []string) error {
+	return c.request(ctx, http.MethodPost, workflow.MulticaDaemonDeregisterEndpoint, map[string]any{"runtime_ids": runtimeIDs}, nil)
 }
