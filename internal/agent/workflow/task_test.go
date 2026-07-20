@@ -1,7 +1,10 @@
 package workflow
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"cs-cloud/internal/workflow"
 )
@@ -15,18 +18,15 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 		TaskID:      "task-1",
 		Agent:       "claude",
 		Env: map[string]string{
-			"CUSTOM_VAR":     "custom-value",
+			"CUSTOM_VAR":      "custom-value",
 			"MULTICA_TASK_ID": "override-task",
 		},
 	}, "/tmp/ws")
 
 	got := make(map[string]string, len(env))
 	for _, e := range env {
-		for i := 0; i < len(e); i++ {
-			if e[i] == '=' {
-				got[e[:i]] = e[i+1:]
-				break
-			}
+		if k, v, ok := strings.Cut(e, "="); ok {
+			got[k] = v
 		}
 	}
 
@@ -44,5 +44,49 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 	}
 	if got["PATH"] != "/usr/local/bin:/usr/bin" {
 		t.Fatalf("PATH not inherited: %q", got["PATH"])
+	}
+}
+
+func TestTaskRunnerPassesPromptAsArgument(t *testing.T) {
+	installFakeAgent(t, "fake-agent")
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"fake-agent"})
+
+	out, err := tr.Run(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-1",
+		WorkspaceID: "ws-1",
+		Agent:       "fake-agent",
+		Prompt:      "hello world",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(string(out), "hello world") {
+		t.Fatalf("output = %q, want prompt as argument", out)
+	}
+}
+
+func TestTaskRunnerCscAddsOutputFormatText(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+
+	out, err := tr.Run(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-2",
+		WorkspaceID: "ws-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "do thing") {
+		t.Fatalf("output = %q, want prompt", got)
+	}
+	if !strings.Contains(got, "--output-format") || !strings.Contains(got, "text") {
+		t.Fatalf("output = %q, want --output-format text", got)
 	}
 }

@@ -32,9 +32,16 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 // stdout/stderr and any execution error. The caller is responsible for
 // reporting task status to multica.
 func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, tr.agentTimeout)
+	defer cancel()
+
 	repoURL, err := tr.resolveRepoURL(ctx, payload.WorkspaceID, payload.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo: %w", err)
+	}
+
+	if err := tr.validateAgent(payload.Agent); err != nil {
+		return nil, err
 	}
 
 	worktree, err := tr.workspaceManager.CreateWorktree(payload.WorkspaceID, payload.TaskID, repoURL, "HEAD")
@@ -42,14 +49,14 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 		return nil, fmt.Errorf("prepare worktree: %w", err)
 	}
 
-	if err := tr.validateAgent(payload.Agent); err != nil {
-		return nil, err
+	args := []string{payload.Prompt}
+	if payload.Agent == "csc" {
+		args = append(args, "--output-format", "text")
 	}
 
-	cmd := exec.CommandContext(ctx, payload.Agent)
+	cmd := exec.CommandContext(ctx, payload.Agent, args...)
 	cmd.Dir = worktree
 	cmd.Env = tr.buildEnv(payload, worktree)
-	cmd.Stdin = strings.NewReader(payload.Prompt)
 
 	return cmd.CombinedOutput()
 }

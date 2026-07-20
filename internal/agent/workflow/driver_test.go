@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -183,7 +185,7 @@ func testDriverConfig(t *testing.T, heartbeat time.Duration) workflow.Config {
 		GCInterval:        time.Hour,
 		HeartbeatInterval: heartbeat,
 		AgentTimeout:      time.Minute,
-		AllowedAgents:     []string{"sh"},
+		AllowedAgents:     []string{"fakeagent"},
 	}
 }
 
@@ -305,10 +307,14 @@ func TestDriverSkipsRegistrationWithoutDeviceID(t *testing.T) {
 }
 
 func TestDriverAbortTask(t *testing.T) {
+	installFakeAgent(t, "fakeagent")
+
 	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer multica.Close()
+
+	startedFile := filepath.Join(t.TempDir(), "started")
 
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
@@ -316,7 +322,7 @@ func TestDriverAbortTask(t *testing.T) {
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 		AgentTimeout:   time.Minute,
-		AllowedAgents:  []string{"sh"},
+		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := NewDriver(cfg, &Dependencies{
 		MulticaBaseURL: multica.URL,
@@ -335,12 +341,18 @@ func TestDriverAbortTask(t *testing.T) {
 		runErr = d.RunTask(context.Background(), workflow.TaskRunPayload{
 			TaskID:      "task-1",
 			WorkspaceID: "ws-1",
-			Agent:       "sh",
+			Agent:       "fakeagent",
 			Prompt:      "sleep 10",
+			Env: map[string]string{
+				"FAKE_AGENT_STARTED_FILE": startedFile,
+			},
 		})
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	waitFor(t, "fake agent to start", func() bool {
+		_, err := os.Stat(startedFile)
+		return err == nil
+	})
 	if err := d.AbortTask("task-1"); err != nil {
 		t.Fatalf("abort: %v", err)
 	}
@@ -404,13 +416,15 @@ func (cr *callbackRecorder) body(suffix string) []byte {
 
 func asyncTestDriver(t *testing.T, multicaURL string) *Driver {
 	t.Helper()
+	installFakeAgent(t, "fakeagent")
+
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
 		CacheDir:       t.TempDir(),
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 		AgentTimeout:   time.Minute,
-		AllowedAgents:  []string{"sh"},
+		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := NewDriver(cfg, &Dependencies{
 		MulticaBaseURL: multicaURL,
@@ -433,7 +447,7 @@ func TestDriverRunTaskAsyncCompletes(t *testing.T) {
 	err := d.RunTaskAsync(workflow.TaskRunPayload{
 		TaskID:      "task-async",
 		WorkspaceID: "ws-1",
-		Agent:       "sh",
+		Agent:       "fakeagent",
 		Prompt:      "echo hello",
 	})
 	if err != nil {
@@ -478,7 +492,7 @@ func TestDriverRunTaskAsyncDuplicate(t *testing.T) {
 	payload := workflow.TaskRunPayload{
 		TaskID:      "task-dup",
 		WorkspaceID: "ws-1",
-		Agent:       "sh",
+		Agent:       "fakeagent",
 		Prompt:      "sleep 5",
 	}
 	if err := d.RunTaskAsync(payload); err != nil {
@@ -505,7 +519,7 @@ func TestDriverAbortBeforeRunTombstone(t *testing.T) {
 	err := d.RunTaskAsync(workflow.TaskRunPayload{
 		TaskID:      "task-late",
 		WorkspaceID: "ws-1",
-		Agent:       "sh",
+		Agent:       "fakeagent",
 		Prompt:      "echo should-not-run",
 	})
 	if err == nil || !strings.Contains(err.Error(), "aborted") {
@@ -524,7 +538,7 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 	if err := d.RunTaskAsync(workflow.TaskRunPayload{
 		TaskID:      "task-stale",
 		WorkspaceID: "ws-1",
-		Agent:       "sh",
+		Agent:       "fakeagent",
 		Prompt:      "echo should-not-run",
 	}); err != nil {
 		t.Fatalf("RunTaskAsync: %v", err)
@@ -541,4 +555,3 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 		t.Fatalf("unexpected completion callbacks: %v", cr.calls)
 	}
 }
-
