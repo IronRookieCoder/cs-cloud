@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,10 @@ func isolatedConfig(t *testing.T, content string) {
 			t.Fatal(err)
 		}
 	}
+	// Provide a default CoStrict base URL so Load() does not fail on the
+	// required workflow multica URL. Tests that need to control this can
+	// override the env var explicitly.
+	t.Setenv("COSTRICT_BASE_URL", "https://example.costrict.local")
 }
 
 func TestLoad_AgentPathFromEnv(t *testing.T) {
@@ -198,5 +203,65 @@ func TestLoadWorkflowConfigFromEnv(t *testing.T) {
 	}
 	if cfg.Workflow.MaxConcurrentTasks != 42 {
 		t.Fatalf("MaxConcurrentTasks = %d", cfg.Workflow.MaxConcurrentTasks)
+	}
+}
+
+func TestLoad_WorkflowMulticaBaseURLDerivedFromBaseURL(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
+	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://zgsmtest.cn:30443/workflow-backend"
+	if cfg.Workflow.MulticaBaseURL != want {
+		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	}
+}
+
+func TestLoad_WorkflowMulticaBaseURLFromEnvOverridesBaseURL(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
+	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "https://explicit.example.com/multica")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://explicit.example.com/multica"
+	if cfg.Workflow.MulticaBaseURL != want {
+		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	}
+}
+
+func TestLoad_WorkflowMulticaBaseURLDefaultWhenNoBaseURL(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	// Ensure neither explicit env nor derivation source is present.
+	t.Setenv("COSTRICT_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when no multica base URL is configured")
+	}
+	if !strings.Contains(err.Error(), "workflow multica base URL is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_WorkflowMulticaBaseURLFromConfigFilePreventsDerivation(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"multica_base_url":"https://file.example.com"}}`)
+	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
+	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://file.example.com"
+	if cfg.Workflow.MulticaBaseURL != want {
+		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
 	}
 }

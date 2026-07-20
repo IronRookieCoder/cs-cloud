@@ -9,8 +9,8 @@ import (
 
 func TestDefaultWorkflowConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.MulticaBaseURL != "https://api.multica.ai" {
-		t.Fatalf("MulticaBaseURL = %q", cfg.MulticaBaseURL)
+	if cfg.MulticaBaseURL != "" {
+		t.Fatalf("MulticaBaseURL = %q, want empty", cfg.MulticaBaseURL)
 	}
 	if !filepath.IsAbs(cfg.WorkspacesRoot) {
 		t.Fatalf("WorkspacesRoot is not absolute: %q", cfg.WorkspacesRoot)

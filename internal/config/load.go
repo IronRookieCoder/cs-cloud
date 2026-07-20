@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -166,12 +167,23 @@ func Load() (*Config, error) {
 		cfg.IdleBufferSeconds = 30
 	}
 
+	// If the workflow multica base URL is not explicitly configured and we
+	// have a CoStrict base URL, derive the test/enterprise workflow backend
+	// URL from it. Explicit env/file config always wins.
+	if cfg.Workflow.MulticaBaseURL == "" && cfg.BaseURL != "" {
+		cfg.Workflow.MulticaBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
+	}
+
+	if cfg.Workflow.MulticaBaseURL == "" {
+		return nil, fmt.Errorf("workflow multica base URL is required; set COSTRICT_BASE_URL or CS_CLOUD_WORKFLOW_MULTICA_BASE_URL")
+	}
+
 	return cfg, nil
 }
 
 func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	defaults := workflow.DefaultConfig()
-	if file.MulticaBaseURL != "" && current.MulticaBaseURL == defaults.MulticaBaseURL {
+	if file.MulticaBaseURL != "" && current.MulticaBaseURL == "" {
 		current.MulticaBaseURL = file.MulticaBaseURL
 	}
 	if file.WorkspacesRoot != "" && current.WorkspacesRoot == defaults.WorkspacesRoot {

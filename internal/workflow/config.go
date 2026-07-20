@@ -22,7 +22,7 @@ type Config struct {
 func DefaultConfig() Config {
 	appDir := platform.AppDir()
 	return Config{
-		MulticaBaseURL:     "https://api.multica.ai",
+		MulticaBaseURL:     "",
 		WorkspacesRoot:     filepath.Join(appDir, "workflow", "workspaces"),
 		CacheDir:           filepath.Join(appDir, "workflow", "cache"),
 		SyncInterval:       5 * time.Minute,
