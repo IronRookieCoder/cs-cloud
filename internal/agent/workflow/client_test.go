@@ -90,8 +90,8 @@ func TestClientCompleteTask(t *testing.T) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("unmarshal body: %v", err)
 		}
-		if payload["result"] != "done" {
-			t.Fatalf("result = %v", payload["result"])
+		if payload["output"] != "done" {
+			t.Fatalf("output = %v", payload["output"])
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -130,11 +130,31 @@ func TestClientFailTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, tokenProvider("token-123"))
-	if err := c.FailTask(context.Background(), "task-1", "something went wrong"); err != nil {
+	if err := c.FailTask(context.Background(), "task-1", "something went wrong", ""); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
 		t.Fatal("server not called")
+	}
+}
+
+func TestClientFailTaskWithFailureReason(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("unmarshal body: %v", err)
+		}
+		if payload["error"] != "aborted" || payload["failure_reason"] != "cancelled" {
+			t.Fatalf("unexpected body: %v", payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, tokenProvider("token-123"))
+	if err := c.FailTask(context.Background(), "task-1", "aborted", "cancelled"); err != nil {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -150,12 +170,15 @@ func TestClientPostTaskMessages(t *testing.T) {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
 		body, _ := io.ReadAll(r.Body)
-		var payload map[string]any
+		var payload struct {
+			Messages []workflow.TaskMessage `json:"messages"`
+		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("unmarshal body: %v", err)
 		}
-		if payload["messages"] != "hello world" {
-			t.Fatalf("messages = %v", payload["messages"])
+		if len(payload.Messages) != 1 || payload.Messages[0].Seq != 1 ||
+			payload.Messages[0].Type != "text" || payload.Messages[0].Content != "hello world" {
+			t.Fatalf("messages = %+v", payload.Messages)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

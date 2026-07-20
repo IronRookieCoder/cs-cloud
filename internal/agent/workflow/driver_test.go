@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -351,6 +353,197 @@ func TestDriverAbortTask(t *testing.T) {
 	wg.Wait()
 	if runErr == nil {
 		t.Fatal("expected RunTask to return an error after abort")
+	}
+}
+
+// callbackRecorder is a fake multica that records the daemon task callbacks
+// (start / messages / complete / fail) with their raw request bodies.
+type callbackRecorder struct {
+	mu       sync.Mutex
+	calls    []string
+	bodies   map[string][]byte
+	startErr int // if non-zero, the /start endpoint responds with this status
+}
+
+func newCallbackRecorder() *callbackRecorder {
+	return &callbackRecorder{bodies: make(map[string][]byte)}
+}
+
+func (cr *callbackRecorder) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		cr.mu.Lock()
+		cr.calls = append(cr.calls, r.URL.Path)
+		cr.bodies[r.URL.Path] = body
+		startErr := cr.startErr
+		cr.mu.Unlock()
+		if startErr != 0 && strings.HasSuffix(r.URL.Path, "/start") {
+			w.WriteHeader(startErr)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+func (cr *callbackRecorder) hasCall(suffix string) bool {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	for _, c := range cr.calls {
+		if strings.HasSuffix(c, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (cr *callbackRecorder) body(suffix string) []byte {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	for p, b := range cr.bodies {
+		if strings.HasSuffix(p, suffix) {
+			return b
+		}
+	}
+	return nil
+}
+
+func asyncTestDriver(t *testing.T, multicaURL string) *Driver {
+	t.Helper()
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"sh"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: multicaURL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { d.Stop() })
+	return d
+}
+
+func TestDriverRunTaskAsyncCompletes(t *testing.T) {
+	cr := newCallbackRecorder()
+	ts := httptest.NewServer(cr.handler())
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+
+	err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-async",
+		WorkspaceID: "ws-1",
+		Agent:       "sh",
+		Prompt:      "echo hello",
+	})
+	if err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool { return cr.hasCall("/complete") })
+
+	if !cr.hasCall("/start") || !cr.hasCall("/messages") {
+		t.Fatalf("missing callbacks, got %v", cr.calls)
+	}
+
+	var msgs struct {
+		Messages []workflow.TaskMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(cr.body("/messages"), &msgs); err != nil {
+		t.Fatalf("messages body: %v", err)
+	}
+	if len(msgs.Messages) != 1 || msgs.Messages[0].Type != "text" ||
+		!strings.Contains(msgs.Messages[0].Content, "hello") {
+		t.Fatalf("messages = %+v", msgs.Messages)
+	}
+
+	var complete map[string]any
+	if err := json.Unmarshal(cr.body("/complete"), &complete); err != nil {
+		t.Fatalf("complete body: %v", err)
+	}
+	out, _ := complete["output"].(string)
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("complete output = %q", out)
+	}
+}
+
+func TestDriverRunTaskAsyncDuplicate(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+
+	payload := workflow.TaskRunPayload{
+		TaskID:      "task-dup",
+		WorkspaceID: "ws-1",
+		Agent:       "sh",
+		Prompt:      "sleep 5",
+	}
+	if err := d.RunTaskAsync(payload); err != nil {
+		t.Fatalf("first RunTaskAsync: %v", err)
+	}
+	if err := d.RunTaskAsync(payload); err == nil {
+		t.Fatal("expected duplicate task error")
+	}
+}
+
+func TestDriverAbortBeforeRunTombstone(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+
+	// Abort arrives before the pushed run request.
+	if err := d.AbortTask("task-late"); err == nil {
+		t.Fatal("expected abort of unknown task to error")
+	}
+
+	err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-late",
+		WorkspaceID: "ws-1",
+		Agent:       "sh",
+		Prompt:      "echo should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "aborted") {
+		t.Fatalf("expected tombstone rejection, got %v", err)
+	}
+}
+
+func TestDriverStartTaskFailureAborts(t *testing.T) {
+	cr := newCallbackRecorder()
+	cr.startErr = http.StatusConflict
+	ts := httptest.NewServer(cr.handler())
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-stale",
+		WorkspaceID: "ws-1",
+		Agent:       "sh",
+		Prompt:      "echo should-not-run",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	// The task must be cleaned up locally without a fail/complete callback.
+	waitFor(t, "task removed from running map", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.running["task-stale"]
+		return !ok
+	})
+	if cr.hasCall("/complete") || cr.hasCall("/fail") {
+		t.Fatalf("unexpected completion callbacks: %v", cr.calls)
 	}
 }
 

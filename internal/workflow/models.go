@@ -73,6 +73,17 @@ type TaskRunPayload struct {
 	Agent       string            `json:"agent"`
 	Prompt      string            `json:"prompt"`
 	Env         map[string]string `json:"env,omitempty"`
+	// Kind is the multica task kind (direct|comment|chat|quick_create|
+	// autopilot). Optional; consumers may ignore it.
+	Kind string `json:"kind,omitempty"`
+}
+
+// TaskMessage mirrors one entry of multica's POST
+// /api/daemon/tasks/{id}/messages batch body.
+type TaskMessage struct {
+	Seq     int    `json:"seq"`
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
 }
 
 // DaemonRuntime describes one runtime reported during daemon registration.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +102,72 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "accepted") {
+		t.Fatalf("body = %s, want status accepted", rec.Body.String())
+	}
+}
+
+func TestHandleWorkflowTaskRunMissingTaskID(t *testing.T) {
+	d := workflowagent.NewDriver(workflow.Config{}, nil)
+	s := New(WithWorkflowDriver(d))
+
+	payload := workflow.TaskRunPayload{WorkspaceID: "ws-1", Agent: "true", Prompt: "hello"}
+	b, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/x/run", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskRun(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
+	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer multica.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"sh"},
+	}
+	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+		MulticaBaseURL: multica.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	defer d.Stop()
+
+	s := New(WithWorkflowDriver(d))
+
+	payload := workflow.TaskRunPayload{
+		TaskID:      "task-dup",
+		WorkspaceID: "ws-1",
+		Agent:       "sh",
+		Prompt:      "sleep 5",
+	}
+	b, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-dup/run", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskRun(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first run: code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-dup/run", bytes.NewReader(b))
+	rec = httptest.NewRecorder()
+	s.handleWorkflowTaskRun(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate run: code = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

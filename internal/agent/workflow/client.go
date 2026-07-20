@@ -123,22 +123,30 @@ func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	return c.request(ctx, http.MethodPost, path, nil, nil)
 }
 
-// CompleteTask marks a task as complete with the given result.
-func (c *Client) CompleteTask(ctx context.Context, taskID string, result any) error {
+// CompleteTask marks a task as complete with the given output.
+func (c *Client) CompleteTask(ctx context.Context, taskID string, output string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskCompleteEndpoint, taskID)
-	return c.request(ctx, http.MethodPost, path, map[string]any{"result": result}, nil)
+	return c.request(ctx, http.MethodPost, path, map[string]any{"output": output}, nil)
 }
 
-// FailTask marks a task as failed with the given reason.
-func (c *Client) FailTask(ctx context.Context, taskID string, reason string) error {
+// FailTask marks a task as failed with the given reason. failureReason is
+// optional; pass "cancelled" for user-aborted tasks so multica does not
+// auto-retry them.
+func (c *Client) FailTask(ctx context.Context, taskID string, reason string, failureReason string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskFailEndpoint, taskID)
-	return c.request(ctx, http.MethodPost, path, map[string]any{"error": reason}, nil)
+	body := map[string]any{"error": reason}
+	if failureReason != "" {
+		body["failure_reason"] = failureReason
+	}
+	return c.request(ctx, http.MethodPost, path, body, nil)
 }
 
-// PostTaskMessages uploads task output messages.
-func (c *Client) PostTaskMessages(ctx context.Context, taskID string, messages string) error {
+// PostTaskMessages uploads task output as a single text message, matching
+// multica's batch shape ({"messages": [{seq, type, content}]}).
+func (c *Client) PostTaskMessages(ctx context.Context, taskID string, output string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskMessagesEndpoint, taskID)
-	return c.request(ctx, http.MethodPost, path, map[string]any{"messages": messages}, nil)
+	msgs := []workflow.TaskMessage{{Seq: 1, Type: "text", Content: output}}
+	return c.request(ctx, http.MethodPost, path, map[string]any{"messages": msgs}, nil)
 }
 
 // RegisterDaemon registers this device as a cs-cloud runtime in the given

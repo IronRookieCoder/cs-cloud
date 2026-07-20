@@ -1,7 +1,6 @@
 package localserver
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
@@ -13,7 +12,7 @@ import (
 // It is implemented by *workflowagent.Driver.
 type taskRunner interface {
 	runtime.PersistentDriver
-	RunTask(ctx context.Context, payload workflow.TaskRunPayload) error
+	RunTaskAsync(payload workflow.TaskRunPayload) error
 	AbortTask(taskID string) error
 }
 
@@ -32,7 +31,9 @@ func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWorkflowTaskRun accepts a task payload and dispatches it to the
-// workflow driver. The driver reports status to multica asynchronously.
+// workflow driver, responding as soon as the task is reserved — the agent
+// run itself can take minutes and the gateway proxy caps requests at ~30s.
+// The driver reports status to multica asynchronously.
 func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 	d, ok := s.manager.GetPersistentDriver("workflow")
 	if !ok {
@@ -45,6 +46,10 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
+	if payload.TaskID == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task_id")
+		return
+	}
 
 	tr, ok := d.(taskRunner)
 	if !ok {
@@ -52,11 +57,11 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tr.RunTask(r.Context(), payload); err != nil {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	if err := tr.RunTaskAsync(payload); err != nil {
+		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
-	writeOK(w, map[string]string{"status": "started"})
+	writeOK(w, map[string]string{"status": "accepted"})
 }
 
 // handleWorkflowTaskAbort cancels a running workflow task.

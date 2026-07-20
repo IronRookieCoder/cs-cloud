@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,13 @@ const providerCSCloud = "cs-cloud"
 // deregisterTimeout bounds the best-effort deregister call on Stop.
 const deregisterTimeout = 10 * time.Second
 
+// abortTombstoneTTL is how long an abort tombstone for a not-yet-started
+// task is remembered (the abort can race ahead of the pushed run request).
+const abortTombstoneTTL = time.Hour
+
+// maxCallbackOutputBytes caps the output uploaded to multica per task.
+const maxCallbackOutputBytes = 256 * 1024
+
 // taskRecord tracks a running task so it can be aborted.
 type taskRecord struct {
 	cancel  context.CancelFunc
@@ -42,6 +50,9 @@ type Driver struct {
 	state            driverState
 	sem              chan struct{}
 	running          map[string]*taskRecord
+	// abortedIDs tombstones task IDs aborted before their run request
+	// arrived; reserve rejects them so a cancelled task never executes.
+	abortedIDs map[string]time.Time
 	// registrations maps workspace ID → multica runtime row ID, kept alive
 	// by the maintain loop.
 	registrations map[string]string
@@ -89,6 +100,7 @@ func (d *Driver) Start() error {
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
+	d.abortedIDs = make(map[string]time.Time)
 	d.registrations = make(map[string]string)
 
 	if err := d.runtime.Start(); err != nil {
@@ -119,6 +131,7 @@ func (d *Driver) cleanupOnError() {
 	d.runner = nil
 	d.sem = nil
 	d.running = nil
+	d.abortedIDs = nil
 	d.state = driverStateError
 }
 
@@ -166,71 +179,157 @@ func (d *Driver) Health() error {
 	return nil
 }
 
-// RunTask executes a task payload. It returns an error if the driver is not
-// running or if task execution fails.
+// RunTask executes a task payload synchronously. It returns an error if the
+// driver is not running or if task execution fails.
 func (d *Driver) RunTask(ctx context.Context, payload workflow.TaskRunPayload) error {
-	if err := d.Health(); err != nil {
+	rec, err := d.reserve(payload)
+	if err != nil {
 		return err
+	}
+	defer d.release(payload.TaskID, rec)
+
+	ctx, cancel := context.WithTimeout(ctx, d.cfg.AgentTimeout)
+	defer cancel()
+	d.armCancel(rec, cancel)
+
+	return d.execute(ctx, payload, rec)
+}
+
+// RunTaskAsync reserves the task synchronously — rejecting duplicates, a
+// full queue, and pre-aborted tasks before the caller responds — and then
+// executes it in a detached goroutine with its own timeout context. The
+// localserver handler uses this so the HTTP response is not held for the
+// whole agent run (the gateway proxy caps requests at ~30s).
+func (d *Driver) RunTaskAsync(payload workflow.TaskRunPayload) error {
+	rec, err := d.reserve(payload)
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer d.release(payload.TaskID, rec)
+		ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+		defer cancel()
+		d.armCancel(rec, cancel)
+		if err := d.execute(ctx, payload, rec); err != nil {
+			logger.Warn("workflow: task %s failed: %v", payload.TaskID, err)
+		}
+	}()
+	return nil
+}
+
+// reserve claims a semaphore slot (failing fast when full) and registers the
+// task as running. It also rejects tasks whose abort arrived before the run
+// request (cancel raced the server-side push).
+func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
+	if err := d.Health(); err != nil {
+		return nil, err
 	}
 
 	select {
 	case d.sem <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
+	default:
+		return nil, fmt.Errorf("too many running tasks")
 	}
-	defer func() { <-d.sem }()
-
-	ctx, cancel := context.WithTimeout(ctx, d.cfg.AgentTimeout)
 
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if _, exists := d.running[payload.TaskID]; exists {
-		d.mu.Unlock()
-		cancel()
-		return fmt.Errorf("task %s is already running", payload.TaskID)
+		<-d.sem
+		return nil, fmt.Errorf("task %s is already running", payload.TaskID)
 	}
-	rec := &taskRecord{cancel: cancel}
-	d.running[payload.TaskID] = rec
-	d.mu.Unlock()
-
-	defer func() {
-		d.mu.Lock()
-		delete(d.running, payload.TaskID)
-		d.mu.Unlock()
-		cancel()
-	}()
-
-	if err := d.client.StartTask(ctx, payload.TaskID); err != nil {
-		return err
-	}
-
-	out, err := d.runner.Run(ctx, payload)
-	if err != nil {
-		_ = d.client.PostTaskMessages(ctx, payload.TaskID, string(out))
-		if d.aborted(payload.TaskID) {
-			_ = d.client.FailTask(ctx, payload.TaskID, "aborted")
-		} else {
-			_ = d.client.FailTask(ctx, payload.TaskID, err.Error())
+	if ts, wasAborted := d.abortedIDs[payload.TaskID]; wasAborted {
+		<-d.sem
+		if time.Since(ts) <= abortTombstoneTTL {
+			delete(d.abortedIDs, payload.TaskID)
+			return nil, fmt.Errorf("task %s was aborted before it started", payload.TaskID)
 		}
-		return err
+		delete(d.abortedIDs, payload.TaskID)
+	}
+	// GC expired tombstones while we hold the lock.
+	for id, ts := range d.abortedIDs {
+		if time.Since(ts) > abortTombstoneTTL {
+			delete(d.abortedIDs, id)
+		}
 	}
 
-	_ = d.client.PostTaskMessages(ctx, payload.TaskID, string(out))
-	return d.client.CompleteTask(ctx, payload.TaskID, map[string]any{"status": "ok"})
+	rec := &taskRecord{}
+	d.running[payload.TaskID] = rec
+	return rec, nil
 }
 
-// AbortTask cancels a running task and reports it as aborted to multica.
+// release unregisters the task and frees its semaphore slot.
+func (d *Driver) release(taskID string, rec *taskRecord) {
+	d.mu.Lock()
+	delete(d.running, taskID)
+	d.mu.Unlock()
+	<-d.sem
+}
+
+// armCancel wires the execution context's cancel into the task record so
+// AbortTask can stop the run; if the abort landed first, cancel immediately.
+func (d *Driver) armCancel(rec *taskRecord, cancel context.CancelFunc) {
+	d.mu.Lock()
+	rec.cancel = cancel
+	aborted := rec.aborted
+	d.mu.Unlock()
+	if aborted {
+		cancel()
+	}
+}
+
+// execute runs the agent and reports the outcome to multica.
+func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, rec *taskRecord) error {
+	if err := d.client.StartTask(ctx, payload.TaskID); err != nil {
+		// multica rejected the start (e.g. the task was cancelled between
+		// dispatch and device accept) — abort locally without reporting a
+		// failure for a task that is already finalized server-side.
+		if rec.cancel != nil {
+			rec.cancel()
+		}
+		return fmt.Errorf("start task: %w", err)
+	}
+
+	out, runErr := d.runner.Run(ctx, payload)
+	output := truncateOutput(string(out))
+	_ = d.client.PostTaskMessages(ctx, payload.TaskID, output)
+	if runErr != nil {
+		if d.aborted(payload.TaskID) {
+			_ = d.client.FailTask(ctx, payload.TaskID, "aborted", "cancelled")
+		} else {
+			_ = d.client.FailTask(ctx, payload.TaskID, runErr.Error(), "")
+		}
+		return runErr
+	}
+
+	return d.client.CompleteTask(ctx, payload.TaskID, output)
+}
+
+// truncateOutput caps callback payloads at maxCallbackOutputBytes, staying
+// on a valid UTF-8 boundary.
+func truncateOutput(s string) string {
+	if len(s) <= maxCallbackOutputBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxCallbackOutputBytes], "") + "\n... (output truncated)"
+}
+
+// AbortTask cancels a running task. When the task is not (yet) running, the
+// ID is tombstoned so a run request that arrives later — the abort raced
+// ahead of the server-side push — is rejected instead of executed.
 func (d *Driver) AbortTask(taskID string) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	rec, ok := d.running[taskID]
 	if !ok {
-		d.mu.Unlock()
+		if d.abortedIDs != nil {
+			d.abortedIDs[taskID] = time.Now()
+		}
 		return fmt.Errorf("task %s is not running", taskID)
 	}
 	rec.aborted = true
 	if rec.cancel != nil {
 		rec.cancel()
 	}
-	d.mu.Unlock()
 	return nil
 }
 
