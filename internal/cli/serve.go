@@ -31,7 +31,7 @@ func serve(a *app.App) error {
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
-		localserver.WithWorkflowDriver(a.NewWorkflowDriver()),
+		localserver.WithWorkflow(a.NewWorkflowDriver()),
 	)
 
 	if err := srv.Manager().InitDefaultAgent(ctx, a.Config().DefaultAgent, a.Config().AgentCommand, a.Config().AgentVersionCommand, a.Config().AgentWorkspace, a.Config().AgentEnv); err != nil {

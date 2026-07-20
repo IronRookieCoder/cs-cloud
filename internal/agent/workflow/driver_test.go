@@ -13,13 +13,8 @@ import (
 	"time"
 
 	"cs-cloud/internal/provider"
-	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
-
-func TestDriverImplementsPersistentDriver(t *testing.T) {
-	var _ runtime.PersistentDriver = (*Driver)(nil)
-}
 
 func TestDriverName(t *testing.T) {
 	deps := &Dependencies{

@@ -94,7 +94,7 @@ func runDaemon(a *app.App) error {
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
-		localserver.WithWorkflowDriver(a.NewWorkflowDriver()),
+		localserver.WithWorkflow(a.NewWorkflowDriver()),
 	)
 
 	ctx := context.Background()

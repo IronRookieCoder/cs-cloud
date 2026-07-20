@@ -27,7 +27,7 @@ func TestWorkflowHealthRoute(t *testing.T) {
 		t.Fatalf("start driver: %v", err)
 	}
 
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 	if err := s.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("start server: %v", err)
 	}

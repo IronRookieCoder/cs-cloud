@@ -15,6 +15,7 @@ import (
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/terminal"
 	"cs-cloud/internal/updater"
+	workflowagent "cs-cloud/internal/agent/workflow"
 )
 
 type TunnelStatus struct {
@@ -59,6 +60,8 @@ type Server struct {
 	findFilesBuilds map[string]*fileSearchBuild
 
 	dispatcher *CommandDispatcher
+
+	workflow *workflowagent.Driver
 
 	tunnelStatus TunnelStatusProvider
 
@@ -222,12 +225,9 @@ func WithRootDir(dir string) Option {
 	return func(s *Server) { s.rootDir = dir }
 }
 
-func WithWorkflowDriver(d runtime.PersistentDriver) Option {
+func WithWorkflow(d *workflowagent.Driver) Option {
 	return func(s *Server) {
-		if d == nil {
-			return
-		}
-		s.manager.RegisterPersistentDriver(d)
+		s.workflow = d
 	}
 }
 
@@ -271,10 +271,10 @@ func (s *Server) Start(addr string) error {
 		}
 	}
 
-	if err := s.manager.StartPersistentDrivers(); err != nil {
-		// TODO: once persistent drivers perform real initialization, decide
-		// whether a failure should prevent the server from starting.
-		logger.Error("Failed to start persistent drivers: %v", err)
+	if s.workflow != nil {
+		if err := s.workflow.Start(); err != nil {
+			return fmt.Errorf("start workflow driver: %w", err)
+		}
 	}
 
 	go func() {
@@ -303,8 +303,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.fileWatcher.Stop()
 	}
 
-	if err := s.manager.StopPersistentDrivers(); err != nil {
-		logger.Error("Failed to stop persistent drivers: %v", err)
+	if s.workflow != nil {
+		if err := s.workflow.Stop(); err != nil {
+			logger.Error("Failed to stop workflow driver: %v", err)
+		}
 	}
 
 	s.manager.KillAll()

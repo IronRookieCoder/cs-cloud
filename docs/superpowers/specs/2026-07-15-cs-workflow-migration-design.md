@@ -112,7 +112,7 @@
 ### 4.1 `internal/agent/workflow` — workflow driver 实现
 
 #### `driver.go`
-- 实现 `internal/agent/driver.go` 中的 `Driver` 接口（作为 `runtime.PersistentDriver`）。
+- 实现 `internal/agent/workflow/driver.go` 中的 `Driver` 类型，由 `internal/localserver/server.go` 直接持有并管理生命周期。
 - 声明 driver 名称为 `"workflow"`。
 - 关键方法：
   - `Start(ctx, opts) error`：启动 workflow runtime，初始化 workspace manager、multica client、runtime loop、任务并发信号量，并异步向 multica 注册 cs-cloud runtime。
@@ -150,7 +150,7 @@
   - **当前未复用 cs-cloud 的 token 自动刷新逻辑**，仅静态读取 `~/.costrict/share/auth.json`；token 过期后需用户重新 `cs-cloud login`。
   - `/api/daemon/tasks/:id/usage` 与 `/session` 常量已定义，但 client 尚未实现对应方法。
 
-### 4.2 `internal/localserver/handlers/workflow.go` — Gateway 入口
+### 4.2 `internal/localserver/workflow_handler.go` — Gateway 入口
 
 新增路由（前缀 `/api/v1/workflow`，当前已实现）：
 
@@ -195,14 +195,19 @@ cs-cloud workflow
 - `cache.go`：本地缓存读写，MVP 阶段使用 JSON 文件，当前仅实现 `workspaces.json`。
 - `protocol.go`：multica 后端 API 路径常量、请求/响应类型；`usage`/`session` 端点已定义但 client 未调用。
 
-### 4.5 `internal/runtime/manager.go` — 扩展
+### 4.5 `internal/localserver/server.go` — workflow driver 注入
 
-当前 runtime manager 主要按需启动 agent CLI 进程。需要扩展以支持常驻 driver：
+workflow driver 不作为 `AgentManager` 的 persistent driver 管理，而是由 `Server` 直接持有：
 
-- 新增 `PersistentDrivers []string` 配置，启动时拉起。
-- `RegisterPersistentDriver(name string, factory PersistentDriverFactory)`。
-- `GetDriver(name string) (Driver, error)` 供 handler 调用。
-- workflow driver 是首个常驻 driver。
+- `Server` 新增 `workflow *workflow.Driver` 字段。
+- 提供 `WithWorkflow(d *workflow.Driver) Option` 选项。
+- `Server.Start()` 中显式调用 `s.workflow.Start()`；**启动失败直接返回 error，阻断 cs-cloud daemon 启动**。
+- `Server.Shutdown()` 中显式调用 `s.workflow.Stop()` 后再停止其他组件。
+- handler 直接通过 `s.workflow.RunTaskAsync(...)` / `s.workflow.AbortTask(...)` 调用，无需类型断言。
+
+### 4.6 `internal/runtime/manager.go`
+
+无需改动：workflow 不由 `AgentManager` 管理，保持其仅负责 per-conversation AI agent 的语义。
 
 ### 4.6 `internal/config` — 配置扩展
 
@@ -244,21 +249,17 @@ app.Start()
 config.Load() ──► 读取 WorkflowConfig（环境变量 + 默认值）
     │
     ▼
-runtime.NewManager(cfg, persistentDrivers: ["workflow"])
+localserver.New(..., WithWorkflow(a.NewWorkflowDriver()), ...)
     │
     ▼
-manager.StartPersistentDrivers()
+Server.Start()
     │
-    ▼
-workflow.Driver.Start(ctx, opts)
+    ├──► workflow.Driver.Start()
+    │       ├──► workspace manager 初始化 workspaces root / cache dir
+    │       ├──► multica client 读取 ~/.costrict/share/auth.json token（当前无自动刷新）
+    │       └──► 启动后台 goroutine：workspace 元数据同步、GC 占位、runtime 注册/心跳
     │
-    ├──► workspace manager 初始化 workspaces root / cache dir
-    │
-    ├──► multica client 读取 ~/.costrict/share/auth.json token（当前无自动刷新）
-    │
-    ├──► 启动后台 goroutine：workspace 元数据同步、GC 占位、runtime 注册/心跳
-    │
-    └──► （未来可选）启动 WebSocket wakeup 连接到 multica 后端；MVP 阶段依赖 CoStrict 云端推送，不实现 wakeup
+    └──► （启动失败直接返回 error，阻断 daemon 启动）
 ```
 
 ### 5.2 CoStrict 云端通过 Gateway 触发任务

@@ -27,7 +27,7 @@ func TestHandleWorkflowHealthNotRegistered(t *testing.T) {
 
 func TestHandleWorkflowHealthNotStarted(t *testing.T) {
 	d := workflowagent.NewDriver(workflow.Config{}, nil)
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow/health", nil)
 	rec := httptest.NewRecorder()
@@ -54,7 +54,7 @@ func TestHandleWorkflowHealthRunning(t *testing.T) {
 	}
 	defer d.Stop()
 
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow/health", nil)
 	rec := httptest.NewRecorder()
 	s.handleWorkflowHealth(rec, req)
@@ -87,7 +87,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 	}
 	defer d.Stop()
 
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 
 	payload := workflow.TaskRunPayload{
 		TaskID:      "task-1",
@@ -110,7 +110,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 
 func TestHandleWorkflowTaskRunMissingTaskID(t *testing.T) {
 	d := workflowagent.NewDriver(workflow.Config{}, nil)
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 
 	payload := workflow.TaskRunPayload{WorkspaceID: "ws-1", Agent: "true", Prompt: "hello"}
 	b, _ := json.Marshal(payload)
@@ -146,7 +146,7 @@ func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
 	}
 	defer d.Stop()
 
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 
 	payload := workflow.TaskRunPayload{
 		TaskID:      "task-dup",
@@ -194,7 +194,7 @@ func TestHandleWorkflowTaskAbort(t *testing.T) {
 	}
 	defer d.Stop()
 
-	s := New(WithWorkflowDriver(d))
+	s := New(WithWorkflow(d))
 
 	// Start a long-running task in the background.
 	go func() {

@@ -22,13 +22,12 @@
 | `internal/workflow/models.go` | workspace、issue、project、task、daemon 等 DTO |
 | `internal/workflow/cache.go` | 本地 JSON 缓存读写（当前仅 workspaces） |
 | `internal/workflow/protocol.go` | multica 后端 API 路径常量 |
-| `internal/agent/workflow/driver.go` | 实现 PersistentDriver 接口，管理任务并发、注册、启停、abort tombstone |
+| `internal/agent/workflow/driver.go` | workflow driver 实现：任务并发、注册、启停、abort tombstone |
 | `internal/agent/workflow/types.go` | Config 别名与 driverState |
 | `internal/agent/workflow/runtime.go` | driver 生命周期与后台 goroutine（sync / GC stub / heartbeat / maintain） |
 | `internal/agent/workflow/client.go` | multica 后端 REST 客户端（无自动刷新、无 usage/session、无 claim） |
 | `internal/agent/workflow/workspace.go` | 工作区/仓库缓存/worktree 创建（含 `.cs-workflow-ref` 标记） |
 | `internal/agent/workflow/task.go` | 任务执行器（单次输出上报，无实时流，无 COSTRICT_TOKEN 注入） |
-| `internal/runtime/persistent_driver.go` | PersistentDriver 接口定义 |
 | `internal/localserver/workflow_handler.go` | `/api/v1/workflow/*` 路由 handler（health / run / abort） |
 | `internal/cli/workflow.go` | `cs-cloud workflow` 子命令入口（issue/project/task stub） |
 | `internal/cli/workflow_workspace.go` | `cs-cloud workflow workspace list/sync` |
@@ -39,9 +38,10 @@
 |------|----------|
 | `internal/config/config.go` | 添加 `Workflow workflow.Config` 字段 |
 | `internal/config/load.go` | 从环境变量/配置文件加载 workflow 配置；`MulticaBaseURL` 默认空，支持从 `COSTRICT_BASE_URL` 派生（`$BASE/workflow-backend`），显式 env/file 配置优先；最终为空则 `Load()` 报错 |
-| `internal/runtime/manager.go` | AgentManager 增加 persistent driver 注册/启动/停止/获取；启动失败时回滚已启动 driver |
-| `internal/localserver/server.go` | 注册 workflow 路由（health、run、abort）；注入 workflow driver；daemon 启停时调度 persistent drivers |
+| `internal/localserver/server.go` | 注册 workflow 路由（health、run、abort）；直接持有 workflow driver；`Start` 中显式启动 workflow，失败阻断启动；`Shutdown` 中显式停止 |
+| `internal/localserver/workflow_handler.go` | handler 直接调用 `s.workflow.RunTaskAsync` / `s.workflow.AbortTask` |
 | `internal/cli/root.go` | dispatch 增加 `case "workflow"` |
+| `internal/cli/serve.go` / `internal/cli/daemon.go` | 使用 `localserver.WithWorkflow(...)` 注入 driver |
 | `internal/app/app.go` | 提供 `NewWorkflowDriver` 工厂方法，注入 deviceID、multica base URL、token provider |
 
 ---
@@ -543,43 +543,20 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ---
 
-## Phase 1: Persistent Driver 抽象
+## Phase 1: 决策：不引入 PersistentDriver 抽象
 
-### Task 1.1: 定义 PersistentDriver 接口
+经过 review，决定不在本 PR 引入 `PersistentDriver` 接口及 `AgentManager` 的 persistent driver 注册机制，原因：
 
-**Files:**
-- Create: `internal/runtime/persistent_driver.go`
-- Test: `internal/runtime/persistent_driver_test.go`
+1. `PersistentDriver` 接口只包含生命周期方法，不包含 `RunTask` / `AbortTask`，localserver 仍需类型断言，没有解耦。
+2. `AgentManager` 原本只管理 per-conversation AI agent，混入 persistent driver 会污染语义。
+3. cs-cloud 中已有 `filewatcher`、`gitwatcher` 等常驻组件采用“`Server` 直接持有 + 显式启停”模式，workflow 与其保持一致，避免同一文件里两套机制并存。
+4. 当前只有 workflow 一个常驻子系统，等未来常驻组件达到 3+ 个，再统一抽象 `Component` / `ComponentManager`。
 
-- [x] 实现与原有计划一致。
+因此：
 
-- [x] **Commit**
-
-```bash
-git add internal/runtime/persistent_driver.go internal/runtime/persistent_driver_test.go
-git commit -m "feat(runtime): define PersistentDriver interface
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
-
----
-
-### Task 1.2: AgentManager 支持 Persistent Driver
-
-**Files:**
-- Modify: `internal/runtime/manager.go`
-- Test: `internal/runtime/manager_test.go`
-
-- [x] 实现与原有计划一致，新增 `RegisterPersistentDriver`、`GetPersistentDriver`、`StartPersistentDrivers`（失败回滚）、`StopPersistentDrivers`（`errors.Join`）。
-
-- [x] **Commit**
-
-```bash
-git add internal/runtime/manager.go internal/runtime/manager_test.go
-git commit -m "feat(runtime): manage persistent drivers in AgentManager
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+- **不创建** `internal/runtime/persistent_driver.go`。
+- **不修改** `internal/runtime/manager.go` 增加 persistent driver 相关方法。
+- workflow driver 由 `internal/localserver/server.go` 直接持有，见 Phase 2.2。
 
 ---
 
@@ -619,12 +596,8 @@ package workflow
 
 import (
 	"cs-cloud/internal/provider"
-	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
-
-// Compile-time check that Driver implements runtime.PersistentDriver.
-var _ runtime.PersistentDriver = (*Driver)(nil)
 
 const providerCSCloud = "cs-cloud"
 
@@ -699,35 +672,57 @@ func (a *App) NewWorkflowDriver() *workflowagent.Driver {
 }
 ```
 
-- [x] **Step 2: Register driver in localserver startup**
+- [x] **Step 2: Server 直接持有 workflow driver**
 
-`internal/localserver/server.go`:
+`internal/localserver/server.go`：
 
 ```go
-func WithWorkflowDriver(d runtime.PersistentDriver) Option {
-	return func(s *Server) {
-		if d == nil {
-			return
-		}
-		s.manager.RegisterPersistentDriver(d)
-	}
+import workflowagent "cs-cloud/internal/agent/workflow"
+
+type Server struct {
+    // ... existing fields ...
+    workflow *workflowagent.Driver
+}
+
+func WithWorkflow(d *workflowagent.Driver) Option {
+    return func(s *Server) {
+        s.workflow = d
+    }
 }
 ```
 
-- [x] **Step 3: Start/Stop persistent drivers in server lifecycle**
+- [x] **Step 3: Start/Stop workflow driver 在 Server 生命周期中显式调用**
 
-`Start()` 中调用 `s.manager.StartPersistentDrivers()`，失败仅记录日志不阻塞启动（见当前 `server.go` 注释）。
-`Shutdown()` 中调用 `s.manager.StopPersistentDrivers()` 后再 `KillAll()`。
+`Start()` 中：
+
+```go
+if s.workflow != nil {
+    if err := s.workflow.Start(); err != nil {
+        return fmt.Errorf("start workflow driver: %w", err)
+    }
+}
+```
+
+`Shutdown()` 中：
+
+```go
+if s.workflow != nil {
+    if err := s.workflow.Stop(); err != nil {
+        logger.Error("Failed to stop workflow driver: %v", err)
+    }
+}
+s.manager.KillAll()
+```
 
 - [x] **Step 4: Wire in serve/start flows**
 
-找到 `localserver.New(...)` 的调用处（如 `internal/cli/serve.go` 及 start 路径），注入：
+找到 `localserver.New(...)` 的调用处（`internal/cli/serve.go` 和 `internal/cli/daemon.go`），注入：
 
 ```go
 workflowDriver := a.NewWorkflowDriver()
 server := localserver.New(
     localserver.WithConfig(cfg),
-    localserver.WithWorkflowDriver(workflowDriver),
+    localserver.WithWorkflow(workflowDriver),
     // ... other options ...
 )
 ```
@@ -740,8 +735,8 @@ Expected: build succeeds.
 - [x] **Step 6: Commit**
 
 ```bash
-git add internal/app/app.go internal/localserver/server.go internal/cli/serve.go
-git commit -m "feat(workflow): wire workflow driver into daemon lifecycle
+git add internal/app/app.go internal/localserver/server.go internal/localserver/workflow_handler.go internal/cli/serve.go internal/cli/daemon.go
+git commit -m "feat(workflow): wire workflow driver directly into Server lifecycle
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
@@ -1140,21 +1135,16 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - [x] **实现**
 
 ```go
-type taskRunner interface {
-	runtime.PersistentDriver
-	RunTaskAsync(payload workflow.TaskRunPayload) error
-	AbortTask(taskID string) error
-}
-
 func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleWorkflowTaskAbort(w http.ResponseWriter, r *http.Request)
 ```
 
-- `handleWorkflowTaskRun` 解码 `workflow.TaskRunPayload`，校验 `task_id`，调用 `RunTaskAsync`。
+- handler 直接通过 `s.workflow` 调用；`s.workflow == nil` 时返回 404。
+- `handleWorkflowTaskRun` 解码 `workflow.TaskRunPayload`，校验 `task_id`，调用 `s.workflow.RunTaskAsync`。
   - 成功返回 HTTP 200 `{"status":"accepted"}`。
   - `reserve` 失败（任务已在运行/队列满/pre-aborted）返回 HTTP 409 `CONFLICT`。
-- `handleWorkflowTaskAbort` 调用 `AbortTask`；未找到任务返回 HTTP 404。
+- `handleWorkflowTaskAbort` 调用 `s.workflow.AbortTask`；未找到任务返回 HTTP 404。
 
 - [x] **Commit**
 
@@ -1322,7 +1312,7 @@ Expected: no errors
 
 - [x] **Step 3: Update ARCHITECTURE.md**
 
-已在 `ARCHITECTURE.md` 的"扩展点"中补充 PersistentDriver 扩展说明，列出 workflow 已接入及当前 3 个路由。
+已在 `ARCHITECTURE.md` 的"扩展点"中更新说明：workflow 作为常驻子系统由 `Server` 直接持有并显式启停，未使用 `PersistentDriver` 抽象；列出 workflow 已接入及当前 3 个路由。
 
 - [x] **Step 4: Commit**
 
@@ -1368,7 +1358,7 @@ Do not merge without explicit user approval per CLAUDE.md rules.
 
 - [x] Spec coverage: every design section (config, driver, routes, CLI, error handling, testing) has corresponding tasks.
 - [x] Placeholder scan: remaining TODOs are documented in "已知未实现 / 当前限制" above.
-- [x] Type consistency: `workflow.Config`, `TaskRunPayload`, `PersistentDriver` used consistently across tasks.
+- [x] Server ownership: workflow driver is a direct field of `Server`, started/stopped explicitly in `Server.Start/Shutdown`, with start failure blocking daemon startup.
 - [x] Config derivation: `MulticaBaseURL` defaults empty, derives from `COSTRICT_BASE_URL`, explicit env/file wins, and `Load()` fails fast when unset.
 - [x] Async execution: `RunTaskAsync` returns `accepted` synchronously and runs agent in detached goroutine.
 - [x] Abort race: `abortedIDs` tombstone with TTL handles abort-before-run.

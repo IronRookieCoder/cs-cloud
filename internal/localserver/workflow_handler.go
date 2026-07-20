@@ -4,26 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
 
-// taskRunner is the subset of the workflow driver used by the HTTP handlers.
-// It is implemented by *workflowagent.Driver.
-type taskRunner interface {
-	runtime.PersistentDriver
-	RunTaskAsync(payload workflow.TaskRunPayload) error
-	AbortTask(taskID string) error
-}
-
 // handleWorkflowHealth reports whether the workflow driver is healthy.
 func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.manager.GetPersistentDriver("workflow")
-	if !ok {
+	if s.workflow == nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
 		return
 	}
-	if err := d.Health(); err != nil {
+	if err := s.workflow.Health(); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", err.Error())
 		return
 	}
@@ -35,8 +25,7 @@ func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
 // run itself can take minutes and the gateway proxy caps requests at ~30s.
 // The driver reports status to multica asynchronously.
 func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.manager.GetPersistentDriver("workflow")
-	if !ok {
+	if s.workflow == nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
 		return
 	}
@@ -51,13 +40,7 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tr, ok := d.(taskRunner)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", "driver does not support tasks")
-		return
-	}
-
-	if err := tr.RunTaskAsync(payload); err != nil {
+	if err := s.workflow.RunTaskAsync(payload); err != nil {
 		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
@@ -66,15 +49,8 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 
 // handleWorkflowTaskAbort cancels a running workflow task.
 func (s *Server) handleWorkflowTaskAbort(w http.ResponseWriter, r *http.Request) {
-	d, ok := s.manager.GetPersistentDriver("workflow")
-	if !ok {
+	if s.workflow == nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
-		return
-	}
-
-	tr, ok := d.(taskRunner)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", "driver does not support tasks")
 		return
 	}
 
@@ -84,7 +60,7 @@ func (s *Server) handleWorkflowTaskAbort(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := tr.AbortTask(taskID); err != nil {
+	if err := s.workflow.AbortTask(taskID); err != nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
 	}

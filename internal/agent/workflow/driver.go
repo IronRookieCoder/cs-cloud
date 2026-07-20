@@ -11,13 +11,9 @@ import (
 
 	"cs-cloud/internal/logger"
 	"cs-cloud/internal/provider"
-	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/version"
 	"cs-cloud/internal/workflow"
 )
-
-// Compile-time check that Driver implements runtime.PersistentDriver.
-var _ runtime.PersistentDriver = (*Driver)(nil)
 
 // providerCSCloud is the multica runtime provider value the issue-conversation
 // flow searches for; registration must use exactly this string.
