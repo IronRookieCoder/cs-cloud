@@ -115,8 +115,10 @@ func (f *fakeMultica) handler() http.Handler {
 		f.nextRuntimeID++
 		f.runtimeAlive[rtID] = true
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]workflow.DaemonRuntimeResponse{
-			{ID: rtID, WorkspaceID: req.WorkspaceID, Provider: "cs-cloud", Status: "online"},
+		_ = json.NewEncoder(w).Encode(workflow.DaemonRegisterResponse{
+			Runtimes: []workflow.DaemonRuntimeResponse{
+				{ID: rtID, WorkspaceID: req.WorkspaceID, Provider: "cs-cloud", Status: "online"},
+			},
 		})
 	})
 	mux.HandleFunc(workflow.MulticaDaemonHeartbeatEndpoint, func(w http.ResponseWriter, r *http.Request) {

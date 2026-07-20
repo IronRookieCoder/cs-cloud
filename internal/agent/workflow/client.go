@@ -144,9 +144,9 @@ func (c *Client) PostTaskMessages(ctx context.Context, taskID string, messages s
 // RegisterDaemon registers this device as a cs-cloud runtime in the given
 // workspace and returns the registered runtime rows (with their IDs).
 func (c *Client) RegisterDaemon(ctx context.Context, req workflow.DaemonRegisterRequest) ([]workflow.DaemonRuntimeResponse, error) {
-	var out []workflow.DaemonRuntimeResponse
+	var out workflow.DaemonRegisterResponse
 	err := c.request(ctx, http.MethodPost, workflow.MulticaDaemonRegisterEndpoint, req, &out)
-	return out, err
+	return out.Runtimes, err
 }
 
 // Heartbeat keeps a registered runtime alive. It returns ErrRuntimeGone

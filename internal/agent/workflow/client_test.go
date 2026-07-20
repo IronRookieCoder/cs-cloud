@@ -215,7 +215,7 @@ func TestClientRegisterDaemon(t *testing.T) {
 			t.Fatalf("unexpected runtimes: %+v", req.Runtimes)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[{"id":"rt-1","workspace_id":"ws-1","provider":"cs-cloud","status":"online"}]`))
+		w.Write([]byte(`{"runtimes":[{"id":"rt-1","workspace_id":"ws-1","provider":"cs-cloud","status":"online"}]}`))
 	}))
 	defer ts.Close()
 

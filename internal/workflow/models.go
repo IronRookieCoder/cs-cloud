@@ -102,3 +102,12 @@ type DaemonRuntimeResponse struct {
 	Provider    string `json:"provider"`
 	Status      string `json:"status"`
 }
+
+// DaemonRegisterResponse is the envelope returned by multica's POST
+// /api/daemon/register. The runtimes array contains the registered rows.
+type DaemonRegisterResponse struct {
+	Runtimes     []DaemonRuntimeResponse `json:"runtimes"`
+	Repos        []any                   `json:"repos,omitempty"`
+	ReposVersion string                  `json:"repos_version,omitempty"`
+	Settings     map[string]any          `json:"settings,omitempty"`
+}
