@@ -93,8 +93,8 @@
 | 模块 | 路径 | 职责 | 依赖 |
 |------|------|------|------|
 | **workflow driver** | `internal/agent/workflow` | 任务接收、工作区管理、Agent 执行、状态上报 | `internal/runtime`, `internal/config`, `internal/model`, `internal/logger` |
-| **workflow API handlers** | `internal/localserver/handlers/workflow.go` | 暴露 `/api/v1/workflow/*` 路由，把 Gateway 请求转给 driver | `internal/agent/workflow`, `internal/localserver` |
-| **workflow CLI** | `internal/cli/workflow.go` | `cs-cloud workflow *` 子命令 | `internal/agent/workflow`, `internal/cli` |
+| **workflow API handlers** | `internal/localserver/workflow_handler.go` | 暴露 `/api/v1/workflow/*` 路由，把 Gateway 请求转给 driver | `internal/agent/workflow`, `internal/localserver` |
+| **workflow CLI** | `internal/cli/workflow.go`, `internal/cli/workflow_workspace.go` | `cs-cloud workflow *` 子命令 | `internal/agent/workflow`, `internal/cli` |
 | **workflow 共享层** | `internal/workflow/` | 类型定义、配置、本地缓存、multica 协议常量 | `internal/model`, `internal/config` |
 | **runtime manager 扩展** | `internal/runtime/manager.go` | 支持常驻型 driver 的启动/停止/健康检查 | `internal/agent/workflow` |
 
@@ -112,103 +112,88 @@
 ### 4.1 `internal/agent/workflow` — workflow driver 实现
 
 #### `driver.go`
-- 实现 `internal/agent/driver.go` 中的 `Driver` 接口。
+- 实现 `internal/agent/driver.go` 中的 `Driver` 接口（作为 `runtime.PersistentDriver`）。
 - 声明 driver 名称为 `"workflow"`。
 - 关键方法：
-  - `Start(ctx, opts) error`：启动 workflow runtime。
-  - `Stop(ctx) error`：停止 workflow runtime，清理任务。
+  - `Start(ctx, opts) error`：启动 workflow runtime，初始化 workspace manager、multica client、runtime loop、任务并发信号量，并异步向 multica 注册 cs-cloud runtime。
+  - `Stop(ctx) error`：停止 workflow runtime，取消运行中任务，并尝试注销 multica runtime。
   - `Health() error`：检查 runtime 健康状态。
-  - `ProxyRoutes() []ProxyRoute`：返回需要 localserver 代理到 driver 内部 HTTP server 的路由（可选）。
+  - `RunTaskAsync(payload) error`：同步预留任务后异步执行，避免 Gateway 30s 超时。
+  - `AbortTask(taskID) error`：取消运行中任务；若任务尚未开始则写入 tombstone，防止后续 run 请求执行已取消任务。
 
 #### `runtime.go`
-- 长生命周期 runtime，负责：
-  - 维护与 multica 后端的 WebSocket wakeup 连接（可选，用于后端主动唤醒）。
-  - 监听来自 localserver 的任务命令通道。
-  - 维护当前活跃任务表。
-  - 定期心跳/同步 workspace 元数据到本地缓存。
+- 长生命周期 runtime loop，负责：
+  - 按 `HeartbeatInterval` 周期调用 `maintainRegistrations`，为每个 workspace 注册/维持 cs-cloud runtime 心跳（404 时重新注册）。
+  - 按 `SyncInterval` 周期拉取 workspace 元数据并写入本地 JSON 缓存。
+  - 预留 `GCInterval` 周期入口，当前 GC 逻辑为 stub，尚未实现。
 
 #### `workspace.go`
 - 工作区管理器：
   - 维护 `~/.costrict/cs-cloud/workflow/workspaces/` 目录。
-  - 仓库检出、缓存、worktree 管理。
-  - GC 策略（按 workspace / task / 时间）。
-  - 与原 `server/internal/daemon/repocache` 功能对齐，但适配新目录结构。
+  - 仓库检出、缓存、worktree 管理（已实现 `EnsureRepoReady` / `CreateWorktree`）。
+  - GC 策略（按 workspace / task / 时间）：当前未实现。
 
 #### `task.go`
 - 任务执行器：
   - 解析云端下发的 task payload。
-  - 准备执行环境（env、cwd、repo）。
-  - 调用本地 Agent CLI（复用 `internal/agent` 的 exec helper 或自研 wrapper）。
-  - 收集 stdout/stderr/SSE 事件，实时上报 multica 后端。
+  - 准备执行环境（env、cwd、repo），当前 ProjectID → repoURL 解析为 no-op。
+  - 调用本地 Agent CLI（直接 `exec.CommandContext`，默认 agent 由 multica 推送端硬编码为 `csc`）。
+  - 任务结束后将 stdout/stderr 整体作为一条 text message 上报 multica；**不是实时 SSE/JSON 流式上报**。
+  - 完成后由 `Driver.execute` 调用 `CompleteTask` / `FailTask`。
 
 #### `client.go`
 - multica 后端 REST 客户端：
-  - 封装 `POST /api/daemon/tasks/:id/start|complete|fail|usage|messages|session` 等。
-  - 封装 workspace/issue/project 查询 API（供 CLI 使用）。
+  - 封装 `POST /api/daemon/register|heartbeat|deregister`。
+  - 封装 `POST /api/daemon/tasks/:id/start|complete|fail|messages`。
+  - 封装 workspace/project 查询 API（供 CLI 与 runtime sync 使用）。
   - 统一附加 `Authorization: Bearer <costrict_token>` 和 identity headers。
-  - 复用 cs-cloud 的 token 刷新逻辑。
+  - **当前未复用 cs-cloud 的 token 自动刷新逻辑**，仅静态读取 `~/.costrict/share/auth.json`；token 过期后需用户重新 `cs-cloud login`。
+  - `/api/daemon/tasks/:id/usage` 与 `/session` 常量已定义，但 client 尚未实现对应方法。
 
 ### 4.2 `internal/localserver/handlers/workflow.go` — Gateway 入口
 
-新增路由（前缀 `/api/v1/workflow`）：
+新增路由（前缀 `/api/v1/workflow`，当前已实现）：
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
-| POST | `/workflow/start` | 启动 workflow driver |
-| POST | `/workflow/stop` | 停止 workflow driver |
-| GET  | `/workflow/health` | driver 健康检查 |
-| POST | `/workflow/tasks/:id/run` | 触发执行一个 workflow 任务 |
-| POST | `/workflow/tasks/:id/abort` | 中止任务 |
-| GET  | `/workflow/workspaces` | 列出本地缓存的 workspace |
-| POST | `/workflow/workspaces/:id/sync` | 强制同步 workspace 元数据 |
-| POST | `/workflow/gc` | 触发工作区 GC |
+| GET  | `/workflow/health` | driver 健康检查（driver 未注册返回 404，未运行返回 503） |
+| POST | `/workflow/tasks/{id}/run` | 触发执行一个 workflow 任务（异步返回 `accepted`） |
+| POST | `/workflow/tasks/{id}/abort` | 中止任务 |
 
-Handler 职责：
-- 参数校验。
-- 调用 runtime manager 获取 workflow driver 实例。
-- 把请求转给 driver 的方法。
-- 返回标准 `{ok, data, error}` 响应。
+以下路由在设计阶段列出，当前版本尚未实现：
+
+- `POST /workflow/start`
+- `POST /workflow/stop`
+- `GET  /workflow/workspaces`
+- `POST /workflow/workspaces/{id}/sync`
+- `POST /workflow/gc`
 
 ### 4.3 `internal/cli/workflow.go` — 用户 CLI
 
-新增 `cs-cloud workflow` 子命令树：
+当前已实现的 `cs-cloud workflow` 子命令：
 
 ```
 cs-cloud workflow
-├── workspace
-│   ├── list
-│   ├── get <id>
-│   └── sync
-├── issue
-│   ├── list
-│   ├── create
-│   └── update <id>
-├── project
-│   ├── list
-│   └── get <id>
-├── autopilot
-│   ├── list
-│   └── trigger <id>
-├── repo
-│   └── checkout
-└── task
-    ├── run <id>
-    └── status <id>
+└── workspace
+    ├── list
+    └── sync
 ```
+
+其余命令（`issue`、`project`、`autopilot`、`repo`、`task`）已在 `internal/cli/workflow.go` 中预留入口，但实现为 stub，返回“not implemented yet”。
 
 实现：
 - 直接调用 multica 后端 API（复用 `internal/agent/workflow/client.go`）。
 - 读取 `~/.costrict/share/auth.json` 获取 token。
-- 输出格式支持 table / json（与原 cs-workflow 对齐关键命令）。
+- 输出格式为简单文本（未对齐原 cs-workflow 的 table/json 输出）。
 
 ### 4.4 `internal/workflow` — 共享层（新增）
 
 存放跨 driver / handler / cli 共享的内容：
 
-- `config.go`：workflow 配置结构（workspaces root、GC 参数、同步间隔）。
-- `models.go`：workspace、issue、project、task 等 DTO。
-- `cache.go`：本地缓存读写，MVP 阶段使用 JSON 文件，后续可替换为 bbolt/SQLite。
-- `protocol.go`：multica 后端 API 路径常量、请求/响应类型。
+- `config.go`：workflow 配置结构（workspaces root、GC 参数、同步间隔、heartbeat 间隔、allowed agents）。
+- `models.go`：workspace、issue、project、task 等 DTO；`TaskRunPayload` 包含可选 `Kind` 字段。
+- `cache.go`：本地缓存读写，MVP 阶段使用 JSON 文件，当前仅实现 `workspaces.json`。
+- `protocol.go`：multica 后端 API 路径常量、请求/响应类型；`usage`/`session` 端点已定义但 client 未调用。
 
 ### 4.5 `internal/runtime/manager.go` — 扩展
 
@@ -222,12 +207,26 @@ cs-cloud workflow
 ### 4.6 `internal/config` — 配置扩展
 
 - 新增 `WorkflowConfig` 字段。
-- 支持环境变量：`CS_CLOUD_WORKFLOW_WORKSPACES_ROOT`、`CS_CLOUD_WORKFLOW_SYNC_INTERVAL` 等。
-- 默认值：
+- 支持环境变量：
+  - `CS_CLOUD_WORKFLOW_MULTICA_BASE_URL`
+  - `CS_CLOUD_WORKFLOW_WORKSPACES_ROOT`
+  - `CS_CLOUD_WORKFLOW_CACHE_DIR`
+  - `CS_CLOUD_WORKFLOW_SYNC_INTERVAL`
+  - `CS_CLOUD_WORKFLOW_GC_INTERVAL`
+  - `CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL`
+  - `CS_CLOUD_WORKFLOW_AGENT_TIMEOUT`
+  - `CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS`
+  - `CS_CLOUD_WORKFLOW_ALLOWED_AGENTS`
+- 默认值与派生规则：
+  - `MulticaBaseURL`：默认空串；若 `CS_CLOUD_WORKFLOW_MULTICA_BASE_URL` 未设置且 `COSTRICT_BASE_URL` 非空，则派生为 `<COSTRICT_BASE_URL>/workflow-backend`；若最终仍为空，`config.Load()` 直接报错。
   - workspaces root：`~/.costrict/cs-cloud/workflow/workspaces`
   - cache dir：`~/.costrict/cs-cloud/workflow/cache`
   - sync interval：5m
   - GC interval：24h
+  - heartbeat interval：15s
+  - agent timeout：30m
+  - max concurrent tasks：20
+  - allowed agents：`["claude", "codex", "csc", "cs", "acp"]`
 
 ---
 
@@ -255,9 +254,9 @@ workflow.Driver.Start(ctx, opts)
     │
     ├──► workspace manager 初始化 workspaces root / cache dir
     │
-    ├──► multica client 读取 ~/.costrict/share/auth.json token
+    ├──► multica client 读取 ~/.costrict/share/auth.json token（当前无自动刷新）
     │
-    ├──► 启动后台 goroutine：workspace 元数据同步、GC、心跳
+    ├──► 启动后台 goroutine：workspace 元数据同步、GC 占位、runtime 注册/心跳
     │
     └──► （未来可选）启动 WebSocket wakeup 连接到 multica 后端；MVP 阶段依赖 CoStrict 云端推送，不实现 wakeup
 ```
@@ -268,10 +267,10 @@ workflow.Driver.Start(ctx, opts)
 CoStrict Web 控制台 / 调度服务
     │
     ▼
-costrict-web Server
+multica 服务端判断 runtime provider = cs-cloud
     │
     ▼
-POST /internal/device/:deviceID/proxy/api/v1/workflow/tasks/:id/run
+POST /device/:deviceID/proxy/api/v1/workflow/tasks/:id/run
     │
     ▼
 Gateway ──► 在 device 的 yamux 隧道中打开 stream
@@ -283,10 +282,10 @@ cs-cloud localserver /api/v1/workflow/tasks/:id/run handler
 runtime.manager.GetDriver("workflow")
     │
     ▼
-workflow.Driver.RunTask(taskID, payload)
+workflow.Driver.RunTaskAsync(payload) ──► 同步预留成功后立刻返回 {"status":"accepted"}
     │
     ▼
-task executor
+task executor（在独立 goroutine 中运行）
 ```
 
 ### 5.3 任务执行与状态上报
@@ -294,29 +293,33 @@ task executor
 ```
 task executor
     │
-    ├──► 从 payload 解析 workspace_id、issue_id、agent_provider、prompt 等
+    ├──► 从 payload 解析 workspace_id、issue_id、project_id、agent、prompt 等
     │
-    ├──► workspaceManager.EnsureRepoReady(workspaceID, repoURL)
-    │         │
-    │         ├──► 命中 repo cache ──► 复用 worktree
-    │         └──► 未命中 ──► git clone / fetch ──► 创建 worktree
+    ├──► 解析 project_id → repoURL（当前为 no-op，实际 repoURL 为空）
     │
-    ├──► 构建本地 Agent CLI 命令（claude/codex/...）
+    ├──► workspaceManager.CreateWorktree(workspaceID, taskID, repoURL, "HEAD")
     │         │
-    │         ├──► 复用 internal/agent 的 execenv wrapper
-    │         └──► 注入 MULTICA_WORKSPACE_ID、COSTRICT_TOKEN 等 env
+    │         ├──► repoURL 非空 ──► EnsureRepoReady 命中/克隆 mirror ──► 创建 worktree
+    │         └──► repoURL 为空 ──► 仅创建任务目录
+    │
+    ├──► 构建本地 Agent CLI 命令（当前 multica 推送端固定 agent="csc"）
+    │         │
+    │         ├──► 直接 exec.CommandContext，非 internal/agent 的 execenv wrapper
+    │         └──► 注入 MULTICA_WORKSPACE_ID、MULTICA_TASK_ID、MULTICA_PROMPT、CS_CLOUD_WORKTREE
+    │              （当前未注入 COSTRICT_TOKEN）
     │
     ├──► 启动 Agent 子进程
     │         │
-    │         ├──► stdout/stderr ──► 实时解析 SSE / JSON 事件
-    │         └──► 事件 ──► multicaClient.PostTaskMessages(taskID, events)
+    │         ├──► 收集完整 stdout/stderr
+    │         └──► 任务结束后一次性调用 multicaClient.PostTaskMessages(taskID, output)
+    │              （非实时 SSE/JSON 流式上报）
     │
     ├──► 任务完成/失败
     │         │
-    │         ├──► multicaClient.PostTaskComplete(taskID, result)
-    │         └──► 或 multicaClient.PostTaskFail(taskID, err)
+    │         ├──► multicaClient.CompleteTask(taskID, output)
+    │         └──► 或 multicaClient.FailTask(taskID, error)
     │
-    └──► usage 上报 ──► multicaClient.PostTaskUsage(taskID, usage)
+    └──► usage 上报 ──► 当前未实现 multicaClient.PostTaskUsage
 ```
 
 ### 5.4 `cs-cloud workflow` CLI 调用 multica 后端
@@ -374,21 +377,21 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 | HTTP 状态 | 处理 |
 |-----------|------|
-| 200 OK | 正常返回 |
+| 200 OK | 正常返回（`/run` 返回 `{"status":"accepted"}`，`/abort` 返回 `{"status":"aborted"}`） |
 | 400 Bad Request | 返回错误 envelope，云端修正 payload |
-| 404 Not Found | driver 未启动或路由未注册，云端可选择先调用 `/workflow/start` |
-| 409 Conflict | 任务已在运行或 driver 正在停止，返回当前任务状态 |
+| 404 Not Found | workflow driver 未注册到 `AgentManager`（`/start` 路由未实现，云端无法拉起） |
+| 409 Conflict | 任务已在运行、并发槽满或已被 tombstone 拒绝，返回错误描述 |
 | 500 Internal | 记录日志，返回错误，不自动重试（由云端侧决定是否重试） |
-| 503 Unavailable | workflow driver 未就绪，建议云端延迟重试 |
+| 503 Unavailable | workflow driver 已注册但 `Health()` 未通过（未运行），建议云端延迟重试 |
 
 ### 6.3 multica 后端调用失败
 
 | 场景 | 策略 |
 |------|------|
-| 401/403 token 失效 | 触发 token 刷新；刷新失败则进入 `unauthenticated` 状态 |
-| 404 task/workspace/runtime not found | 终止当前任务，清理本地状态，不尝试重连该资源 |
-| 5xx / 网络超时 | 指数退避重试，最多 5 次；超过则标记任务失败 |
-| 429 rate limit | 读取 `Retry-After` 或默认 60s 后重试 |
+| 401/403 token 失效 | **当前未实现自动 token 刷新**；调用失败，依赖用户重新执行 `cs-cloud login` 更新 `auth.json` |
+| 404 task/workspace/runtime not found | 终止当前任务，清理本地状态，runtime 心跳 404 时重新注册 |
+| 5xx / 网络超时 | 记录日志并失败；不实现指数退避重试 |
+| 429 rate limit | 当前未特殊处理 |
 
 ### 6.4 任务执行失败
 
@@ -397,7 +400,7 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 | repo 准备失败 | 上报 `task fail` 并附带错误详情；不保留不完整 worktree |
 | Agent CLI 启动失败 | 上报 `task fail`；记录命令和环境用于排查 |
 | Agent 运行中崩溃 | 捕获退出码，上报 `task fail`；stdout/stderr 已上报部分保留 |
-| 任务被 abort | 发送 SIGTERM → 5s 后 SIGKILL；上报 `task fail` reason=aborted |
+| 任务被 abort | 通过 `context.CancelFunc` 立即终止进程；上报 `task fail` reason=aborted（当前未实现 SIGTERM → 5s → SIGKILL 的优雅期） |
 | 任务执行超时 | 按 `agent_timeout` 配置 kill 进程；上报 `task fail` reason=timeout |
 
 ### 6.5 WebSocket wakeup 断开
@@ -425,9 +428,8 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 ### 6.8 GC 失败
 
-- GC 失败不阻塞任务执行。
-- 记录 error 日志，metrics 暴露 `workflow_gc_failures_total`。
-- 下次 GC 周期重试。
+- 当前 GC 逻辑为 stub，尚未实现周期性清理。
+- 计划行为：GC 失败不阻塞任务执行；记录 error 日志，metrics 暴露 `workflow_gc_failures_total`；下次 GC 周期重试。
 
 ---
 
@@ -482,12 +484,15 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 | 环境变量 | 配置字段 | 默认值 | 说明 |
 |----------|----------|--------|------|
+| `CS_CLOUD_WORKFLOW_MULTICA_BASE_URL` | `Workflow.MulticaBaseURL` | 空串（必填） | 显式设置时优先使用；未设置时从 `COSTRICT_BASE_URL` 派生为 `.../workflow-backend` |
 | `CS_CLOUD_WORKFLOW_WORKSPACES_ROOT` | `Workflow.WorkspacesRoot` | `~/.costrict/cs-cloud/workflow/workspaces` | 工作区根目录 |
 | `CS_CLOUD_WORKFLOW_CACHE_DIR` | `Workflow.CacheDir` | `~/.costrict/cs-cloud/workflow/cache` | 本地缓存目录 |
 | `CS_CLOUD_WORKFLOW_SYNC_INTERVAL` | `Workflow.SyncInterval` | `5m` | workspace 元数据同步间隔 |
-| `CS_CLOUD_WORKFLOW_GC_INTERVAL` | `Workflow.GCInterval` | `24h` | GC 执行间隔 |
+| `CS_CLOUD_WORKFLOW_GC_INTERVAL` | `Workflow.GCInterval` | `24h` | GC 执行间隔（GC 逻辑当前为 stub） |
+| `CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL` | `Workflow.HeartbeatInterval` | `15s` | multica runtime 心跳/注册维护间隔 |
 | `CS_CLOUD_WORKFLOW_AGENT_TIMEOUT` | `Workflow.AgentTimeout` | `30m` | 单个任务超时 |
 | `CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS` | `Workflow.MaxConcurrentTasks` | `20` | 最大并发任务数 |
+| `CS_CLOUD_WORKFLOW_ALLOWED_AGENTS` | `Workflow.AllowedAgents` | `claude,codex,csc,cs,acp` | 允许执行的 agent CLI，逗号分隔 |
 
 ### 8.2 目录结构
 
@@ -498,11 +503,10 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 │   │   ├── repos/        # repo cache
 │   │   └── tasks/        # 任务级 worktree
 └── cache/
-    ├── workspaces.json   # workspace 元数据缓存
-    ├── issues.json       # issue 缓存（可选）
-    └── state.json        # driver 运行状态
+    └── workspaces.json   # workspace 元数据缓存（当前唯一实现的缓存文件）
 ```
 
+> `cache/issues.json`、`cache/state.json` 在设计文档中列出，当前版本尚未实现。  
 > **日志**：workflow 相关日志统一写入 cs-cloud 日志（`~/.costrict/cs-cloud/logs/`），不单独维护 workflow.log。未来若流量过大再考虑分离。
 
 ---
@@ -511,33 +515,33 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 ### 9.1 高风险
 
-1. **CoStrict token 能否被 multica 后端识别？**  
-   当前设计假设 CoStrict OAuth token 可以直接用于 multica 后端。若该假设不成立，需要改为双 token 模式或云端代发 token。
+1. **CoStrict token 能否被 multica 后端识别？**
+   当前实现假设 CoStrict OAuth token 可以直接用于 multica 后端，且 workflow client **未实现 token 自动刷新**。token 过期后所有 multica 调用都会 401，需要用户重新 `cs-cloud login`。
 
-2. **multica 后端任务如何同步到 CoStrict 云端？**  
-   "云端推送"模式依赖 CoStrict 云端侧有桥接/同步 multica 任务的逻辑。该部分不在 cs-cloud 范围内，需与 CoStrict 云端团队确认接口契约。
+2. **multica 后端任务推送到 cs-cloud 的链路**
+   multica 服务端已实现 server-side push：任务入队后通过 Gateway `POST /device/:deviceID/proxy/api/v1/workflow/tasks/:id/run` 推送到设备。该链路依赖 `MULTICA_CLOUD_FLEET_URL` 与 `COSTRICT_INTERNAL_SECRET` 配置正确。
 
-3. **常驻 driver 对 runtime manager 的影响**  
-   当前 runtime manager 主要管理按需启动的 agent 进程。扩展为支持常驻 driver 需要谨慎设计，避免影响现有 csc/cs/acp driver 的行为。
+3. **任务执行与 Gateway 30s 超时边界**
+   `/run` handler 通过 `RunTaskAsync` 同步预留任务后立刻返回 `accepted`，实际 agent 运行在后台 goroutine 中。需确保预留阶段逻辑足够轻量，不会 itself 超过 Gateway 超时。
 
 ### 9.2 中风险
 
-1. **仓库缓存/GC 逻辑移植复杂度**  
-   原 `server/internal/daemon/repocache` 和 GC 逻辑与 multica 业务模型紧密耦合，移植时需要剥离 multica 特有概念。
+1. **仓库缓存/GC 逻辑未完整实现**
+   repo mirror / worktree 创建已实现，但 ProjectID → repoURL 解析为 no-op，GC 逻辑为 stub。长期运行可能积累大量 task worktree。
 
-2. **跨平台兼容性**  
+2. **CLI 命令大量为 stub**
+   除 `cs-cloud workflow workspace list/sync` 外，`issue`、`project`、`autopilot`、`repo`、`task` 子命令均未实现。
+
+3. **跨平台兼容性**
    workspace、repo、Agent CLI 路径在不同 OS 上可能有差异，需要充分测试 Windows 行为。
 
-3. **CLI 命令兼容性**  
-   用户可能习惯了原 cs-workflow 命令，子命令命名和输出格式需要尽量对齐关键路径。
+### 9.3 待实现/待确认
 
-### 9.3 待确认
-
-1. multica 后端当前部署地址（`MULTICA_SERVER_URL`）以及是否通过 costrict gateway 访问。
-2. CoStrict 云端下发 workflow 任务的具体 payload 格式。
-3. 是否需要保留 WebSocket wakeup 机制，还是完全依赖云端推送。
-4. 本地缓存的存储格式偏好（JSON、bbolt、SQLite）。
-5. 工作区 GC 的具体策略（按时间、按大小、按任务完成状态）。
+1. 实现 `internal/agent/workflow/client.go` 的 `PostTaskUsage` / `PostTaskSession`。
+2. 任务执行时向 agent env 注入 `COSTRICT_TOKEN`（若 `csc` 执行期间需要调 multica API）。
+3. 补齐 abort 的 SIGTERM → 5s → SIGKILL 优雅期。
+4. 实现 workspace GC 策略与 `/workflow/gc` 路由/CLI。
+5. 实现 ProjectID → repoURL 查询，补全 repo checkout 链路。
 
 ---
 

@@ -250,15 +250,21 @@ updater.check_latest（Gitee Release API，含失败重试）
 3. 在 `internal/app/app.go` 中提供工厂方法，并在 `internal/localserver/server.go` 通过 `WithWorkflowDriver` 风格选项注册
 4. `AgentManager.StartPersistentDrivers` / `StopPersistentDrivers` 会在 daemon 启停时统一调度
 
-当前已接入：`workflow`（cs-workflow 迁移，调用 multica 后端并暴露 `/api/v1/workflow/*` 路由）。
+当前已接入：`workflow`（cs-workflow 迁移，调用 multica 后端并暴露 `/api/v1/workflow/*` 路由）。当前实现的路由为：
+
+- `GET  /api/v1/workflow/health` — driver 健康检查
+- `POST /api/v1/workflow/tasks/{id}/run` — 接收云端推送的任务（异步返回 `accepted`）
+- `POST /api/v1/workflow/tasks/{id}/abort` — 中止任务
+
+handler 实现位于 `internal/localserver/workflow_handler.go`，路由注册在 `internal/localserver/server.go`。
 
 ### 接入新的本地 API
 
-`internal/localserver/router.go` 集中注册路由：
+`internal/localserver/server.go` 集中注册路由，handler 可放在 `internal/localserver/` 下（如 `internal/localserver/workflow_handler.go`）：
 
-1. 在 `internal/localserver/handlers/` 下新增 handler
-2. 在 router 注册路由 + Swagger 注解
-3. 自动出现在 `/swagger/index.html`
+1. 新增 handler 方法
+2. 在 `internal/localserver/server.go` 的 `New()` 中注册路由 + 必要选项（如 `WithWorkflowDriver`）
+3. 如需 Swagger，补充 `openapi.json` 与 `/docs` 路由（当前 workflow 路由为内部 Gateway 使用，未进 Swagger）
 
 ### 接入新平台
 

@@ -9,6 +9,7 @@ import (
 
 func TestWorkflowWorkspaceListEmptyCache(t *testing.T) {
 	platform.SetDataDir(t.TempDir())
+	t.Setenv("COSTRICT_BASE_URL", "https://example.costrict.local")
 	a, err := app.New()
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
