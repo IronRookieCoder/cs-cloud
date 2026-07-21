@@ -311,8 +311,11 @@ func TestClientCreateChatSession(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %q", r.Method)
 		}
-		if r.URL.Path != "/api/workspaces/ws-1/api/chat/sessions" {
+		if r.URL.Path != "/api/chat/sessions" {
 			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if r.Header.Get("X-Workspace-ID") != "ws-1" {
+			t.Fatalf("X-Workspace-ID = %q", r.Header.Get("X-Workspace-ID"))
 		}
 		var req workflow.CreateChatSessionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

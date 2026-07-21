@@ -77,8 +77,8 @@ func TestDriverTokenProviderNilDeps(t *testing.T) {
 
 // fakeMultica is a minimal in-memory multica backend for driver registration
 // tests. It implements /api/workspaces, /api/daemon/register,
-// /api/daemon/heartbeat, /api/daemon/deregister, and the session-binding
-// endpoints used by workflow task execution.
+// /api/daemon/heartbeat, /api/daemon/deregister, /api/chat/sessions, and the
+// session-binding endpoints used by workflow task execution.
 type fakeMultica struct {
 	mu            sync.Mutex
 	workspaces    []workflow.Workspace
@@ -172,9 +172,13 @@ func (f *fakeMultica) handler() http.Handler {
 	})
 
 	// Session-binding endpoints used during workflow task execution.
-	mux.HandleFunc("/api/workspaces/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/chat/sessions") {
+	mux.HandleFunc("/api/chat/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("X-Workspace-ID") == "" {
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		var req workflow.CreateChatSessionRequest

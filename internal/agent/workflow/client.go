@@ -69,14 +69,14 @@ func (c *Client) token() (string, error) {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
-	return c.doRequest(ctx, c.baseURL, method, path, body, out)
+	return c.doRequest(ctx, c.baseURL, method, path, nil, body, out)
 }
 
 func (c *Client) userRequest(ctx context.Context, method, path string, body, out any) error {
-	return c.doRequest(ctx, c.userBaseURL, method, path, body, out)
+	return c.doRequest(ctx, c.userBaseURL, method, path, nil, body, out)
 }
 
-func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, body, out any) error {
+func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, headers http.Header, body, out any) error {
 	token, err := c.token()
 	if err != nil {
 		return err
@@ -101,6 +101,11 @@ func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, bo
 	req.Header.Set(workflow.HeaderClientPlatform, "cs-cloud")
 	req.Header.Set(workflow.HeaderClientVersion, "dev")
 	req.Header.Set(workflow.HeaderClientOS, runtime.GOOS)
+	for k, vs := range headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -198,8 +203,11 @@ func (c *Client) DeregisterDaemon(ctx context.Context, runtimeIDs []string) erro
 // and node runs.
 func (c *Client) CreateChatSession(ctx context.Context, workspaceID, agentID, title string) (workflow.ChatSession, error) {
 	var out workflow.ChatSession
-	path := fmt.Sprintf("/api/workspaces/%s/api/chat/sessions", workspaceID)
-	err := c.userRequest(ctx, http.MethodPost, path, workflow.CreateChatSessionRequest{
+	path := "/api/chat/sessions"
+	headers := http.Header{
+		"X-Workspace-ID": []string{workspaceID},
+	}
+	err := c.doRequest(ctx, c.userBaseURL, http.MethodPost, path, headers, workflow.CreateChatSessionRequest{
 		AgentID: agentID,
 		Title:   title,
 	}, &out)
