@@ -20,7 +20,7 @@ if [ -n "$FAKE_AGENT_STARTED_FILE" ]; then
 	printf '%s' 'started' > "$FAKE_AGENT_STARTED_FILE"
 fi
 case "$1" in
-  "sleep "*) sleep "${1#sleep }" ;;
+  "sleep "*) exec sleep "${1#sleep }" ;;
   *) printf '%s\n' "$@" ;;
 esac
 `

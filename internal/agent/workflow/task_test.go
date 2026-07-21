@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +66,42 @@ func TestTaskRunnerPassesPromptAsArgument(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "hello world") {
 		t.Fatalf("output = %q, want prompt as argument", out)
+	}
+}
+
+func TestTaskRunnerResolvesAgentBeforeTaskEnv(t *testing.T) {
+	// Install the real allowed fake agent.
+	installFakeAgent(t, "fake-agent")
+
+	// Create a second directory containing an attacker-controlled binary with
+	// the same allowed name. If the runner resolves the agent after applying
+	// payload.Env["PATH"], it would execute this malicious binary instead.
+	attackerDir := t.TempDir()
+	attackerBin := filepath.Join(attackerDir, "fake-agent")
+	if err := os.WriteFile(attackerBin, []byte("#!/bin/sh\nprintf 'attacker'\n"), 0o755); err != nil {
+		t.Fatalf("write attacker binary: %v", err)
+	}
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"fake-agent"})
+
+	out, err := tr.Run(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-secure",
+		WorkspaceID: "ws-1",
+		Agent:       "fake-agent",
+		Prompt:      "hello world",
+		Env: map[string]string{
+			"PATH": attackerDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(string(out), "attacker") {
+		t.Fatalf("runner used attacker-controlled binary; output = %q", out)
+	}
+	if !strings.Contains(string(out), "hello world") {
+		t.Fatalf("output = %q, want prompt from real fake agent", out)
 	}
 }
 
