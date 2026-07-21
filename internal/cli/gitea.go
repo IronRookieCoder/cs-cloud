@@ -18,16 +18,16 @@ import (
 	"cs-cloud/internal/app"
 )
 
-// giteaCmd implements `cs-cloud gitea <subcommand>`. It is the cs-cloud home
+// deliverableCmd implements `cs-cloud workflow deliverable <subcommand>`. It is the cs-cloud home
 // for the platform-Gitea document-deliverable operations migrated from
 // multica's cs-workflow CLI. Subcommands run inside a workflow-node task
 // context: they read MULTICA_GITEA_* / MULTICA_TOKEN / MULTICA_SERVER_URL env
 // (pushed by multica in the task payload) and are invoked by the agent (csc)
 // during a node run.
-func giteaCmd(a *app.App, args []string) error {
+func deliverableCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
 	if len(args) == 0 {
-		printGiteaUsage()
+		printDeliverableUsage()
 		return nil
 	}
 	switch args[0] {
@@ -36,25 +36,25 @@ func giteaCmd(a *app.App, args []string) error {
 	case "fetch":
 		return runGiteaFetch(args[1:])
 	case "help", "-h", "--help":
-		printGiteaUsage()
+		printDeliverableUsage()
 		return nil
 	default:
-		printGiteaUsage()
+		printDeliverableUsage()
 		return fmt.Errorf("unknown gitea command: %s", args[0])
 	}
 }
 
-func printGiteaUsage() {
-	fmt.Println(`gitea - platform git-server deliverable operations
+func printDeliverableUsage() {
+	fmt.Println(`deliverable - document deliverable operations
 
 Usage:
-  cs-cloud gitea submit --deliverable <id> --file <path>
+  cs-cloud workflow deliverable submit --deliverable <id> --file <path>
     Push a document deliverable to the platform Gitea and open a PR.
     Reads MULTICA_GITEA_* env (set by the task payload), fetches the workspace
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
     (node->inst), and registers the PR URL back to Multica.
 
-  cs-cloud gitea fetch [issue]
+  cs-cloud workflow deliverable fetch [issue]
     Read an issue's workflow document deliverables. <issue> is a UUID or key
     (e.g. MUL-123); omit to use the current task's issue (MULTICA_ISSUE_ID).
     The result includes the issue's own deliverables plus those of all
@@ -64,7 +64,7 @@ Usage:
 
 // runGiteaFetch parses args and runs the fetch flow.
 //
-//	cs-cloud gitea fetch [issue]
+//	cs-cloud workflow deliverable fetch [issue]
 //
 // issue: a UUID or <PREFIX>-<number> (e.g. MUL-123). Omit to use the current
 // task's issue (MULTICA_ISSUE_ID env, pushed by multica). The result always
