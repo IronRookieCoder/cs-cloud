@@ -217,6 +217,8 @@ func dispatch(a *app.App) error {
 		return gc(a)
 	case "workflow":
 		return workflowCmd(a, cmds[1:])
+	case "gitea":
+		return giteaCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
@@ -260,6 +262,7 @@ func printUsage() {
 		{"serve", "Run server in foreground (no daemon)"},
 		{"gc", "Remove expired attachments and report freed bytes"},
 		{"workflow", "Manage multica workflow resources"},
+		{"gitea", "Platform git-server deliverable operations (task context)"},
 	}
 	fmt.Print(renderKV(cmds))
 }
