@@ -179,7 +179,7 @@ type fakeFetchCloner struct {
 	files map[string][]byte // path -> content
 }
 
-func (f fakeFetchCloner) Clone(authURL, branch, dir string) error {
+func (f fakeFetchCloner) CloneRepo(authURL, instBranch, dir string) error {
 	for path, content := range f.files {
 		full := filepath.Join(dir, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -195,24 +195,43 @@ func (f fakeFetchCloner) ReadFile(dir, path string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(dir, path))
 }
 
-// TestFetchDeliverables_HappyPath wires httptest multica (gitea-context +
-// credential) + a fake cloner and asserts the fetched content for all and for
-// a single deliverable.
+// TestFetchDeliverables_HappyPath wires httptest multica (issue gitea-deliverables
+// + credential) + a fake cloner and asserts the fetched content for a single
+// issue and for the descendants case.
 func TestFetchDeliverables_HappyPath(t *testing.T) {
+	mkIssue := func(num int32, title string, depth int, owner, repo, inst string, delvs []issueGiteaDeliverableRef) issueGiteaDeliverable {
+		return issueGiteaDeliverable{
+			IssueID: "iss-" + title,
+			Number:  num,
+			Title:   title,
+			Depth:   depth,
+			Gitea: &issueGiteaContext{
+				Owner: owner, Repo: repo,
+				CloneURL:     "https://gitea.test/" + owner + "/" + repo + ".git",
+				InstBranch:   inst,
+				Deliverables: delvs,
+			},
+		}
+	}
 	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/gitea/credential":
+		switch {
+		case r.URL.Path == "/api/gitea/credential":
 			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
-		case "/api/daemon/node-runs/nr-1/gitea-context":
-			jsonResponse(w, 200, nodeRunGiteaContext{
-				Owner: "t-aaa", Repo: "wf-bbb",
-				CloneURL:   "https://gitea.test/t-aaa/wf-bbb.git",
-				InstBranch: "inst-cc",
-				Deliverables: []giteaDeliverableRef{
-					{ID: "d1", Title: "Doc1", Path: "nodes/dd/d1.md"},
-					{ID: "d2", Title: "Doc2", Path: "nodes/dd/d2.md"},
-				},
-			})
+		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables" && r.URL.Query().Get("descendants") != "true":
+			// single issue (no descendants)
+			jsonResponse(w, 200, issueGiteaDeliverablesResponse{Issues: []issueGiteaDeliverable{
+				mkIssue(1, "Self", 0, "t-ws", "wf-self", "inst-self",
+					[]issueGiteaDeliverableRef{{NodeTitle: "NodeA", DeliverableID: "d1", Title: "Doc1", Path: "nodes/a/d1.md"}}),
+			}})
+		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables" && r.URL.Query().Get("descendants") == "true":
+			jsonResponse(w, 200, issueGiteaDeliverablesResponse{Issues: []issueGiteaDeliverable{
+				mkIssue(1, "Self", 0, "t-ws", "wf-self", "inst-self",
+					[]issueGiteaDeliverableRef{{NodeTitle: "NodeA", DeliverableID: "d1", Title: "Doc1", Path: "nodes/a/d1.md"}}),
+				mkIssue(2, "Child", 1, "t-ws", "wf-child", "inst-child",
+					[]issueGiteaDeliverableRef{{NodeTitle: "NodeB", DeliverableID: "d2", Title: "Doc2", Path: "nodes/b/d2.md"}}),
+				mkIssue(3, "Grandchild", 2, "t-ws", "wf-grand", "inst-grand",
+					[]issueGiteaDeliverableRef{{NodeTitle: "NodeC", DeliverableID: "d3", Title: "Doc3", Path: "nodes/c/d3.md"}}),
+			}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -223,41 +242,52 @@ func TestFetchDeliverables_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
 
+	// The fake cloner serves any path it knows about regardless of "repo".
 	cloner := fakeFetchCloner{files: map[string][]byte{
-		"nodes/dd/d1.md": []byte("# doc 1 body"),
-		"nodes/dd/d2.md": []byte("# doc 2 body"),
+		"nodes/a/d1.md": []byte("# self doc"),
+		"nodes/b/d2.md": []byte("# child doc"),
+		"nodes/c/d3.md": []byte("# grandchild doc"),
 	}}
 
-	t.Run("all deliverables", func(t *testing.T) {
+	t.Run("single issue", func(t *testing.T) {
 		var out bytes.Buffer
-		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", cloner: cloner, out: &out})
-		if err != nil {
+		if err := fetchDeliverables(fetchConfig{issue: "MUL-1", cloner: cloner, out: &out}); err != nil {
 			t.Fatalf("fetchDeliverables: %v", err)
 		}
-		if !strings.Contains(out.String(), "doc 1 body") || !strings.Contains(out.String(), "doc 2 body") {
-			t.Errorf("expected both bodies in output, got:\n%s", out.String())
+		s := out.String()
+		if !strings.Contains(s, "self doc") {
+			t.Errorf("expected self doc, got:\n%s", s)
+		}
+		if strings.Contains(s, "child doc") || strings.Contains(s, "grandchild doc") {
+			t.Errorf("descendants should not appear without --descendants, got:\n%s", s)
 		}
 	})
 
-	t.Run("single deliverable via --deliverable", func(t *testing.T) {
+	t.Run("descendants", func(t *testing.T) {
 		var out bytes.Buffer
-		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", wantID: "d2", cloner: cloner, out: &out})
-		if err != nil {
+		if err := fetchDeliverables(fetchConfig{issue: "MUL-1", descendants: true, cloner: cloner, out: &out}); err != nil {
 			t.Fatalf("fetchDeliverables: %v", err)
 		}
-		if !strings.Contains(out.String(), "doc 2 body") {
-			t.Errorf("expected doc 2 body, got:\n%s", out.String())
+		s := out.String()
+		for _, want := range []string{"self doc", "child doc", "grandchild doc"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("expected %q in output, got:\n%s", want, s)
+			}
 		}
-		if strings.Contains(out.String(), "doc 1 body") {
-			t.Errorf("doc 1 should be filtered out, got:\n%s", out.String())
+		// depth labels: depth 0/1/2
+		for _, d := range []string{"depth 0", "depth 1", "depth 2"} {
+			if !strings.Contains(s, d) {
+				t.Errorf("expected %q label, got:\n%s", d, s)
+			}
 		}
 	})
 
-	t.Run("missing deliverable id", func(t *testing.T) {
+	t.Run("no deliverables", func(t *testing.T) {
+		// multica returns 404 for unknown issue
 		var out bytes.Buffer
-		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", wantID: "nope", cloner: cloner, out: &out})
+		err := fetchDeliverables(fetchConfig{issue: "MUL-999", cloner: cloner, out: &out})
 		if err == nil {
-			t.Fatal("expected error for missing deliverable id")
+			t.Fatal("expected error for issue with no deliverables")
 		}
 	})
 }

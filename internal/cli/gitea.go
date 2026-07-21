@@ -54,47 +54,59 @@ Usage:
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
     (node->inst), and registers the PR URL back to Multica.
 
-  cs-cloud gitea fetch <node-run-id> [--deliverable <id>]
-    Read a node-run's document deliverable content. Fetches the node-run's Gitea
-    context from Multica, clones the run's inst branch with the workspace PAT,
-    and prints the deliverable body (all document deliverables, or just one with
-    --deliverable). Works for ANY node-run in the workspace the token can reach,
-    not just the caller's own task.`)
+  cs-cloud gitea fetch [issue] [--descendants]
+    Read an issue's workflow document deliverables. <issue> is a UUID or key
+    (e.g. MUL-123); omit to use the current task's issue (MULTICA_ISSUE_ID).
+    --descendants recursively includes all child/grandchild/... issues'
+    deliverables. Fetches each issue's Gitea context from Multica, clones the
+    run's inst branch with the workspace PAT, and prints the deliverable bodies,
+    labeled by issue and node. The agent never deals with node-run-ids.`)
 }
 
 // runGiteaFetch parses args and runs the fetch flow.
+//
+//	cs-cloud gitea fetch [issue] [--descendants]
+//
+// issue: a UUID or <PREFIX>-<number> (e.g. MUL-123). Omit to use the current
+// task's issue (MULTICA_ISSUE_ID env, pushed by multica). --descendants
+// recursively includes all child/grandchild/... issues' workflow deliverables.
 func runGiteaFetch(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: cs-cloud gitea fetch <node-run-id> [--deliverable <id>]")
-	}
-	nodeRunID := args[0]
-	var wantID string
-	rest := args[1:]
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == "--deliverable" {
-			if i+1 >= len(rest) {
-				return fmt.Errorf("--deliverable needs a value")
-			}
-			wantID = rest[i+1]
+	var issue string
+	descendants := false
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--descendants":
+			descendants = true
 			i++
-		} else {
-			return fmt.Errorf("unknown argument: %s", rest[i])
+		default:
+			if issue == "" && !strings.HasPrefix(args[i], "--") {
+				issue = args[i]
+				i++
+				continue
+			}
+			return fmt.Errorf("unexpected argument: %s", args[i])
+		}
+	}
+	if issue == "" {
+		issue = os.Getenv("MULTICA_ISSUE_ID")
+		if issue == "" {
+			return fmt.Errorf("issue required: pass an issue key (e.g. MUL-123) or run inside a task with MULTICA_ISSUE_ID set")
 		}
 	}
 	return fetchDeliverables(fetchConfig{
-		nodeRunID: nodeRunID,
-		wantID:    wantID,
-		cloner:    execFetchCloner{},
+		issue:       issue,
+		descendants: descendants,
+		cloner:      execFetchCloner{},
 	})
 }
 
 // fetchConfig parameterizes fetchDeliverables for testing.
 type fetchConfig struct {
-	nodeRunID         string
-	wantID            string // optional: only this deliverable
-	cloner            fetchCloner
-	out               io.Writer // optional: output sink (defaults to os.Stdout)
-	giteaBaseOverride string    // test-only
+	issue       string // UUID or <PREFIX>-<number>
+	descendants bool
+	cloner      fetchCloner
+	out         io.Writer // optional: output sink (defaults to os.Stdout)
 }
 
 func (c fetchConfig) writer() io.Writer {
@@ -106,99 +118,121 @@ func (c fetchConfig) writer() io.Writer {
 
 // fetchCloner abstracts the clone + read so the fetch flow is unit-testable.
 type fetchCloner interface {
-	Clone(authURL, branch, dir string) error
+	// CloneRepo clones the given auth URL into dir, checking out instBranch.
+	CloneRepo(authURL, instBranch, dir string) error
 	ReadFile(dir, path string) ([]byte, error)
 }
 
-// nodeRunGiteaContext mirrors multica's GiteaDeliverableContext JSON.
-type nodeRunGiteaContext struct {
-	Owner        string                `json:"owner"`
-	Repo         string                `json:"repo"`
-	CloneURL     string                `json:"clone_url"`
-	InstBranch   string                `json:"inst_branch"`
-	NodeBranch   string                `json:"node_branch"`
-	Deliverables []giteaDeliverableRef `json:"deliverables"`
+// issueGiteaDeliverablesResponse mirrors multica's response.
+type issueGiteaDeliverablesResponse struct {
+	Issues []issueGiteaDeliverable `json:"issues"`
 }
 
-// fetchDeliverables is the testable core: get the node-run's Gitea context,
-// clone the inst branch with the PAT, and print each document deliverable body.
+type issueGiteaDeliverable struct {
+	IssueID string             `json:"issue_id"`
+	Number  int32              `json:"number"`
+	Title   string             `json:"title"`
+	Depth   int                `json:"depth"`
+	Gitea   *issueGiteaContext `json:"gitea,omitempty"`
+}
+
+type issueGiteaContext struct {
+	Owner        string                     `json:"owner"`
+	Repo         string                     `json:"repo"`
+	CloneURL     string                     `json:"clone_url"`
+	InstBranch   string                     `json:"inst_branch"`
+	Deliverables []issueGiteaDeliverableRef `json:"deliverables"`
+}
+
+type issueGiteaDeliverableRef struct {
+	NodeTitle     string `json:"node_title"`
+	DeliverableID string `json:"deliverable_id"`
+	Title         string `json:"title"`
+	Path          string `json:"path"`
+}
+
+// fetchDeliverables is the testable core: ask multica for the issue's (and
+// optionally descendants') Gitea contexts, then clone each run's inst branch
+// with the PAT and print the deliverable bodies, labeled by issue + node.
 func fetchDeliverables(cfg fetchConfig) error {
 	serverURL := envOr("MULTICA_SERVER_URL", "")
 	token := os.Getenv("MULTICA_TOKEN")
 	workspaceID := os.Getenv("MULTICA_WORKSPACE_ID")
 
-	ctx, err := fetchGiteaNodeRunContext(serverURL, token, workspaceID, cfg.nodeRunID)
+	resp, err := fetchIssueGiteaDeliverables(serverURL, token, workspaceID, cfg.issue, cfg.descendants)
 	if err != nil {
-		return fmt.Errorf("fetch gitea context: %w", err)
-	}
-	if len(ctx.Deliverables) == 0 {
-		return fmt.Errorf("node run %s has no document deliverables", cfg.nodeRunID)
+		return fmt.Errorf("fetch issue gitea deliverables: %w", err)
 	}
 	cred, err := fetchGiteaCredential(serverURL, token, workspaceID)
 	if err != nil {
 		return fmt.Errorf("fetch gitea credential: %w", err)
 	}
-	cloneAuth := injectTokenIntoURL(ctx.CloneURL, cred.Token)
-	if cloneAuth == "" {
-		giteaBase := cfg.giteaBaseOverride
-		if giteaBase == "" {
-			giteaBase = cred.BaseURL
-		}
-		cloneAuth = injectToken(giteaBase, ctx.Owner, ctx.Repo, cred.Token)
-	}
 
-	dir, err := os.MkdirTemp("", "cscloud-fetch-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-
-	// Clone the run's inst branch — it carries every merged deliverable as a
-	// file under nodes/<nodeRunShort>/<deliverableShort>.md.
-	if err := cfg.cloner.Clone(cloneAuth, ctx.InstBranch, dir); err != nil {
-		return fmt.Errorf("clone inst branch: %w", err)
-	}
-
-	printed := 0
 	out := cfg.writer()
-	for _, d := range ctx.Deliverables {
-		if cfg.wantID != "" && d.ID != cfg.wantID {
+	reads := 0
+	// Clone each distinct run's inst branch once; an issue maps to one run.
+	for _, iss := range resp.Issues {
+		if iss.Gitea == nil || len(iss.Gitea.Deliverables) == 0 {
 			continue
 		}
-		content, err := cfg.cloner.ReadFile(dir, d.Path)
+		dir, err := os.MkdirTemp("", "cscloud-fetch-*")
 		if err != nil {
-			return fmt.Errorf("read deliverable %s (%s): %w", d.ID, d.Path, err)
+			return err
 		}
-		fmt.Fprintf(out, "=== %s (%s) ===\n%s\n", d.Title, d.ID, content)
-		printed++
+		cloneAuth := injectTokenIntoURL(iss.Gitea.CloneURL, cred.Token)
+		if cloneAuth == "" {
+			cloneAuth = injectToken(cred.BaseURL, iss.Gitea.Owner, iss.Gitea.Repo, cred.Token)
+		}
+		if err := cfg.cloner.CloneRepo(cloneAuth, iss.Gitea.InstBranch, dir); err != nil {
+			os.RemoveAll(dir)
+			return fmt.Errorf("clone inst branch for issue #%d: %w", iss.Number, err)
+		}
+		fmt.Fprintf(out, "# issue #%d %q (depth %d) — %s/%s @ %s\n", iss.Number, iss.Title, iss.Depth, iss.Gitea.Owner, iss.Gitea.Repo, iss.Gitea.InstBranch)
+		for _, d := range iss.Gitea.Deliverables {
+			content, err := cfg.cloner.ReadFile(dir, d.Path)
+			if err != nil {
+				os.RemoveAll(dir)
+				return fmt.Errorf("read deliverable %s (%s): %w", d.DeliverableID, d.Path, err)
+			}
+			fmt.Fprintf(out, "## [%s] %s (%s)\n%s\n", d.NodeTitle, d.Title, d.DeliverableID, content)
+			reads++
+		}
+		os.RemoveAll(dir)
 	}
-	if printed == 0 {
-		return fmt.Errorf("deliverable %q not found on node run %s", cfg.wantID, cfg.nodeRunID)
+	if reads == 0 {
+		scope := "issue " + cfg.issue
+		if cfg.descendants {
+			scope += " and its descendants"
+		}
+		return fmt.Errorf("%s has no document deliverables", scope)
 	}
 	return nil
 }
 
-// fetchGiteaNodeRunContext calls GET /api/daemon/node-runs/{id}/gitea-context.
-func fetchGiteaNodeRunContext(serverURL, token, workspaceID, nodeRunID string) (*nodeRunGiteaContext, error) {
+// fetchIssueGiteaDeliverables calls GET /api/daemon/issues/{issue}/gitea-deliverables.
+func fetchIssueGiteaDeliverables(serverURL, token, workspaceID, issue string, descendants bool) (*issueGiteaDeliverablesResponse, error) {
 	if serverURL == "" || token == "" {
 		return nil, fmt.Errorf("MULTICA_SERVER_URL/MULTICA_TOKEN not set")
 	}
-	req, _ := http.NewRequest(http.MethodGet,
-		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/gitea-context", nil)
+	path := serverURL + "/api/daemon/issues/" + issue + "/gitea-deliverables"
+	if descendants {
+		path += "?descendants=true"
+	}
+	req, _ := http.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	if workspaceID != "" {
 		req.Header.Set("X-Workspace-ID", workspaceID)
 	}
 	resp, err := giteaHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("gitea-context request: %w", err)
+		return nil, fmt.Errorf("gitea-deliverables request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("gitea-context: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("gitea-deliverables: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var out nodeRunGiteaContext
+	var out issueGiteaDeliverablesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
@@ -208,8 +242,8 @@ func fetchGiteaNodeRunContext(serverURL, token, workspaceID, nodeRunID string) (
 // execFetchCloner is the production cloner: shallow git clone + filesystem read.
 type execFetchCloner struct{}
 
-func (execFetchCloner) Clone(authURL, branch, dir string) error {
-	return runGitInDir("", "clone", "--depth", "1", "--single-branch", "--branch", branch, authURL, dir)
+func (execFetchCloner) CloneRepo(authURL, instBranch, dir string) error {
+	return runGitInDir("", "clone", "--depth", "1", "--single-branch", "--branch", instBranch, authURL, dir)
 }
 func (execFetchCloner) ReadFile(dir, path string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(dir, path))
