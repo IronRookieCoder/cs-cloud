@@ -33,6 +33,8 @@ func giteaCmd(a *app.App, args []string) error {
 	switch args[0] {
 	case "submit":
 		return runGiteaSubmit(args[1:])
+	case "fetch":
+		return runGiteaFetch(args[1:])
 	case "help", "-h", "--help":
 		printGiteaUsage()
 		return nil
@@ -50,7 +52,167 @@ Usage:
     Push a document deliverable to the platform Gitea and open a PR.
     Reads MULTICA_GITEA_* env (set by the task payload), fetches the workspace
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
-    (node->inst), and registers the PR URL back to Multica.`)
+    (node->inst), and registers the PR URL back to Multica.
+
+  cs-cloud gitea fetch <node-run-id> [--deliverable <id>]
+    Read a node-run's document deliverable content. Fetches the node-run's Gitea
+    context from Multica, clones the run's inst branch with the workspace PAT,
+    and prints the deliverable body (all document deliverables, or just one with
+    --deliverable). Works for ANY node-run in the workspace the token can reach,
+    not just the caller's own task.`)
+}
+
+// runGiteaFetch parses args and runs the fetch flow.
+func runGiteaFetch(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud gitea fetch <node-run-id> [--deliverable <id>]")
+	}
+	nodeRunID := args[0]
+	var wantID string
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == "--deliverable" {
+			if i+1 >= len(rest) {
+				return fmt.Errorf("--deliverable needs a value")
+			}
+			wantID = rest[i+1]
+			i++
+		} else {
+			return fmt.Errorf("unknown argument: %s", rest[i])
+		}
+	}
+	return fetchDeliverables(fetchConfig{
+		nodeRunID: nodeRunID,
+		wantID:    wantID,
+		cloner:    execFetchCloner{},
+	})
+}
+
+// fetchConfig parameterizes fetchDeliverables for testing.
+type fetchConfig struct {
+	nodeRunID         string
+	wantID            string // optional: only this deliverable
+	cloner            fetchCloner
+	out               io.Writer // optional: output sink (defaults to os.Stdout)
+	giteaBaseOverride string    // test-only
+}
+
+func (c fetchConfig) writer() io.Writer {
+	if c.out != nil {
+		return c.out
+	}
+	return os.Stdout
+}
+
+// fetchCloner abstracts the clone + read so the fetch flow is unit-testable.
+type fetchCloner interface {
+	Clone(authURL, branch, dir string) error
+	ReadFile(dir, path string) ([]byte, error)
+}
+
+// nodeRunGiteaContext mirrors multica's GiteaDeliverableContext JSON.
+type nodeRunGiteaContext struct {
+	Owner        string                `json:"owner"`
+	Repo         string                `json:"repo"`
+	CloneURL     string                `json:"clone_url"`
+	InstBranch   string                `json:"inst_branch"`
+	NodeBranch   string                `json:"node_branch"`
+	Deliverables []giteaDeliverableRef `json:"deliverables"`
+}
+
+// fetchDeliverables is the testable core: get the node-run's Gitea context,
+// clone the inst branch with the PAT, and print each document deliverable body.
+func fetchDeliverables(cfg fetchConfig) error {
+	serverURL := envOr("MULTICA_SERVER_URL", "")
+	token := os.Getenv("MULTICA_TOKEN")
+	workspaceID := os.Getenv("MULTICA_WORKSPACE_ID")
+
+	ctx, err := fetchGiteaNodeRunContext(serverURL, token, workspaceID, cfg.nodeRunID)
+	if err != nil {
+		return fmt.Errorf("fetch gitea context: %w", err)
+	}
+	if len(ctx.Deliverables) == 0 {
+		return fmt.Errorf("node run %s has no document deliverables", cfg.nodeRunID)
+	}
+	cred, err := fetchGiteaCredential(serverURL, token, workspaceID)
+	if err != nil {
+		return fmt.Errorf("fetch gitea credential: %w", err)
+	}
+	cloneAuth := injectTokenIntoURL(ctx.CloneURL, cred.Token)
+	if cloneAuth == "" {
+		giteaBase := cfg.giteaBaseOverride
+		if giteaBase == "" {
+			giteaBase = cred.BaseURL
+		}
+		cloneAuth = injectToken(giteaBase, ctx.Owner, ctx.Repo, cred.Token)
+	}
+
+	dir, err := os.MkdirTemp("", "cscloud-fetch-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	// Clone the run's inst branch — it carries every merged deliverable as a
+	// file under nodes/<nodeRunShort>/<deliverableShort>.md.
+	if err := cfg.cloner.Clone(cloneAuth, ctx.InstBranch, dir); err != nil {
+		return fmt.Errorf("clone inst branch: %w", err)
+	}
+
+	printed := 0
+	out := cfg.writer()
+	for _, d := range ctx.Deliverables {
+		if cfg.wantID != "" && d.ID != cfg.wantID {
+			continue
+		}
+		content, err := cfg.cloner.ReadFile(dir, d.Path)
+		if err != nil {
+			return fmt.Errorf("read deliverable %s (%s): %w", d.ID, d.Path, err)
+		}
+		fmt.Fprintf(out, "=== %s (%s) ===\n%s\n", d.Title, d.ID, content)
+		printed++
+	}
+	if printed == 0 {
+		return fmt.Errorf("deliverable %q not found on node run %s", cfg.wantID, cfg.nodeRunID)
+	}
+	return nil
+}
+
+// fetchGiteaNodeRunContext calls GET /api/daemon/node-runs/{id}/gitea-context.
+func fetchGiteaNodeRunContext(serverURL, token, workspaceID, nodeRunID string) (*nodeRunGiteaContext, error) {
+	if serverURL == "" || token == "" {
+		return nil, fmt.Errorf("MULTICA_SERVER_URL/MULTICA_TOKEN not set")
+	}
+	req, _ := http.NewRequest(http.MethodGet,
+		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/gitea-context", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if workspaceID != "" {
+		req.Header.Set("X-Workspace-ID", workspaceID)
+	}
+	resp, err := giteaHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gitea-context request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gitea-context: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out nodeRunGiteaContext
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// execFetchCloner is the production cloner: shallow git clone + filesystem read.
+type execFetchCloner struct{}
+
+func (execFetchCloner) Clone(authURL, branch, dir string) error {
+	return runGitInDir("", "clone", "--depth", "1", "--single-branch", "--branch", branch, authURL, dir)
+}
+func (execFetchCloner) ReadFile(dir, path string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(dir, path))
 }
 
 // runGiteaSubmit parses flags and runs the submit flow.

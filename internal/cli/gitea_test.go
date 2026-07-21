@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,6 +171,95 @@ func TestInjectTokenIntoURL(t *testing.T) {
 	if injectTokenIntoURL("://bad", "tok") != "" {
 		t.Error("expected empty for unparseable URL")
 	}
+}
+
+// fakeFetchCloner "clones" by writing the listed deliverable files into the
+// target dir, then reads them back — stands in for a real git clone.
+type fakeFetchCloner struct {
+	files map[string][]byte // path -> content
+}
+
+func (f fakeFetchCloner) Clone(authURL, branch, dir string) error {
+	for path, content := range f.files {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, content, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (f fakeFetchCloner) ReadFile(dir, path string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(dir, path))
+}
+
+// TestFetchDeliverables_HappyPath wires httptest multica (gitea-context +
+// credential) + a fake cloner and asserts the fetched content for all and for
+// a single deliverable.
+func TestFetchDeliverables_HappyPath(t *testing.T) {
+	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/gitea/credential":
+			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
+		case "/api/daemon/node-runs/nr-1/gitea-context":
+			jsonResponse(w, 200, nodeRunGiteaContext{
+				Owner: "t-aaa", Repo: "wf-bbb",
+				CloneURL:   "https://gitea.test/t-aaa/wf-bbb.git",
+				InstBranch: "inst-cc",
+				Deliverables: []giteaDeliverableRef{
+					{ID: "d1", Title: "Doc1", Path: "nodes/dd/d1.md"},
+					{ID: "d2", Title: "Doc2", Path: "nodes/dd/d2.md"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer multica.Close()
+
+	t.Setenv("MULTICA_TOKEN", "tok")
+	t.Setenv("MULTICA_SERVER_URL", multica.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+
+	cloner := fakeFetchCloner{files: map[string][]byte{
+		"nodes/dd/d1.md": []byte("# doc 1 body"),
+		"nodes/dd/d2.md": []byte("# doc 2 body"),
+	}}
+
+	t.Run("all deliverables", func(t *testing.T) {
+		var out bytes.Buffer
+		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", cloner: cloner, out: &out})
+		if err != nil {
+			t.Fatalf("fetchDeliverables: %v", err)
+		}
+		if !strings.Contains(out.String(), "doc 1 body") || !strings.Contains(out.String(), "doc 2 body") {
+			t.Errorf("expected both bodies in output, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("single deliverable via --deliverable", func(t *testing.T) {
+		var out bytes.Buffer
+		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", wantID: "d2", cloner: cloner, out: &out})
+		if err != nil {
+			t.Fatalf("fetchDeliverables: %v", err)
+		}
+		if !strings.Contains(out.String(), "doc 2 body") {
+			t.Errorf("expected doc 2 body, got:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "doc 1 body") {
+			t.Errorf("doc 1 should be filtered out, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("missing deliverable id", func(t *testing.T) {
+		var out bytes.Buffer
+		err := fetchDeliverables(fetchConfig{nodeRunID: "nr-1", wantID: "nope", cloner: cloner, out: &out})
+		if err == nil {
+			t.Fatal("expected error for missing deliverable id")
+		}
+	})
 }
 
 func jsonResponse(w http.ResponseWriter, code int, v any) {
