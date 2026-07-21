@@ -44,12 +44,6 @@ func printWorkflowUsage() {
 	fmt.Print(renderKV(cmds))
 }
 
-func workflowIssueCmd(a *app.App, args []string) error {
-	_ = a
-	_ = args
-	return fmt.Errorf("workflow issue commands are not implemented yet")
-}
-
 func workflowProjectCmd(a *app.App, args []string) error {
 	_ = a
 	_ = args

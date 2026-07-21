@@ -1,0 +1,139 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"cs-cloud/internal/app"
+	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/provider"
+)
+
+// workflowIssueCmd implements `cs-cloud workflow issue <subcommand>`.
+// Currently supports: get, comment add, comment list — the operations an
+// in-task agent needs (read context, communicate, ask questions).
+func workflowIssueCmd(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud workflow issue <get|comment> ...")
+	}
+	switch args[0] {
+	case "get":
+		return workflowIssueGet(a, args[1:])
+	case "comment":
+		return workflowIssueCommentCmd(a, args[1:])
+	default:
+		return fmt.Errorf("unknown workflow issue command: %s", args[0])
+	}
+}
+
+// workflowIssueGet: `cs-cloud workflow issue get <issue-id>`
+func workflowIssueGet(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud workflow issue get <issue-id>")
+	}
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	issue, err := client.GetIssue(ctx, wsID, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("ID:     %s\n", issue.ID)
+	fmt.Printf("Title:  %s\n", issue.Title)
+	fmt.Printf("Status: %s\n", issue.Status)
+	return nil
+}
+
+func workflowIssueCommentCmd(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud workflow issue comment <add|list> ...")
+	}
+	switch args[0] {
+	case "add":
+		return workflowIssueCommentAdd(a, args[1:])
+	case "list":
+		return workflowIssueCommentList(a, args[1:])
+	default:
+		return fmt.Errorf("unknown comment command: %s", args[0])
+	}
+}
+
+// workflowIssueCommentAdd: `cs-cloud workflow issue comment add <issue-id> --content "..."`
+func workflowIssueCommentAdd(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud workflow issue comment add <issue-id> --content \"...\"")
+	}
+	issueID := args[0]
+	var content string
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--content" && i+1 < len(args) {
+			content = args[i+1]
+			i++
+		}
+	}
+	if content == "" {
+		return fmt.Errorf("--content is required")
+	}
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if err := client.CreateIssueComment(ctx, wsID, issueID, content); err != nil {
+		return err
+	}
+	fmt.Println("comment added")
+	return nil
+}
+
+// workflowIssueCommentList: `cs-cloud workflow issue comment list <issue-id>`
+func workflowIssueCommentList(a *app.App, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cs-cloud workflow issue comment list <issue-id>")
+	}
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	comments, err := client.ListIssueComments(ctx, wsID, args[0])
+	if err != nil {
+		return err
+	}
+	for _, c := range comments {
+		ts := c.CreatedAt.Format("2006-01-02 15:04")
+		author := c.AuthorName
+		if author == "" {
+			author = c.AuthorType
+		}
+		fmt.Printf("%s  %s: %s\n", ts, author, c.Content)
+	}
+	return nil
+}
+
+// issueClient builds a multica client + resolves the workspace ID from the task
+// env (MULTICA_WORKSPACE_ID). Shared by all workflow issue subcommands.
+func issueClient(a *app.App) (*workflowagent.Client, string, context.Context, context.CancelFunc, error) {
+	cfg := a.Config()
+	creds, err := a.Credentials()
+	if err != nil {
+		return nil, "", nil, nil, err
+	}
+	wsID := os.Getenv("MULTICA_WORKSPACE_ID")
+	if wsID == "" {
+		return nil, "", nil, nil, fmt.Errorf("MULTICA_WORKSPACE_ID not set (run inside a task or export it)")
+	}
+	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+		return creds, nil
+	})
+	timeout := cfg.Workflow.AgentTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return client, wsID, ctx, cancel, nil
+}
