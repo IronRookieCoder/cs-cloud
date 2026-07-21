@@ -16,13 +16,17 @@ import (
 // developer needs (read context, browse issues, communicate).
 func workflowIssueCmd(a *app.App, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cs-cloud workflow issue <get|list|comment> ...")
+		return fmt.Errorf("usage: cs-cloud workflow issue <get|list|create|status|comment> ...")
 	}
 	switch args[0] {
 	case "get":
 		return workflowIssueGet(a, args[1:])
 	case "list":
 		return workflowIssueList(a, args[1:])
+	case "create":
+		return workflowIssueCreate(a, args[1:])
+	case "status":
+		return workflowIssueStatus(a, args[1:])
 	case "comment":
 		return workflowIssueCommentCmd(a, args[1:])
 	default:
@@ -44,6 +48,61 @@ func workflowIssueList(a *app.App, _ []string) error {
 	for _, iss := range issues {
 		fmt.Printf("%s  [%s]  %s\n", iss.ID, iss.Status, iss.Title)
 	}
+	return nil
+}
+
+// workflowIssueCreate: `cs-cloud workflow issue create --title "..." [--description "..."]`
+func workflowIssueCreate(a *app.App, args []string) error {
+	var title, description string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--title":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--title needs a value")
+			}
+			title = args[i+1]
+			i++
+		case "--description":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--description needs a value")
+			}
+			description = args[i+1]
+			i++
+		default:
+			return fmt.Errorf("unknown argument: %s", args[i])
+		}
+	}
+	if title == "" {
+		return fmt.Errorf("--title is required")
+	}
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	issue, err := client.CreateIssue(ctx, wsID, title, description)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created %s  [%s]  %s\n", issue.ID, issue.Status, issue.Title)
+	return nil
+}
+
+// workflowIssueStatus: `cs-cloud workflow issue status <issue-id> <status>`
+func workflowIssueStatus(a *app.App, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cs-cloud workflow issue status <issue-id> <status>")
+	}
+	issueID, status := args[0], args[1]
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if err := client.UpdateIssueStatus(ctx, wsID, issueID, status); err != nil {
+		return err
+	}
+	fmt.Printf("updated %s → %s\n", issueID, status)
 	return nil
 }
 

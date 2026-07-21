@@ -147,6 +147,23 @@ func (c *Client) ListIssues(ctx context.Context, workspaceID string) ([]workflow
 	return out, err
 }
 
+// CreateIssue creates a new issue in the workspace.
+func (c *Client) CreateIssue(ctx context.Context, workspaceID, title, description string) (workflow.Issue, error) {
+	var out workflow.Issue
+	path := fmt.Sprintf(workflow.MulticaIssuesEndpoint, workspaceID)
+	err := c.request(ctx, http.MethodPost, path, map[string]string{
+		"title":       title,
+		"description": description,
+	}, &out)
+	return out, err
+}
+
+// UpdateIssueStatus updates an issue's status.
+func (c *Client) UpdateIssueStatus(ctx context.Context, workspaceID, issueID, status string) error {
+	path := fmt.Sprintf(workflow.MulticaIssueEndpoint, workspaceID, issueID)
+	return c.request(ctx, http.MethodPut, path, map[string]string{"status": status}, nil)
+}
+
 // GetIssue fetches a single issue by ID.
 func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (workflow.Issue, error) {
 	var out workflow.Issue
