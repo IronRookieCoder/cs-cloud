@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -169,13 +168,12 @@ func Load() (*Config, error) {
 
 	// If the workflow multica base URL is not explicitly configured and we
 	// have a CoStrict base URL, derive the test/enterprise workflow backend
-	// URL from it. Explicit env/file config always wins.
+	// URL from it. Explicit env/file config always wins. The URL is not
+	// required at config load time so that commands like stop/restart work
+	// without a network configuration; workflow components validate it when
+	// they start.
 	if cfg.Workflow.MulticaBaseURL == "" && cfg.BaseURL != "" {
 		cfg.Workflow.MulticaBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
-	}
-
-	if cfg.Workflow.MulticaBaseURL == "" {
-		return nil, fmt.Errorf("workflow multica base URL is required; set COSTRICT_BASE_URL or CS_CLOUD_WORKFLOW_MULTICA_BASE_URL")
 	}
 
 	return cfg, nil

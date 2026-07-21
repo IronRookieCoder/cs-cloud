@@ -75,6 +75,10 @@ func (d *Driver) Start() error {
 		d.state = driverStateError
 		return fmt.Errorf("workflow driver dependencies not provided")
 	}
+	if d.deps.MulticaBaseURL == "" {
+		d.state = driverStateError
+		return fmt.Errorf("workflow multica base URL is required")
+	}
 
 	if d.cfg.MaxConcurrentTasks <= 0 {
 		d.cfg.MaxConcurrentTasks = workflow.DefaultConfig().MaxConcurrentTasks

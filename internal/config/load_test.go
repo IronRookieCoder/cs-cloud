@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -242,12 +241,12 @@ func TestLoad_WorkflowMulticaBaseURLDefaultWhenNoBaseURL(t *testing.T) {
 	t.Setenv("COSTRICT_BASE_URL", "")
 	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error when no multica base URL is configured")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "workflow multica base URL is required") {
-		t.Fatalf("unexpected error: %v", err)
+	if cfg.Workflow.MulticaBaseURL != "" {
+		t.Fatalf("MulticaBaseURL = %q, want empty", cfg.Workflow.MulticaBaseURL)
 	}
 }
 
