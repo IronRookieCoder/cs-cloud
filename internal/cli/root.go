@@ -217,8 +217,6 @@ func dispatch(a *app.App) error {
 		return gc(a)
 	case "workflow":
 		return workflowCmd(a, cmds[1:])
-	case "repo":
-		return repoCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
