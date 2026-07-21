@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ type TaskRunner struct {
 	workspaceManager *WorkspaceManager
 	agentTimeout     time.Duration
 	allowedAgents    []string
+	sessionRunner    SessionRunner
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -43,42 +45,89 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 	}
 }
 
+// SetSessionRunner injects a runner that executes prompts inside an already
+// bound local csc session. When set and the task agent is csc, the task runs
+// in the bound session instead of a one-shot CLI process.
+func (tr *TaskRunner) SetSessionRunner(r SessionRunner) {
+	tr.sessionRunner = r
+}
+
+// RunCSCSession runs the task prompt in the bound local csc session. It falls
+// back to the one-shot CLI if no session runner is configured.
+func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
+	if tr.sessionRunner != nil {
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt)
+	}
+
+	agentPath, err := exec.LookPath(payload.Agent)
+	if err != nil {
+		return nil, fmt.Errorf("resolve agent %q: %w", payload.Agent, err)
+	}
+	return tr.RunPrepared(ctx, payload, worktree, agentPath)
+}
+
 // Run prepares the worktree and runs the agent. It returns the combined
 // stdout/stderr and any execution error. The caller is responsible for
 // reporting task status to multica.
 func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) ([]byte, error) {
+	worktree, agentPath, err := tr.Prepare(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	return tr.RunPrepared(ctx, payload, worktree, agentPath)
+}
+
+// Prepare validates the agent, resolves its executable, and creates the task
+// worktree. It must be called before RunPrepared so the worktree path is
+// available when binding a conversation session.
+func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
 	repoURL, err := tr.resolveRepoURL(ctx, payload.WorkspaceID, payload.ProjectID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve repo: %w", err)
+		return "", "", fmt.Errorf("resolve repo: %w", err)
 	}
 
 	if err := tr.validateAgent(payload.Agent); err != nil {
-		return nil, err
+		return "", "", err
 	}
 
 	// Resolve the agent executable using the parent process PATH before the
 	// task environment (which may override PATH) is applied. This prevents an
 	// allowed agent name from being redirected to an attacker-controlled binary.
-	agentPath, err := exec.LookPath(payload.Agent)
+	agentPath, err = exec.LookPath(payload.Agent)
 	if err != nil {
-		return nil, fmt.Errorf("resolve agent %q: %w", payload.Agent, err)
+		return "", "", fmt.Errorf("resolve agent %q: %w", payload.Agent, err)
 	}
 
-	worktree, err := tr.workspaceManager.CreateWorktree(payload.WorkspaceID, payload.TaskID, repoURL, "HEAD")
+	worktree, err = tr.workspaceManager.CreateWorktree(payload.WorkspaceID, payload.TaskID, repoURL, "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("prepare worktree: %w", err)
+		return "", "", fmt.Errorf("prepare worktree: %w", err)
 	}
+	return worktree, agentPath, nil
+}
 
-	args := []string{payload.Prompt}
-	if payload.Agent == AgentCsc {
-		args = append(args, CscOutputFormatFlag, CscOutputFormatText)
-	}
+// RunPrepared runs the agent in the already-prepared worktree. It returns the
+// combined stdout/stderr and any execution error.
+func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunPayload, worktree, agentPath string) ([]byte, error) {
+	args := tr.buildArgs(payload)
 
 	cmd := exec.CommandContext(ctx, agentPath, args...)
 	cmd.Dir = worktree
 	cmd.Env = tr.buildEnv(payload, worktree)
 
 	return cmd.CombinedOutput()
+}
+
+func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {
+	if payload.Agent == AgentCsc {
+		// Run csc in non-interactive print mode so workflow tasks complete
+		// instead of starting the interactive TUI and never exiting.
+		return []string{"-p", "--permission-mode", "bypassPermissions", CscOutputFormatFlag, CscOutputFormatText, payload.Prompt}
+	}
+	switch filepath.Base(payload.Agent) {
+	case "sh", "bash", "zsh":
+		return []string{"-c", payload.Prompt}
+	}
+	return []string{payload.Prompt}
 }
 
 func (tr *TaskRunner) resolveRepoURL(ctx context.Context, workspaceID, projectID string) (string, error) {

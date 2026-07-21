@@ -106,6 +106,7 @@ func runDaemon(a *app.App) error {
 		logger.Error("please check your agent_command configuration works correctly in your terminal")
 		return err
 	}
+	srv.BindWorkflowSessionBinder()
 	logger.Info("agent started (endpoint=%s)", srv.Manager().Endpoint())
 
 	logger.Info("[debug] agent init done, starting HTTP server...")

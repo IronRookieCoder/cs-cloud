@@ -287,6 +287,38 @@ func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, a
 	return m.CreateAgent(ctx, "default", cfg)
 }
 
+func (m *AgentManager) BindWorkflowSession(ctx context.Context, sessionID, cwd string) error {
+	a, ok := m.GetAgent("default")
+	if !ok {
+		return fmt.Errorf("no default agent available")
+	}
+	type sessionBinder interface {
+		CreateSession(ctx context.Context, sessionID, cwd string) error
+	}
+	b, ok := a.(sessionBinder)
+	if !ok {
+		return fmt.Errorf("default agent %q does not support session binding", a.Backend())
+	}
+	return b.CreateSession(ctx, sessionID, cwd)
+}
+
+// RunWorkflowSession runs a workflow prompt inside an existing local csc
+// session and returns the final assistant text output.
+func (m *AgentManager) RunWorkflowSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error) {
+	a, ok := m.GetAgent("default")
+	if !ok {
+		return nil, fmt.Errorf("no default agent available")
+	}
+	type sessionRunner interface {
+		RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error)
+	}
+	r, ok := a.(sessionRunner)
+	if !ok {
+		return nil, fmt.Errorf("default agent %q does not support session execution", a.Backend())
+	}
+	return r.RunSession(ctx, sessionID, cwd, prompt)
+}
+
 // RestartDefaultAgent kills all running agents and re-initializes the default agent.
 // The onProgress callback receives phased progress updates during the operation.
 func (m *AgentManager) RestartDefaultAgent(ctx context.Context, agentType, agentCommand, agentVersionCommand, agentWorkspace string, agentEnv map[string]string, onProgress ProgressFunc) error {

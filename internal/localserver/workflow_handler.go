@@ -1,11 +1,44 @@
 package localserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
+	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
+
+// agentManagerSessionBinder creates a local csc conversation session for a
+// workflow task using the default agent managed by the runtime AgentManager.
+type agentManagerSessionBinder struct {
+	manager *runtime.AgentManager
+}
+
+func (b *agentManagerSessionBinder) Bind(ctx context.Context, sessionID, cwd string) error {
+	return b.manager.BindWorkflowSession(ctx, sessionID, cwd)
+}
+
+func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error) {
+	return b.manager.RunWorkflowSession(ctx, sessionID, cwd, prompt)
+}
+
+var _ workflowagent.ConversationBinder = (*agentManagerSessionBinder)(nil)
+var _ workflowagent.SessionRunner = (*agentManagerSessionBinder)(nil)
+
+// BindWorkflowSessionBinder wires the workflow driver to the default csc
+// agent so it can create local conversation sessions that match the multica
+// chat session IDs. Call this after the default agent has been initialized.
+func (s *Server) BindWorkflowSessionBinder() {
+	if s.workflow == nil || s.manager == nil {
+		return
+	}
+	if s.manager.DefaultBackend() != "csc" {
+		return
+	}
+	s.workflow.SetConversationBinder(&agentManagerSessionBinder{manager: s.manager})
+}
 
 // handleWorkflowHealth reports whether the workflow driver is healthy.
 func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {

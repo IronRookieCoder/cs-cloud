@@ -99,6 +99,9 @@ func (d *Driver) Start() error {
 	d.runtime = newRuntime(d.cfg, d.client, cache)
 	d.runtime.maintainFunc = d.maintainRegistrations
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
+	if d.deps != nil && d.deps.SessionRunner != nil {
+		d.runner.SetSessionRunner(d.deps.SessionRunner)
+	}
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)
@@ -293,12 +296,25 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// Bind a chat session to the task and its workflow node run so the web
 	// UI can enter the live session. This must happen before the agent
 	// produces output, otherwise "进入会话" would point at nothing.
-	if _, err := d.bindSession(ctx, payload); err != nil {
+	worktree, agentPath, err := d.runner.Prepare(ctx, payload)
+	if err != nil {
 		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
 		return err
 	}
 
-	out, runErr := d.runner.Run(ctx, payload)
+	sessionID, err := d.bindSession(ctx, payload, worktree)
+	if err != nil {
+		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
+		return err
+	}
+
+	var out []byte
+	var runErr error
+	if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
+		out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
+	} else {
+		out, runErr = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
+	}
 	output := truncateOutput(string(out))
 	_ = d.client.PostTaskMessages(ctx, payload.TaskID, output)
 	if runErr != nil {
@@ -318,7 +334,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 // When the payload does not carry the agent/node-run IDs the driver needs, or
 // when the driver has not registered a runtime for the workspace, it returns
 // ("", nil) and execution continues without a session.
-func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayload) (string, error) {
+func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayload, worktree string) (string, error) {
 	if payload.AgentID == "" || payload.NodeRunID == "" {
 		return "", nil
 	}
@@ -351,6 +367,12 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 	}
 	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
 		return "", fmt.Errorf("bind node run session: %w", err)
+	}
+
+	if d.deps.ConversationBinder != nil {
+		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree); err != nil {
+			logger.Warn("workflow: failed to bind local conversation session %s: %v", session.ID, err)
+		}
 	}
 
 	logger.Info("workflow: bound session %s to task %s node_run %s", session.ID, payload.TaskID, payload.NodeRunID)
@@ -398,6 +420,20 @@ func (d *Driver) aborted(taskID string) bool {
 	defer d.mu.Unlock()
 	rec, ok := d.running[taskID]
 	return ok && rec.aborted
+}
+
+// SetConversationBinder injects the conversation binder after construction.
+// It must be called before Start.
+func (d *Driver) SetConversationBinder(binder ConversationBinder) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.deps == nil {
+		d.deps = &Dependencies{}
+	}
+	d.deps.ConversationBinder = binder
+	if r, ok := binder.(SessionRunner); ok {
+		d.deps.SessionRunner = r
+	}
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps
