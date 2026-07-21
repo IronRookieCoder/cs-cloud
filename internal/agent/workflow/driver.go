@@ -102,6 +102,11 @@ func (d *Driver) Start() error {
 	if d.deps != nil && d.deps.SessionRunner != nil {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)
 	}
+	// Inject multica endpoint + token so in-task CLIs (cs-cloud gitea
+	// submit/fetch) get MULTICA_SERVER_URL + MULTICA_TOKEN in their env.
+	if d.deps != nil {
+		d.runner.SetMulticaEndpoint(d.deps.MulticaBaseURL, d.deps.TokenProvider)
+	}
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)

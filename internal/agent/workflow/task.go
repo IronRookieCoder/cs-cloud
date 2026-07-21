@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
 
@@ -25,6 +26,9 @@ const (
 	EnvMulticaTaskID      = "MULTICA_TASK_ID"
 	EnvMulticaPrompt      = "MULTICA_PROMPT"
 	EnvCSCloudWorktree    = "CS_CLOUD_WORKTREE"
+	// For in-task CLIs (cs-cloud gitea submit/fetch) that call multica.
+	EnvMulticaServerURL = "MULTICA_SERVER_URL"
+	EnvMulticaToken     = "MULTICA_TOKEN"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -34,6 +38,11 @@ type TaskRunner struct {
 	agentTimeout     time.Duration
 	allowedAgents    []string
 	sessionRunner    SessionRunner
+	// multicaBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
+	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit/fetch`)
+	// can call multica's daemon-auth API. Set via SetMulticaEndpoint.
+	multicaBaseURL string
+	tokenProvider  func() (*provider.Credentials, error)
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -43,6 +52,13 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 		agentTimeout:     timeout,
 		allowedAgents:    allowedAgents,
 	}
+}
+
+// SetMulticaEndpoint injects the multica base URL + token provider so the task
+// env can carry MULTICA_SERVER_URL + MULTICA_TOKEN for in-task CLIs.
+func (tr *TaskRunner) SetMulticaEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
+	tr.multicaBaseURL = baseURL
+	tr.tokenProvider = tp
 }
 
 // SetSessionRunner injects a runner that executes prompts inside an already
@@ -161,6 +177,17 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	env = setEnv(env, EnvMulticaTaskID, payload.TaskID)
 	env = setEnv(env, EnvMulticaPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
+	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
+	// submit/fetch) can authenticate to multica's daemon API. These are the
+	// daemon's own endpoint + credentials — cs-cloud owns this auth, not multica.
+	if tr.multicaBaseURL != "" {
+		env = setEnv(env, EnvMulticaServerURL, tr.multicaBaseURL)
+	}
+	if tr.tokenProvider != nil {
+		if creds, err := tr.tokenProvider(); err == nil && creds != nil && creds.AccessToken != "" {
+			env = setEnv(env, EnvMulticaToken, creds.AccessToken)
+		}
+	}
 	return env
 }
 
