@@ -221,6 +221,8 @@ func dispatch(a *app.App) error {
 		return giteaCmd(a, cmds[1:])
 	case "attachment":
 		return attachmentCmd(a, cmds[1:])
+	case "mr":
+		return mrCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
