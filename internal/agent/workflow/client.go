@@ -163,6 +163,14 @@ func (c *Client) ListIssueComments(ctx context.Context, workspaceID, issueID str
 	return resp.Comments, err
 }
 
+// GetAttachment fetches attachment metadata (includes a signed download_url).
+func (c *Client) GetAttachment(ctx context.Context, attachmentID string) (workflow.Attachment, error) {
+	var out workflow.Attachment
+	path := fmt.Sprintf(workflow.MulticaAttachmentEndpoint, attachmentID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
 // StartTask marks a task as started.
 func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskStartEndpoint, taskID)

@@ -20,6 +20,8 @@ const (
 	MulticaIssueCommentsEndpoint = "/api/workspaces/%s/issues/%s/comments"
 	MulticaProjectsEndpoint    = "/api/workspaces/%s/projects"
 
+	MulticaAttachmentEndpoint  = "/api/attachments/%s"
+
 	HeaderClientPlatform = "X-Client-Platform"
 	HeaderClientVersion  = "X-Client-Version"
 	HeaderClientOS       = "X-Client-OS"

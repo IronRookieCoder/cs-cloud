@@ -163,3 +163,11 @@ type Comment struct {
 	AuthorType string    `json:"author_type,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+type Attachment struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	DownloadURL string `json:"download_url"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+}
