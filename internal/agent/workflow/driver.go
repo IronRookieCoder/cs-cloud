@@ -93,6 +93,7 @@ func (d *Driver) Start() error {
 		return err
 	}
 
+	logger.Info("workflow: multica base URL=%s user base URL=%s", d.deps.MulticaBaseURL, d.deps.UserBaseURL)
 	cache := workflow.NewCache(d.cfg.CacheDir)
 	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
