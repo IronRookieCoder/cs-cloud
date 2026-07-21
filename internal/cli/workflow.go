@@ -26,7 +26,6 @@ func workflowCmd(a *app.App, args []string) error {
 		return workflowProjectCmd(a, args[1:])
 	case "deliverable":
 		return deliverableCmd(a, args[1:])
-		return mrCmd(a, args[1:])
 	case "task":
 		return workflowTaskCmd(a, args[1:])
 	case "help", "-h", "--help":
