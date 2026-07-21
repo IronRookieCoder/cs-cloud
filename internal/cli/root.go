@@ -223,6 +223,8 @@ func dispatch(a *app.App) error {
 		return attachmentCmd(a, cmds[1:])
 	case "mr":
 		return mrCmd(a, cmds[1:])
+	case "repo":
+		return repoCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
