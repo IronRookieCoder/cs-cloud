@@ -27,13 +27,14 @@ type Client struct {
 // can react to specific codes (e.g. 404 → re-register).
 type StatusError struct {
 	Method     string
+	URL        string
 	Path       string
 	StatusCode int
 	Body       string
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.URL, e.StatusCode, e.Body)
 }
 
 // ErrRuntimeGone is returned (wrapped) when multica reports the runtime row
@@ -109,7 +110,7 @@ func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, bo
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return &StatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: string(b)}
+		return &StatusError{Method: method, URL: url, Path: path, StatusCode: resp.StatusCode, Body: string(b)}
 	}
 
 	if out != nil {
