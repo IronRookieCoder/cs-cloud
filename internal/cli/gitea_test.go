@@ -217,13 +217,8 @@ func TestFetchDeliverables_HappyPath(t *testing.T) {
 		switch {
 		case r.URL.Path == "/api/gitea/credential":
 			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
-		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables" && r.URL.Query().Get("descendants") != "true":
-			// single issue (no descendants)
-			jsonResponse(w, 200, issueGiteaDeliverablesResponse{Issues: []issueGiteaDeliverable{
-				mkIssue(1, "Self", 0, "t-ws", "wf-self", "inst-self",
-					[]issueGiteaDeliverableRef{{NodeTitle: "NodeA", DeliverableID: "d1", Title: "Doc1", Path: "nodes/a/d1.md"}}),
-			}})
-		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables" && r.URL.Query().Get("descendants") == "true":
+		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables":
+			// Always returns self + child + grandchild (descendants always on).
 			jsonResponse(w, 200, issueGiteaDeliverablesResponse{Issues: []issueGiteaDeliverable{
 				mkIssue(1, "Self", 0, "t-ws", "wf-self", "inst-self",
 					[]issueGiteaDeliverableRef{{NodeTitle: "NodeA", DeliverableID: "d1", Title: "Doc1", Path: "nodes/a/d1.md"}}),
@@ -242,39 +237,32 @@ func TestFetchDeliverables_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
 
-	// The fake cloner serves any path it knows about regardless of "repo".
 	cloner := fakeFetchCloner{files: map[string][]byte{
 		"nodes/a/d1.md": []byte("# self doc"),
 		"nodes/b/d2.md": []byte("# child doc"),
 		"nodes/c/d3.md": []byte("# grandchild doc"),
 	}}
 
-	t.Run("single issue", func(t *testing.T) {
+	t.Run("fetch returns self + descendants with issue IDs", func(t *testing.T) {
 		var out bytes.Buffer
 		if err := fetchDeliverables(fetchConfig{issue: "MUL-1", cloner: cloner, out: &out}); err != nil {
 			t.Fatalf("fetchDeliverables: %v", err)
 		}
 		s := out.String()
-		if !strings.Contains(s, "self doc") {
-			t.Errorf("expected self doc, got:\n%s", s)
-		}
-		if strings.Contains(s, "child doc") || strings.Contains(s, "grandchild doc") {
-			t.Errorf("descendants should not appear without --descendants, got:\n%s", s)
-		}
-	})
-
-	t.Run("descendants", func(t *testing.T) {
-		var out bytes.Buffer
-		if err := fetchDeliverables(fetchConfig{issue: "MUL-1", descendants: true, cloner: cloner, out: &out}); err != nil {
-			t.Fatalf("fetchDeliverables: %v", err)
-		}
-		s := out.String()
+		// All three deliverable bodies present.
 		for _, want := range []string{"self doc", "child doc", "grandchild doc"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("expected %q in output, got:\n%s", want, s)
 			}
 		}
-		// depth labels: depth 0/1/2
+		// Each issue block carries its issue_id (so child-issue deliverables
+		// are identifiable — the agent can re-fetch a specific child by ID).
+		for _, id := range []string{"iss-Self", "iss-Child", "iss-Grandchild"} {
+			if !strings.Contains(s, id) {
+				t.Errorf("expected issue_id %q in output, got:\n%s", id, s)
+			}
+		}
+		// Depth labels.
 		for _, d := range []string{"depth 0", "depth 1", "depth 2"} {
 			if !strings.Contains(s, d) {
 				t.Errorf("expected %q label, got:\n%s", d, s)
@@ -283,7 +271,6 @@ func TestFetchDeliverables_HappyPath(t *testing.T) {
 	})
 
 	t.Run("no deliverables", func(t *testing.T) {
-		// multica returns 404 for unknown issue
 		var out bytes.Buffer
 		err := fetchDeliverables(fetchConfig{issue: "MUL-999", cloner: cloner, out: &out})
 		if err == nil {

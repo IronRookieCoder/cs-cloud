@@ -54,39 +54,33 @@ Usage:
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
     (node->inst), and registers the PR URL back to Multica.
 
-  cs-cloud gitea fetch [issue] [--descendants]
+  cs-cloud gitea fetch [issue]
     Read an issue's workflow document deliverables. <issue> is a UUID or key
     (e.g. MUL-123); omit to use the current task's issue (MULTICA_ISSUE_ID).
-    --descendants recursively includes all child/grandchild/... issues'
-    deliverables. Fetches each issue's Gitea context from Multica, clones the
-    run's inst branch with the workspace PAT, and prints the deliverable bodies,
-    labeled by issue and node. The agent never deals with node-run-ids.`)
+    The result includes the issue's own deliverables plus those of all
+    descendant issues (children, grandchildren, ...); each block carries its
+    source issue_id so child-issue deliverables are identifiable.`)
 }
 
 // runGiteaFetch parses args and runs the fetch flow.
 //
-//	cs-cloud gitea fetch [issue] [--descendants]
+//	cs-cloud gitea fetch [issue]
 //
 // issue: a UUID or <PREFIX>-<number> (e.g. MUL-123). Omit to use the current
-// task's issue (MULTICA_ISSUE_ID env, pushed by multica). --descendants
-// recursively includes all child/grandchild/... issues' workflow deliverables.
+// task's issue (MULTICA_ISSUE_ID env, pushed by multica). The result always
+// includes the issue's own deliverables plus those of all descendant issues
+// (children, grandchildren, ...); each block is labeled with its source issue
+// ID so child-issue deliverables are identifiable.
 func runGiteaFetch(args []string) error {
 	var issue string
-	descendants := false
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "--descendants":
-			descendants = true
-			i++
-		default:
-			if issue == "" && !strings.HasPrefix(args[i], "--") {
-				issue = args[i]
-				i++
-				continue
-			}
-			return fmt.Errorf("unexpected argument: %s", args[i])
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return fmt.Errorf("unexpected flag: %s (fetch takes only an optional issue key)", a)
 		}
+		if issue != "" {
+			return fmt.Errorf("unexpected argument: %s (only one issue allowed)", a)
+		}
+		issue = a
 	}
 	if issue == "" {
 		issue = os.Getenv("MULTICA_ISSUE_ID")
@@ -95,18 +89,16 @@ func runGiteaFetch(args []string) error {
 		}
 	}
 	return fetchDeliverables(fetchConfig{
-		issue:       issue,
-		descendants: descendants,
-		cloner:      execFetchCloner{},
+		issue:  issue,
+		cloner: execFetchCloner{},
 	})
 }
 
 // fetchConfig parameterizes fetchDeliverables for testing.
 type fetchConfig struct {
-	issue       string // UUID or <PREFIX>-<number>
-	descendants bool
-	cloner      fetchCloner
-	out         io.Writer // optional: output sink (defaults to os.Stdout)
+	issue  string // UUID or <PREFIX>-<number>
+	cloner fetchCloner
+	out    io.Writer // optional: output sink (defaults to os.Stdout)
 }
 
 func (c fetchConfig) writer() io.Writer {
@@ -151,15 +143,19 @@ type issueGiteaDeliverableRef struct {
 	Path          string `json:"path"`
 }
 
-// fetchDeliverables is the testable core: ask multica for the issue's (and
-// optionally descendants') Gitea contexts, then clone each run's inst branch
-// with the PAT and print the deliverable bodies, labeled by issue + node.
+// fetchDeliverables is the testable core: ask multica for the issue's + all
+// descendant issues' Gitea contexts, then clone each run's inst branch with
+// the PAT and print the deliverable bodies, labeled by issue + node. Each
+// issue block includes its issue_id so child-issue deliverables are
+// identifiable (the agent can re-fetch a specific child by that ID).
 func fetchDeliverables(cfg fetchConfig) error {
 	serverURL := envOr("MULTICA_SERVER_URL", "")
 	token := os.Getenv("MULTICA_TOKEN")
 	workspaceID := os.Getenv("MULTICA_WORKSPACE_ID")
 
-	resp, err := fetchIssueGiteaDeliverables(serverURL, token, workspaceID, cfg.issue, cfg.descendants)
+	// Always include descendants — child-issue deliverables are part of the
+	// expected result, not an opt-in.
+	resp, err := fetchIssueGiteaDeliverables(serverURL, token, workspaceID, cfg.issue, true)
 	if err != nil {
 		return fmt.Errorf("fetch issue gitea deliverables: %w", err)
 	}
@@ -185,9 +181,10 @@ func fetchDeliverables(cfg fetchConfig) error {
 		}
 		if err := cfg.cloner.CloneRepo(cloneAuth, iss.Gitea.InstBranch, dir); err != nil {
 			os.RemoveAll(dir)
-			return fmt.Errorf("clone inst branch for issue #%d: %w", iss.Number, err)
+			return fmt.Errorf("clone inst branch for issue %s: %w", iss.IssueID, err)
 		}
-		fmt.Fprintf(out, "# issue #%d %q (depth %d) — %s/%s @ %s\n", iss.Number, iss.Title, iss.Depth, iss.Gitea.Owner, iss.Gitea.Repo, iss.Gitea.InstBranch)
+		fmt.Fprintf(out, "# issue %s (#%d %q, depth %d) — %s/%s @ %s\n",
+			iss.IssueID, iss.Number, iss.Title, iss.Depth, iss.Gitea.Owner, iss.Gitea.Repo, iss.Gitea.InstBranch)
 		for _, d := range iss.Gitea.Deliverables {
 			content, err := cfg.cloner.ReadFile(dir, d.Path)
 			if err != nil {
@@ -200,11 +197,7 @@ func fetchDeliverables(cfg fetchConfig) error {
 		os.RemoveAll(dir)
 	}
 	if reads == 0 {
-		scope := "issue " + cfg.issue
-		if cfg.descendants {
-			scope += " and its descendants"
-		}
-		return fmt.Errorf("%s has no document deliverables", scope)
+		return fmt.Errorf("issue %s and its descendants have no document deliverables", cfg.issue)
 	}
 	return nil
 }
