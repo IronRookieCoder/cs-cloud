@@ -18,6 +18,7 @@ import (
 // Client is a REST client for the multica backend.
 type Client struct {
 	baseURL       string
+	userBaseURL   string
 	tokenProvider func() (*provider.Credentials, error)
 	http          *http.Client
 }
@@ -40,9 +41,16 @@ func (e *StatusError) Error() string {
 var ErrRuntimeGone = errors.New("runtime gone")
 
 // NewClient creates a new multica REST client.
-func NewClient(baseURL string, tp func() (*provider.Credentials, error)) *Client {
+// baseURL is the daemon API root (typically .../workflow-backend).
+// userBaseURL is the user-facing API root used for endpoints such as chat
+// sessions; when empty it falls back to baseURL.
+func NewClient(baseURL, userBaseURL string, tp func() (*provider.Credentials, error)) *Client {
+	if userBaseURL == "" {
+		userBaseURL = baseURL
+	}
 	return &Client{
 		baseURL:       baseURL,
+		userBaseURL:   userBaseURL,
 		tokenProvider: tp,
 		http:          &http.Client{Timeout: 30 * time.Second},
 	}
@@ -60,6 +68,14 @@ func (c *Client) token() (string, error) {
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
+	return c.doRequest(ctx, c.baseURL, method, path, body, out)
+}
+
+func (c *Client) userRequest(ctx context.Context, method, path string, body, out any) error {
+	return c.doRequest(ctx, c.userBaseURL, method, path, body, out)
+}
+
+func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, body, out any) error {
 	token, err := c.token()
 	if err != nil {
 		return err
@@ -74,7 +90,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 		bodyReader = bytes.NewReader(b)
 	}
 
-	url := c.baseURL + path
+	url := baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return err
@@ -174,4 +190,37 @@ func (c *Client) Heartbeat(ctx context.Context, runtimeID string) error {
 // DeregisterDaemon removes the given runtime rows (best-effort shutdown).
 func (c *Client) DeregisterDaemon(ctx context.Context, runtimeIDs []string) error {
 	return c.request(ctx, http.MethodPost, workflow.MulticaDaemonDeregisterEndpoint, map[string]any{"runtime_ids": runtimeIDs}, nil)
+}
+
+// CreateChatSession creates a new chat session for the given agent in the
+// workspace. The returned ChatSession.ID is the row UUID used to bind tasks
+// and node runs.
+func (c *Client) CreateChatSession(ctx context.Context, workspaceID, agentID, title string) (workflow.ChatSession, error) {
+	var out workflow.ChatSession
+	path := fmt.Sprintf("/api/workspaces/%s/api/chat/sessions", workspaceID)
+	err := c.userRequest(ctx, http.MethodPost, path, workflow.CreateChatSessionRequest{
+		AgentID: agentID,
+		Title:   title,
+	}, &out)
+	return out, err
+}
+
+// PinTaskSession persists the chat session binding for a task.
+func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir string) error {
+	path := fmt.Sprintf(workflow.MulticaTaskSessionEndpoint, taskID)
+	return c.request(ctx, http.MethodPost, path, workflow.PinTaskSessionRequest{
+		SessionID: sessionID,
+		WorkDir:   workDir,
+	}, nil)
+}
+
+// BindNodeRunSession persists the runtime/device/session binding for a
+// workflow node run.
+func (c *Client) BindNodeRunSession(ctx context.Context, nodeRunID, runtimeID, deviceID, sessionID string) error {
+	path := fmt.Sprintf(workflow.MulticaNodeRunSessionEndpoint, nodeRunID)
+	return c.request(ctx, http.MethodPost, path, workflow.BindNodeRunSessionRequest{
+		RuntimeID: runtimeID,
+		DeviceID:  deviceID,
+		SessionID: sessionID,
+	}, nil)
 }

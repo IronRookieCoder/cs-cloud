@@ -12,6 +12,7 @@ const (
 	MulticaTaskUsageEndpoint    = "/api/daemon/tasks/%s/usage"
 	MulticaTaskMessagesEndpoint = "/api/daemon/tasks/%s/messages"
 	MulticaTaskSessionEndpoint  = "/api/daemon/tasks/%s/session"
+	MulticaNodeRunSessionEndpoint = "/api/daemon/node-runs/%s/session"
 
 	MulticaWorkspacesEndpoint = "/api/workspaces"
 	MulticaIssuesEndpoint     = "/api/workspaces/%s/issues"

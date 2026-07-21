@@ -90,7 +90,7 @@ func (d *Driver) Start() error {
 	}
 
 	cache := workflow.NewCache(d.cfg.CacheDir)
-	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.TokenProvider)
+	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
 	d.runtime.maintainFunc = d.maintainRegistrations
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
@@ -285,6 +285,14 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		return fmt.Errorf("start task: %w", err)
 	}
 
+	// Bind a chat session to the task and its workflow node run so the web
+	// UI can enter the live session. This must happen before the agent
+	// produces output, otherwise "进入会话" would point at nothing.
+	if _, err := d.bindSession(ctx, payload); err != nil {
+		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
+		return err
+	}
+
 	out, runErr := d.runner.Run(ctx, payload)
 	output := truncateOutput(string(out))
 	_ = d.client.PostTaskMessages(ctx, payload.TaskID, output)
@@ -298,6 +306,57 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	}
 
 	return d.client.CompleteTask(ctx, payload.TaskID, output)
+}
+
+// bindSession creates a chat session for the task and binds it to both the
+// task row and the workflow node run. It returns the chat session row UUID.
+// When the payload does not carry the agent/node-run IDs the driver needs, or
+// when the driver has not registered a runtime for the workspace, it returns
+// ("", nil) and execution continues without a session.
+func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayload) (string, error) {
+	if payload.AgentID == "" || payload.NodeRunID == "" {
+		return "", nil
+	}
+	if d.deps == nil || d.deps.DeviceID == nil {
+		return "", nil
+	}
+
+	d.mu.Lock()
+	runtimeID, registered := d.registrations[payload.WorkspaceID]
+	d.mu.Unlock()
+	if !registered || runtimeID == "" {
+		return "", nil
+	}
+
+	deviceID, err := d.deps.DeviceID()
+	if err != nil {
+		return "", fmt.Errorf("resolve device id: %w", err)
+	}
+
+	session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
+	if err != nil {
+		return "", fmt.Errorf("create chat session: %w", err)
+	}
+	if session.ID == "" {
+		return "", fmt.Errorf("multica returned empty chat session id")
+	}
+
+	if err := d.client.PinTaskSession(ctx, payload.TaskID, session.ID, ""); err != nil {
+		return "", fmt.Errorf("pin task session: %w", err)
+	}
+	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
+		return "", fmt.Errorf("bind node run session: %w", err)
+	}
+
+	logger.Info("workflow: bound session %s to task %s node_run %s", session.ID, payload.TaskID, payload.NodeRunID)
+	return session.ID, nil
+}
+
+func chatSessionTitle(payload workflow.TaskRunPayload) string {
+	if payload.IssueID != "" {
+		return fmt.Sprintf("Workflow session for issue %s", payload.IssueID)
+	}
+	return fmt.Sprintf("Workflow session for task %s", payload.TaskID)
 }
 
 // truncateOutput caps callback payloads at maxCallbackOutputBytes, staying

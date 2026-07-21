@@ -77,21 +77,39 @@ func TestDriverTokenProviderNilDeps(t *testing.T) {
 
 // fakeMultica is a minimal in-memory multica backend for driver registration
 // tests. It implements /api/workspaces, /api/daemon/register,
-// /api/daemon/heartbeat and /api/daemon/deregister.
+// /api/daemon/heartbeat, /api/daemon/deregister, and the session-binding
+// endpoints used by workflow task execution.
 type fakeMultica struct {
 	mu            sync.Mutex
 	workspaces    []workflow.Workspace
 	registrations []workflow.DaemonRegisterRequest
 	heartbeats    []string
 	deregistered  []string
+	pinSessions   []pinSessionCall
+	bindSessions  []bindSessionCall
+	sessions      []workflow.ChatSession
 	nextRuntimeID int
+	nextSessionID int
 	runtimeAlive  map[string]bool
+}
+
+type pinSessionCall struct {
+	TaskID    string
+	SessionID string
+}
+
+type bindSessionCall struct {
+	NodeRunID string
+	RuntimeID string
+	DeviceID  string
+	SessionID string
 }
 
 func newFakeMultica(workspaces ...workflow.Workspace) *fakeMultica {
 	return &fakeMultica{
 		workspaces:    workspaces,
 		nextRuntimeID: 1,
+		nextSessionID: 1,
 		runtimeAlive:  make(map[string]bool),
 	}
 }
@@ -116,7 +134,7 @@ func (f *fakeMultica) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(workflow.DaemonRegisterResponse{
 			Runtimes: []workflow.DaemonRuntimeResponse{
-				{ID: rtID, WorkspaceID: req.WorkspaceID, Provider: "cs-cloud", Status: "online"},
+				{ID: rtID, WorkspaceID: req.WorkspaceID, Provider: providerCSCloud, Status: "online"},
 			},
 		})
 	})
@@ -140,13 +158,79 @@ func (f *fakeMultica) handler() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		for _, id := range body["runtime_ids"].([]any) {
-			s, _ := id.(string)
-			f.deregistered = append(f.deregistered, s)
-			delete(f.runtimeAlive, s)
+		if ids, ok := body["runtime_ids"].([]any); ok {
+			for _, id := range ids {
+				s, ok := id.(string)
+				if !ok {
+					continue
+				}
+				f.deregistered = append(f.deregistered, s)
+				delete(f.runtimeAlive, s)
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// Session-binding endpoints used during workflow task execution.
+	mux.HandleFunc("/api/workspaces/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/chat/sessions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req workflow.CreateChatSessionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		sessionID := fmt.Sprintf("chat-sess-%d", f.nextSessionID)
+		f.nextSessionID++
+		session := workflow.ChatSession{ID: sessionID, AgentID: req.AgentID, Title: req.Title}
+		f.sessions = append(f.sessions, session)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(session)
+	})
+	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/session") {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) < 4 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			taskID := parts[len(parts)-2]
+			var req workflow.PinTaskSessionRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.mu.Lock()
+			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID})
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/daemon/node-runs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/session") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) < 4 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		nodeRunID := parts[len(parts)-2]
+		var req workflow.BindNodeRunSessionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.bindSessions = append(f.bindSessions, bindSessionCall{
+			NodeRunID: nodeRunID,
+			RuntimeID: req.RuntimeID,
+			DeviceID:  req.DeviceID,
+			SessionID: req.SessionID,
+		})
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	return mux
 }
 
@@ -162,6 +246,13 @@ func (f *fakeMultica) killRuntimes() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.runtimeAlive = make(map[string]bool)
+}
+
+func (f *fakeMultica) sessionCalls() (pins []pinSessionCall, binds []bindSessionCall) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]pinSessionCall{}, f.pinSessions...),
+		append([]bindSessionCall{}, f.bindSessions...)
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -218,7 +309,7 @@ func TestDriverRegistersAndHeartbeats(t *testing.T) {
 		if req.DaemonID != "dev-1" {
 			t.Fatalf("daemon_id = %q, want dev-1", req.DaemonID)
 		}
-		if len(req.Runtimes) != 1 || req.Runtimes[0].Type != "cs-cloud" {
+		if len(req.Runtimes) != 1 || req.Runtimes[0].Type != providerCSCloud {
 			t.Fatalf("runtimes = %+v, want one cs-cloud runtime", req.Runtimes)
 		}
 	}
@@ -553,5 +644,61 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 	})
 	if cr.hasCall("/complete") || cr.hasCall("/fail") {
 		t.Fatalf("unexpected completion callbacks: %v", cr.calls)
+	}
+}
+
+func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
+	installFakeAgent(t, "fakeagent")
+
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"fakeagent"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		regs, _, _ := fm.snapshot()
+		return len(regs) >= 1
+	})
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-bind",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "fakeagent",
+		Prompt:      "echo hello",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	waitFor(t, "session binding", func() bool {
+		pins, binds := fm.sessionCalls()
+		return len(pins) > 0 && len(binds) > 0
+	})
+
+	pins, binds := fm.sessionCalls()
+	if len(pins) != 1 || pins[0].TaskID != "task-bind" || pins[0].SessionID == "" {
+		t.Fatalf("unexpected pin calls: %+v", pins)
+	}
+	if len(binds) != 1 || binds[0].NodeRunID != "nr-1" || binds[0].DeviceID != "dev-1" || binds[0].RuntimeID == "" || binds[0].SessionID != pins[0].SessionID {
+		t.Fatalf("unexpected bind calls: %+v", binds)
 	}
 }

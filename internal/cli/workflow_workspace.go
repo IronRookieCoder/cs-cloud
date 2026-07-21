@@ -43,7 +43,7 @@ func workflowWorkspaceSync(a *app.App) error {
 	if err != nil {
 		return err
 	}
-	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, func() (*provider.Credentials, error) {
+	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Workflow.AgentTimeout)

@@ -70,12 +70,45 @@ type TaskRunPayload struct {
 	WorkspaceID string            `json:"workspace_id"`
 	IssueID     string            `json:"issue_id,omitempty"`
 	ProjectID   string            `json:"project_id,omitempty"`
+	NodeRunID   string            `json:"node_run_id,omitempty"`
+	AgentID     string            `json:"agent_id,omitempty"`
 	Agent       string            `json:"agent"`
 	Prompt      string            `json:"prompt"`
 	Env         map[string]string `json:"env,omitempty"`
 	// Kind is the multica task kind (direct|comment|chat|quick_create|
 	// autopilot). Optional; consumers may ignore it.
 	Kind string `json:"kind,omitempty"`
+}
+
+// CreateChatSessionRequest mirrors multica's POST
+// /api/workspaces/{id}/api/chat/sessions body.
+type CreateChatSessionRequest struct {
+	AgentID string `json:"agent_id"`
+	Title   string `json:"title"`
+}
+
+// ChatSession mirrors the subset of multica's chat session response that
+// cs-cloud needs to bind a workflow task/node run to a session.
+type ChatSession struct {
+	ID        string  `json:"id"`
+	SessionID *string `json:"session_id,omitempty"`
+	AgentID   string  `json:"agent_id"`
+	Title     string  `json:"title"`
+}
+
+// PinTaskSessionRequest mirrors multica's POST
+// /api/daemon/tasks/{taskId}/session body.
+type PinTaskSessionRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	WorkDir   string `json:"work_dir,omitempty"`
+}
+
+// BindNodeRunSessionRequest mirrors multica's POST
+// /api/daemon/node-runs/{nodeRunId}/session body.
+type BindNodeRunSessionRequest struct {
+	RuntimeID string `json:"runtime_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // TaskMessage mirrors one entry of multica's POST
