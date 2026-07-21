@@ -139,6 +139,14 @@ func (c *Client) GetProjects(ctx context.Context, workspaceID string) ([]workflo
 	return out, err
 }
 
+// ListIssues fetches issues for a workspace.
+func (c *Client) ListIssues(ctx context.Context, workspaceID string) ([]workflow.Issue, error) {
+	var out []workflow.Issue
+	path := fmt.Sprintf(workflow.MulticaIssuesEndpoint, workspaceID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
 // GetIssue fetches a single issue by ID.
 func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (workflow.Issue, error) {
 	var out workflow.Issue

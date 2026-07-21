@@ -12,20 +12,39 @@ import (
 )
 
 // workflowIssueCmd implements `cs-cloud workflow issue <subcommand>`.
-// Currently supports: get, comment add, comment list — the operations an
-// in-task agent needs (read context, communicate, ask questions).
+// Supports: get, list, comment add/list — the operations an in-task agent or
+// developer needs (read context, browse issues, communicate).
 func workflowIssueCmd(a *app.App, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cs-cloud workflow issue <get|comment> ...")
+		return fmt.Errorf("usage: cs-cloud workflow issue <get|list|comment> ...")
 	}
 	switch args[0] {
 	case "get":
 		return workflowIssueGet(a, args[1:])
+	case "list":
+		return workflowIssueList(a, args[1:])
 	case "comment":
 		return workflowIssueCommentCmd(a, args[1:])
 	default:
 		return fmt.Errorf("unknown workflow issue command: %s", args[0])
 	}
+}
+
+// workflowIssueList: `cs-cloud workflow issue list`
+func workflowIssueList(a *app.App, _ []string) error {
+	client, wsID, ctx, cancel, err := issueClient(a)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	issues, err := client.ListIssues(ctx, wsID)
+	if err != nil {
+		return err
+	}
+	for _, iss := range issues {
+		fmt.Printf("%s  [%s]  %s\n", iss.ID, iss.Status, iss.Title)
+	}
+	return nil
 }
 
 // workflowIssueGet: `cs-cloud workflow issue get <issue-id>`
