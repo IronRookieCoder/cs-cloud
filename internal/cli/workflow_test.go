@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/app"
@@ -16,5 +19,32 @@ func TestWorkflowWorkspaceListEmptyCache(t *testing.T) {
 	}
 	if err := workflowWorkspaceList(a); err != nil {
 		t.Fatalf("workflowWorkspaceList: %v", err)
+	}
+}
+
+func TestPrintWorkflowUsageListsImplementedResources(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	printWorkflowUsage()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdout = orig
+	t.Cleanup(func() { os.Stdout = orig })
+	outBytes, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	out := string(outBytes)
+
+	if !strings.Contains(out, "deliverable:") {
+		t.Fatalf("workflow usage missing deliverable resource:\n%s", out)
+	}
+	if strings.Contains(out, "task:") {
+		t.Fatalf("workflow usage should not advertise unimplemented task resource:\n%s", out)
 	}
 }

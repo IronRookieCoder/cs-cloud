@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"cs-cloud/internal/app"
 	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/app"
 	"cs-cloud/internal/provider"
 )
 
@@ -26,8 +26,6 @@ func workflowCmd(a *app.App, args []string) error {
 		return workflowProjectCmd(a, args[1:])
 	case "deliverable":
 		return deliverableCmd(a, args[1:])
-	case "task":
-		return workflowTaskCmd(a, args[1:])
 	case "help", "-h", "--help":
 		printWorkflowUsage()
 		return nil
@@ -46,7 +44,7 @@ func printWorkflowUsage() {
 		{"workspace", "List/get/sync workspaces"},
 		{"issue", "List/create/update issues"},
 		{"project", "List projects"},
-		{"task", "Run/check workflow tasks"},
+		{"deliverable", "Submit/fetch document deliverables"},
 	}
 	fmt.Print(renderKV(cmds))
 }
@@ -86,10 +84,4 @@ func workflowProjectList(a *app.App) error {
 		fmt.Printf("%s  %s\n", p.ID, p.Name)
 	}
 	return nil
-}
-
-func workflowTaskCmd(a *app.App, args []string) error {
-	_ = a
-	_ = args
-	return fmt.Errorf("workflow task commands are not implemented yet")
 }
