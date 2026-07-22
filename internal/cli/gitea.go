@@ -159,9 +159,9 @@ func fetchDeliverables(cfg fetchConfig) error {
 	if err != nil {
 		return fmt.Errorf("fetch issue gitea deliverables: %w", err)
 	}
-	cred, err := fetchGiteaCredential(serverURL, token, workspaceID)
+	cred, err := readGiteaCredential()
 	if err != nil {
-		return fmt.Errorf("fetch gitea credential: %w", err)
+		return fmt.Errorf("gitea credential: %w", err)
 	}
 
 	out := cfg.writer()
@@ -374,9 +374,9 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("read --file: %w", err)
 	}
 
-	cred, err := fetchGiteaCredential(envOr("MULTICA_SERVER_URL", ""), os.Getenv("MULTICA_TOKEN"), os.Getenv("MULTICA_WORKSPACE_ID"))
+	cred, err := readGiteaCredential()
 	if err != nil {
-		return fmt.Errorf("fetch gitea credential: %w", err)
+		return fmt.Errorf("gitea credential: %w", err)
 	}
 	giteaBase := cfg.giteaBaseOverride
 	if giteaBase == "" {
@@ -460,39 +460,25 @@ var giteaHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // urlCredRedactor matches scheme://user:pass@host so git stderr never leaks PAT.
 var urlCredRedactor = regexp.MustCompile(`(\w+://[^/:@]+:)[^@]+(@)`)
 
-// fetchGiteaCredential calls GET /api/gitea/credential on the multica server.
-func fetchGiteaCredential(serverURL, token, workspaceID string) (struct {
-	BaseURL string `json:"base_url"`
-	Token   string `json:"token"`
+// readGiteaCredential reads the workspace bot PAT + base URL that multica
+// pushed in the task payload env (MULTICA_GITEA_*). cs-cloud talks to Gitea
+// directly with these — there is no relay back through multica to fetch
+// credentials, so the agent CLI never depends on MULTICA_TOKEN for Gitea auth.
+func readGiteaCredential() (struct {
+	BaseURL string
+	Token   string
 }, error) {
-	var out struct {
-		BaseURL string `json:"base_url"`
-		Token   string `json:"token"`
+	token := strings.TrimSpace(os.Getenv("MULTICA_GITEA_TOKEN"))
+	if token == "" {
+		return struct {
+			BaseURL string
+			Token   string
+		}{}, fmt.Errorf("MULTICA_GITEA_TOKEN not set (the task payload must provide the workspace bot PAT)")
 	}
-	if serverURL == "" || token == "" {
-		return out, fmt.Errorf("MULTICA_SERVER_URL/MULTICA_TOKEN not set")
-	}
-	req, _ := http.NewRequest(http.MethodGet, serverURL+"/api/gitea/credential", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	if workspaceID != "" {
-		req.Header.Set("X-Workspace-ID", workspaceID)
-	}
-	resp, err := giteaHTTPClient.Do(req)
-	if err != nil {
-		return out, fmt.Errorf("credential request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return out, fmt.Errorf("credential: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return out, err
-	}
-	if out.BaseURL == "" || out.Token == "" {
-		return out, fmt.Errorf("credential response missing base_url/token")
-	}
-	return out, nil
+	return struct {
+		BaseURL string
+		Token   string
+	}{BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITEA_BASE_URL")), Token: token}, nil
 }
 
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.

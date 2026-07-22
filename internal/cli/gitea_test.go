@@ -86,6 +86,8 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
 	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
+	t.Setenv("MULTICA_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("MULTICA_GITEA_TOKEN", "pat-xyz")
 	t.Setenv("MULTICA_GITEA_OWNER", "t-aaa")
 	t.Setenv("MULTICA_GITEA_REPO", "wf-bbb")
 	t.Setenv("MULTICA_GITEA_INST_BRANCH", "inst-cc")
@@ -236,6 +238,8 @@ func TestFetchDeliverables_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_TOKEN", "tok")
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("MULTICA_GITEA_TOKEN", "pat-xyz")
 
 	cloner := fakeFetchCloner{files: map[string][]byte{
 		"nodes/a/d1.md": []byte("# self doc"),

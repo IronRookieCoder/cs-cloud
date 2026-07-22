@@ -378,7 +378,13 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 	}
 
 	if d.deps.ConversationBinder != nil {
-		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree); err != nil {
+		// Create the csc session with the task env so in-task CLIs (notably
+		// `cs-cloud workflow deliverable submit`, which needs MULTICA_TOKEN +
+		// MULTICA_GITEA_* to push document deliverables to Gitea) inherit the
+		// credentials multica pushed in the task payload. RunSession reuses
+		// this session, so the env must be present at creation.
+		env := d.runner.buildEnv(payload, worktree)
+		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree, env); err != nil {
 			logger.Warn("workflow: failed to bind local conversation session %s: %v", session.ID, err)
 		}
 	}

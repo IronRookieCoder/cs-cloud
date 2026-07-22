@@ -287,19 +287,19 @@ func (m *AgentManager) InitDefaultAgent(ctx context.Context, agentType string, a
 	return m.CreateAgent(ctx, "default", cfg)
 }
 
-func (m *AgentManager) BindWorkflowSession(ctx context.Context, sessionID, cwd string) error {
+func (m *AgentManager) BindWorkflowSession(ctx context.Context, sessionID, cwd string, env []string) error {
 	a, ok := m.GetAgent("default")
 	if !ok {
 		return fmt.Errorf("no default agent available")
 	}
 	type sessionBinder interface {
-		CreateSession(ctx context.Context, sessionID, cwd string) error
+		CreateSession(ctx context.Context, sessionID, cwd string, env []string) error
 	}
 	b, ok := a.(sessionBinder)
 	if !ok {
 		return fmt.Errorf("default agent %q does not support session binding", a.Backend())
 	}
-	return b.CreateSession(ctx, sessionID, cwd)
+	return b.CreateSession(ctx, sessionID, cwd, env)
 }
 
 // RunWorkflowSession runs a workflow prompt inside an existing local csc

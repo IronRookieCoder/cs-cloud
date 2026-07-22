@@ -16,8 +16,8 @@ type agentManagerSessionBinder struct {
 	manager *runtime.AgentManager
 }
 
-func (b *agentManagerSessionBinder) Bind(ctx context.Context, sessionID, cwd string) error {
-	return b.manager.BindWorkflowSession(ctx, sessionID, cwd)
+func (b *agentManagerSessionBinder) Bind(ctx context.Context, sessionID, cwd string, env []string) error {
+	return b.manager.BindWorkflowSession(ctx, sessionID, cwd, env)
 }
 
 func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {

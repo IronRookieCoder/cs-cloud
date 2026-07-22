@@ -10,7 +10,7 @@ import (
 // so the frontend conversation proxy can resolve it by the multica chat
 // session ID.
 type ConversationBinder interface {
-	Bind(ctx context.Context, sessionID, cwd string) error
+	Bind(ctx context.Context, sessionID, cwd string, env []string) error
 }
 
 // SessionRunner executes a workflow prompt inside an existing local
