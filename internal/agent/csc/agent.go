@@ -360,8 +360,12 @@ func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string) error 
 	}
 
 	body := map[string]any{
-		"session_id":      sessionID,
-		"permission_mode": "bypassPermissions",
+		"session_id": sessionID,
+		// "default" mode: read-only tools auto-allow, everything else asks.
+		// The asks surface as permission.asked/question.asked SSE events so
+		// the web UI can prompt the user while the task runs — bypassPermissions
+		// would suppress them entirely and leave the session unsupervised.
+		"permission_mode": "default",
 	}
 	if cwd != "" {
 		body["cwd"] = cwd
