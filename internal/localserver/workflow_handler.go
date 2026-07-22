@@ -46,6 +46,10 @@ func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
 		return
 	}
+	if s.workflowErr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "workflow driver disabled: "+s.workflowErr.Error())
+		return
+	}
 	if err := s.workflow.Health(); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", err.Error())
 		return
@@ -70,6 +74,17 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.TaskID == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task_id")
+		return
+	}
+
+	// A disabled/not-running driver is a 503, not a 409: the caller should
+	// see "this device cannot run workflow tasks", not a task conflict.
+	if err := s.workflow.Health(); err != nil {
+		reason := err.Error()
+		if s.workflowErr != nil {
+			reason = "workflow driver disabled: " + s.workflowErr.Error()
+		}
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", reason)
 		return
 	}
 

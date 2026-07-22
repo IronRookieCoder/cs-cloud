@@ -62,6 +62,11 @@ type Server struct {
 	dispatcher *CommandDispatcher
 
 	workflow *workflowagent.Driver
+	// workflowErr records why the workflow driver failed to start. Non-nil
+	// means the subsystem is disabled but the daemon keeps serving its core
+	// business (tunnel, agent proxy); workflow endpoints report it as
+	// unavailable.
+	workflowErr error
 
 	tunnelStatus TunnelStatusProvider
 
@@ -273,7 +278,12 @@ func (s *Server) Start(addr string) error {
 
 	if s.workflow != nil {
 		if err := s.workflow.Start(); err != nil {
-			return fmt.Errorf("start workflow driver: %w", err)
+			// The workflow subsystem is optional. A daemon registered
+			// against a server without the workflow backend (no multica
+			// base URL) must still come up — degrade to "workflow
+			// disabled" instead of failing the whole server.
+			logger.Warn("workflow driver disabled: %v", err)
+			s.workflowErr = err
 		}
 	}
 
