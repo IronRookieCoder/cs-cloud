@@ -18,7 +18,7 @@ type ConversationBinder interface {
 // csc workflow tasks run in the bound session so the conversation page shows
 // the live run and can be taken over afterwards.
 type SessionRunner interface {
-	RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error)
+	RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error)
 }
 
 // Dependencies holds the external dependencies required by the workflow driver.
@@ -35,7 +35,7 @@ type Dependencies struct {
 	// session. When nil, session binding is skipped and the frontend
 	// conversation proxy will not resolve the session.
 	ConversationBinder ConversationBinder
-	// SessionRunner runs the prompt in the bound local csc session. When nil,
-	// csc tasks fall back to the one-shot CLI.
+	// SessionRunner runs the prompt in the bound local csc session with the
+	// task environment. When nil, csc tasks fall back to the one-shot CLI.
 	SessionRunner SessionRunner
 }

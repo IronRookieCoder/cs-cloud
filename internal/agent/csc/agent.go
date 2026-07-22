@@ -25,15 +25,15 @@ type Agent struct {
 	id    string
 	state agent.AgentState
 
-	command    agent.Command
-	workDir    string
-	customEnv  map[string]string
-	endpoint   string
+	command     agent.Command
+	workDir     string
+	customEnv   map[string]string
+	endpoint    string
 	rawEndpoint string
-	cmd        *exec.Cmd
-	waitCh     chan error
-	cancel     context.CancelFunc
-	adapter    *AdapterServer
+	cmd         *exec.Cmd
+	waitCh      chan error
+	cancel      context.CancelFunc
+	adapter     *AdapterServer
 
 	sessionID    string
 	modelInfo    *agent.ModelInfo
@@ -50,18 +50,18 @@ func NewAgent(cfg agent.AgentConfig) *Agent {
 		}
 	}
 	return &Agent{
-		id:         cfg.ID,
-		command:    cmd,
-		workDir:    cfg.WorkingDir,
-		customEnv:  cfg.CustomEnv,
-		state:      agent.StateIdle,
+		id:        cfg.ID,
+		command:   cmd,
+		workDir:   cfg.WorkingDir,
+		customEnv: cfg.CustomEnv,
+		state:     agent.StateIdle,
 		httpClient: &http.Client{
 			Timeout: 300 * time.Second,
 		},
 	}
 }
 
-func (a *Agent) ID() string     { return a.id }
+func (a *Agent) ID() string      { return a.id }
 func (a *Agent) Backend() string { return "csc" }
 func (a *Agent) Driver() string  { return "http" }
 func (a *Agent) PID() int {
@@ -346,6 +346,10 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 // error. This lets workflow tasks expose a stable conversation URL that
 // matches the multica chat_session.id.
 func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string) error {
+	return a.createSessionWithEnv(ctx, sessionID, cwd, nil)
+}
+
+func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string, env []string) error {
 	if sessionID == "" {
 		return fmt.Errorf("session id is required")
 	}
@@ -369,6 +373,9 @@ func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string) error 
 	}
 	if cwd != "" {
 		body["cwd"] = cwd
+	}
+	if len(env) > 0 {
+		body["env"] = envSliceToMap(env)
 	}
 	// csc registers POST /session without a trailing slash; Hono matches
 	// strictly, so "/session/" would 404.
@@ -521,8 +528,8 @@ func (a *Agent) GetSessionMessages(ctx context.Context, sessionID string) (json.
 // busy/idle events cannot race past the subscriber. If the context is
 // cancelled (e.g. the task is aborted), the session prompt is aborted
 // best-effort so the agent does not keep running detached.
-func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error) {
-	if err := a.CreateSession(ctx, sessionID, cwd); err != nil {
+func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {
+	if err := a.createSessionWithEnv(ctx, sessionID, cwd, env); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
@@ -553,6 +560,18 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string) (
 		return nil, fmt.Errorf("extract output: %w", err)
 	}
 	return []byte(text), nil
+}
+
+func envSliceToMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func extractLastAssistantText(body json.RawMessage) (string, error) {

@@ -72,7 +72,7 @@ func (tr *TaskRunner) SetSessionRunner(r SessionRunner) {
 // back to the one-shot CLI if no session runner is configured.
 func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
 	if tr.sessionRunner != nil {
-		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt)
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree))
 	}
 
 	agentPath, err := exec.LookPath(payload.Agent)

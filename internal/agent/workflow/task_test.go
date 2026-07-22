@@ -128,3 +128,48 @@ func TestTaskRunnerCscAddsOutputFormatText(t *testing.T) {
 		t.Fatalf("output = %q, want --output-format text", got)
 	}
 }
+
+type fakeSessionRunner struct {
+	env []string
+}
+
+func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string) ([]byte, error) {
+	r.env = env
+	return []byte("session runner used"), nil
+}
+
+func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	runner := &fakeSessionRunner{}
+	tr.SetSessionRunner(runner)
+
+	out, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-env",
+		WorkspaceID: "ws-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+		Env: map[string]string{
+			"FAKE_AGENT_PRINT_ENV": "MULTICA_NODE_RUN_ID",
+			"MULTICA_NODE_RUN_ID":  "nr-env",
+		},
+	}, t.TempDir(), "session-1")
+	if err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "session runner used") {
+		t.Fatalf("RunCSCSession did not use bound session runner; output = %q", got)
+	}
+	env := map[string]string{}
+	for _, e := range runner.env {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			env[k] = v
+		}
+	}
+	if env["MULTICA_NODE_RUN_ID"] != "nr-env" {
+		t.Fatalf("MULTICA_NODE_RUN_ID = %q, want nr-env", env["MULTICA_NODE_RUN_ID"])
+	}
+}

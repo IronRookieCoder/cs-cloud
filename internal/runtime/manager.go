@@ -304,19 +304,19 @@ func (m *AgentManager) BindWorkflowSession(ctx context.Context, sessionID, cwd s
 
 // RunWorkflowSession runs a workflow prompt inside an existing local csc
 // session and returns the final assistant text output.
-func (m *AgentManager) RunWorkflowSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error) {
+func (m *AgentManager) RunWorkflowSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {
 	a, ok := m.GetAgent("default")
 	if !ok {
 		return nil, fmt.Errorf("no default agent available")
 	}
 	type sessionRunner interface {
-		RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error)
+		RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error)
 	}
 	r, ok := a.(sessionRunner)
 	if !ok {
 		return nil, fmt.Errorf("default agent %q does not support session execution", a.Backend())
 	}
-	return r.RunSession(ctx, sessionID, cwd, prompt)
+	return r.RunSession(ctx, sessionID, cwd, prompt, env)
 }
 
 // RestartDefaultAgent kills all running agents and re-initializes the default agent.

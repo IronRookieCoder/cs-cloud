@@ -20,8 +20,8 @@ func (b *agentManagerSessionBinder) Bind(ctx context.Context, sessionID, cwd str
 	return b.manager.BindWorkflowSession(ctx, sessionID, cwd)
 }
 
-func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, cwd, prompt string) ([]byte, error) {
-	return b.manager.RunWorkflowSession(ctx, sessionID, cwd, prompt)
+func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {
+	return b.manager.RunWorkflowSession(ctx, sessionID, cwd, prompt, env)
 }
 
 var _ workflowagent.ConversationBinder = (*agentManagerSessionBinder)(nil)

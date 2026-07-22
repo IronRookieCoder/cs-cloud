@@ -74,3 +74,23 @@ func TestExtractLastAssistantText(t *testing.T) {
 		t.Fatalf("out = %q", out)
 	}
 }
+
+func TestEnvSliceToMap(t *testing.T) {
+	got := envSliceToMap([]string{
+		"MULTICA_NODE_RUN_ID=old",
+		"INVALID",
+		"=empty-key",
+		"MULTICA_NODE_RUN_ID=nr-1",
+		"CS_CLOUD_WORKTREE=C:\\work=tree",
+	})
+
+	if got["MULTICA_NODE_RUN_ID"] != "nr-1" {
+		t.Fatalf("MULTICA_NODE_RUN_ID = %q, want nr-1", got["MULTICA_NODE_RUN_ID"])
+	}
+	if got["CS_CLOUD_WORKTREE"] != `C:\work=tree` {
+		t.Fatalf("CS_CLOUD_WORKTREE = %q", got["CS_CLOUD_WORKTREE"])
+	}
+	if _, ok := got[""]; ok {
+		t.Fatal("empty key should be skipped")
+	}
+}
