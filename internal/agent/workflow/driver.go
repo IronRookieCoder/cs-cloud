@@ -358,6 +358,9 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 	if err != nil {
 		return "", fmt.Errorf("resolve device id: %w", err)
 	}
+	if deviceID == "" {
+		return "", nil
+	}
 
 	session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
 	if err != nil {
@@ -465,6 +468,9 @@ func (d *Driver) maintainRegistrations() error {
 	deviceID, err := d.deps.DeviceID()
 	if err != nil {
 		return fmt.Errorf("resolve device id: %w", err)
+	}
+	if deviceID == "" {
+		return nil
 	}
 
 	workspaces, err := d.client.GetWorkspaces(ctx)

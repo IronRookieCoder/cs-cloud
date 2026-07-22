@@ -55,6 +55,9 @@ func (a *App) NewWorkflowDriver() *workflow.Driver {
 			if err != nil {
 				return "", err
 			}
+			if dev == nil {
+				return "", nil
+			}
 			return dev.DeviceID, nil
 		},
 	}
