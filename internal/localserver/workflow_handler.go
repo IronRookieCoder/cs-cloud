@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner"
 )
 
 // agentManagerSessionBinder creates a local csc conversation session for a
@@ -24,8 +24,8 @@ func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, c
 	return b.manager.RunWorkflowSession(ctx, sessionID, cwd, prompt, env)
 }
 
-var _ workflowagent.ConversationBinder = (*agentManagerSessionBinder)(nil)
-var _ workflowagent.SessionRunner = (*agentManagerSessionBinder)(nil)
+var _ workflowrunner.ConversationBinder = (*agentManagerSessionBinder)(nil)
+var _ workflowrunner.SessionRunner = (*agentManagerSessionBinder)(nil)
 
 // BindWorkflowSessionBinder wires the workflow driver to the default csc
 // agent so it can create local conversation sessions that match the multica

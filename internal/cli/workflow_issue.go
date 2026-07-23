@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/provider"
+	"cs-cloud/internal/workflowrunner"
 )
 
 // workflowIssueCmd implements `cs-cloud workflow issue <subcommand>`.
@@ -195,7 +195,7 @@ func workflowIssueCommentList(a *app.App, args []string) error {
 
 // issueClient builds a multica client + resolves the workspace ID from the task
 // env (MULTICA_WORKSPACE_ID). Shared by all workflow issue subcommands.
-func issueClient(a *app.App) (*workflowagent.Client, string, context.Context, context.CancelFunc, error) {
+func issueClient(a *app.App) (*workflowrunner.Client, string, context.Context, context.CancelFunc, error) {
 	cfg := a.Config()
 	creds, err := a.Credentials()
 	if err != nil {
@@ -205,7 +205,7 @@ func issueClient(a *app.App) (*workflowagent.Client, string, context.Context, co
 	if wsID == "" {
 		return nil, "", nil, nil, fmt.Errorf("MULTICA_WORKSPACE_ID not set (run inside a task or export it)")
 	}
-	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	timeout := cfg.Workflow.AgentTimeout

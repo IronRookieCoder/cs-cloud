@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/app"
 	"cs-cloud/internal/provider"
+	"cs-cloud/internal/workflowrunner"
 )
 
 func workflowCmd(a *app.App, args []string) error {
@@ -71,7 +71,7 @@ func workflowProjectList(a *app.App) error {
 	if wsID == "" {
 		return fmt.Errorf("MULTICA_WORKSPACE_ID not set")
 	}
-	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

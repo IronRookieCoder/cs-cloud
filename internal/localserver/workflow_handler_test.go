@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner"
 )
 
 func TestHandleWorkflowHealthNotRegistered(t *testing.T) {
@@ -26,7 +26,7 @@ func TestHandleWorkflowHealthNotRegistered(t *testing.T) {
 }
 
 func TestHandleWorkflowHealthNotStarted(t *testing.T) {
-	d := workflowagent.NewDriver(workflow.Config{}, nil)
+	d := workflowrunner.NewDriver(workflow.Config{}, nil)
 	s := New(WithWorkflow(d))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow/health", nil)
@@ -45,7 +45,7 @@ func TestHandleWorkflowHealthRunning(t *testing.T) {
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 	}
-	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		MulticaBaseURL: "http://localhost:1",
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
@@ -78,7 +78,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 		AgentTimeout:   time.Minute,
 		AllowedAgents:  []string{"true"},
 	}
-	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		MulticaBaseURL: multica.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
@@ -109,7 +109,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 }
 
 func TestHandleWorkflowTaskRunMissingTaskID(t *testing.T) {
-	d := workflowagent.NewDriver(workflow.Config{}, nil)
+	d := workflowrunner.NewDriver(workflow.Config{}, nil)
 	s := New(WithWorkflow(d))
 
 	payload := workflow.TaskRunPayload{WorkspaceID: "ws-1", Agent: "true", Prompt: "hello"}
@@ -137,7 +137,7 @@ func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
 		AgentTimeout:   time.Minute,
 		AllowedAgents:  []string{"sh"},
 	}
-	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		MulticaBaseURL: multica.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
@@ -185,7 +185,7 @@ func TestHandleWorkflowTaskAbort(t *testing.T) {
 		AgentTimeout:   time.Minute,
 		AllowedAgents:  []string{"sh"},
 	}
-	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		MulticaBaseURL: multica.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner"
 )
 
 func TestWorkflowHealthRoute(t *testing.T) {
@@ -20,7 +20,7 @@ func TestWorkflowHealthRoute(t *testing.T) {
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 	}
-	d := workflowagent.NewDriver(cfg, &workflowagent.Dependencies{
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		MulticaBaseURL: "http://localhost:1",
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
@@ -50,10 +50,10 @@ func TestWorkflowHealthRoute(t *testing.T) {
 // anyway (the workflow subsystem is optional), and the workflow endpoints
 // must report 503 with the underlying reason instead of a dead daemon.
 func TestServerStartDegradesWhenWorkflowDriverFails(t *testing.T) {
-	d := workflowagent.NewDriver(workflow.Config{
+	d := workflowrunner.NewDriver(workflow.Config{
 		WorkspacesRoot: t.TempDir(),
 		CacheDir:       t.TempDir(),
-	}, &workflowagent.Dependencies{})
+	}, &workflowrunner.Dependencies{})
 
 	s := New(WithWorkflow(d))
 	if err := s.Start("127.0.0.1:0"); err != nil {
