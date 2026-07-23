@@ -38,7 +38,38 @@ func (e *ingressEvent) toAgentEvent() agent.Event {
 	if out.ConversationID == "" {
 		out.ConversationID = e.ConvIDCamel
 	}
+	normalizeEventData(&out)
 	return out
+}
+
+// normalizeEventData aligns csc TUI's native event payload shape with the
+// shape SaaS already consumes (csc-serve CloudConnector historical contract).
+// Today only question.asked needs adjustment: csc emits questionID as the
+// canonical device-side identifier (matches Claude tool_use IDs), while SaaS's
+// permission_manager / question_manager / parseIDList read data.id. Copying
+// questionID → id at ingress means every downstream consumer (tui_registry,
+// NotifyForwarder, EventBus subscribers, GET /questions handlers) sees a
+// uniform shape and no SaaS code needs to learn a second field name.
+//
+// The original questionID field is preserved so anything reading it (e.g.
+// tui_registry.extractEventID's question.asked branch) keeps working unchanged.
+func normalizeEventData(evt *agent.Event) {
+	if evt == nil || evt.Data == nil {
+		return
+	}
+	if evt.Type != "question.asked" {
+		return
+	}
+	m, ok := evt.Data.(map[string]any)
+	if !ok || m == nil {
+		return
+	}
+	if _, hasID := m["id"]; hasID {
+		return
+	}
+	if qid, ok := m["questionID"].(string); ok && qid != "" {
+		m["id"] = qid
+	}
 }
 
 // handleRuntimeEventPost accepts events pushed by csc TUI (and any future

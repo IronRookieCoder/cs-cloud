@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"cs-cloud/internal/agent"
 )
 
 func TestPermissionListWithTUIPendingReturnsArray(t *testing.T) {
@@ -21,7 +19,7 @@ func TestPermissionListWithTUIPendingReturnsArray(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: want 200, got %d", w.Code)
 	}
-	var out []agent.Event
+	var out []map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -29,18 +27,14 @@ func TestPermissionListWithTUIPendingReturnsArray(t *testing.T) {
 		t.Errorf("pending: want 2, got %d", len(out))
 	}
 	seen := map[string]bool{}
-	for _, evt := range out {
-		if evt.Type != "permission.asked" {
-			t.Errorf("type: want permission.asked, got %s", evt.Type)
-		}
-		if d, ok := evt.Data.(map[string]any); ok {
-			if id, _ := d["id"].(string); id != "" {
-				seen[id] = true
-			}
+	for _, entry := range out {
+		// SaaS's parseIDList expects id at top level (not nested in agent.Event.data).
+		if id, _ := entry["id"].(string); id != "" {
+			seen[id] = true
 		}
 	}
 	if !seen["perm-a"] || !seen["perm-b"] {
-		t.Errorf("expected perm-a and perm-b in response, got %v", seen)
+		t.Errorf("expected perm-a and perm-b at top-level id, got %v", seen)
 	}
 }
 
@@ -55,12 +49,19 @@ func TestQuestionListWithTUIPendingReturnsArray(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: want 200, got %d", w.Code)
 	}
-	var out []agent.Event
+	var out []map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(out) != 1 || out[0].Type != "question.asked" {
-		t.Errorf("want 1 question.asked, got %v", out)
+	if len(out) != 1 {
+		t.Errorf("pending: want 1, got %d", len(out))
+	}
+	// Question events store the device questionID under both data.id and
+	// data.questionID in csc's payload; flattenEvents must surface one of
+	// them at the top level so SaaS's parseIDList can decode it.
+	id, _ := out[0]["id"].(string)
+	if id == "" {
+		t.Errorf("expected non-empty top-level id, got %v", out[0])
 	}
 }
 
