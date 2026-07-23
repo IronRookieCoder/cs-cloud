@@ -109,7 +109,7 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 // worktree. It must be called before RunPrepared so the worktree path is
 // available when binding a conversation session.
 func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
-	repoURL, err := tr.resolveRepoURL(ctx, payload.WorkspaceID, payload.ProjectID)
+	repoURL, err := tr.resolveRepoURL(ctx, payload)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve repo: %w", err)
 	}
@@ -160,14 +160,13 @@ func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {
 	return []string{payload.Prompt}
 }
 
-func (tr *TaskRunner) resolveRepoURL(ctx context.Context, workspaceID, projectID string) (string, error) {
+// resolveRepoURL returns the code repository the agent should clone into its
+// worktree. It prefers the repo URL multica pushed in the payload (populated
+// from the workspace/project code repos); when absent the task has no code
+// repo and the worktree is a scratch dir.
+func (tr *TaskRunner) resolveRepoURL(ctx context.Context, payload workflow.TaskRunPayload) (string, error) {
 	_ = ctx
-	if projectID == "" || workspaceID == "" {
-		return "", nil
-	}
-	// Project-to-repo resolution is currently a no-op. In a full implementation
-	// this would query the multica backend for the project's repo_url.
-	return "", nil
+	return strings.TrimSpace(payload.RepoURL), nil
 }
 
 func (tr *TaskRunner) validateAgent(agent string) error {
