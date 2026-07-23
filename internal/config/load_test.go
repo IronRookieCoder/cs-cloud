@@ -205,6 +205,38 @@ func TestLoadWorkflowConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_WorkflowHeartbeatIntervalFromConfigFile(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"heartbeat_interval":60000000000}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Workflow.HeartbeatInterval != time.Minute {
+		t.Fatalf("HeartbeatInterval = %v, want %v", cfg.Workflow.HeartbeatInterval, time.Minute)
+	}
+}
+
+func TestLoad_WorkflowAllowedAgentsEnvOverridesConfigFileWithSameLengthAsDefault(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"allowed_agents":["file-a","file-b"]}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_ALLOWED_AGENTS", "env-a,env-b,env-c,env-d,env-e")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := []string{"env-a", "env-b", "env-c", "env-d", "env-e"}
+	if len(cfg.Workflow.AllowedAgents) != len(want) {
+		t.Fatalf("AllowedAgents = %#v, want %#v", cfg.Workflow.AllowedAgents, want)
+	}
+	for i := range want {
+		if cfg.Workflow.AllowedAgents[i] != want[i] {
+			t.Fatalf("AllowedAgents = %#v, want %#v", cfg.Workflow.AllowedAgents, want)
+		}
+	}
+}
+
 func TestLoad_WorkflowMulticaBaseURLDerivedFromBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")

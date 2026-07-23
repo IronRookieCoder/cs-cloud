@@ -139,6 +139,63 @@ func (c *Client) GetProjects(ctx context.Context, workspaceID string) ([]workflo
 	return out, err
 }
 
+// ListIssues fetches issues for a workspace.
+func (c *Client) ListIssues(ctx context.Context, workspaceID string) ([]workflow.Issue, error) {
+	var out []workflow.Issue
+	path := fmt.Sprintf(workflow.MulticaIssuesEndpoint, workspaceID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+// CreateIssue creates a new issue in the workspace.
+func (c *Client) CreateIssue(ctx context.Context, workspaceID, title, description string) (workflow.Issue, error) {
+	var out workflow.Issue
+	path := fmt.Sprintf(workflow.MulticaIssuesEndpoint, workspaceID)
+	err := c.request(ctx, http.MethodPost, path, map[string]string{
+		"title":       title,
+		"description": description,
+	}, &out)
+	return out, err
+}
+
+// UpdateIssueStatus updates an issue's status.
+func (c *Client) UpdateIssueStatus(ctx context.Context, workspaceID, issueID, status string) error {
+	path := fmt.Sprintf(workflow.MulticaIssueEndpoint, workspaceID, issueID)
+	return c.request(ctx, http.MethodPut, path, map[string]string{"status": status}, nil)
+}
+
+// GetIssue fetches a single issue by ID.
+func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (workflow.Issue, error) {
+	var out workflow.Issue
+	path := fmt.Sprintf(workflow.MulticaIssueEndpoint, workspaceID, issueID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+// CreateIssueComment posts a comment on an issue.
+func (c *Client) CreateIssueComment(ctx context.Context, workspaceID, issueID, content string) error {
+	path := fmt.Sprintf(workflow.MulticaIssueCommentsEndpoint, workspaceID, issueID)
+	return c.request(ctx, http.MethodPost, path, map[string]string{"content": content}, nil)
+}
+
+// ListIssueComments fetches comments on an issue.
+func (c *Client) ListIssueComments(ctx context.Context, workspaceID, issueID string) ([]workflow.Comment, error) {
+	var resp struct {
+		Comments []workflow.Comment `json:"comments"`
+	}
+	path := fmt.Sprintf(workflow.MulticaIssueCommentsEndpoint, workspaceID, issueID)
+	err := c.request(ctx, http.MethodGet, path, nil, &resp)
+	return resp.Comments, err
+}
+
+// GetAttachment fetches attachment metadata (includes a signed download_url).
+func (c *Client) GetAttachment(ctx context.Context, attachmentID string) (workflow.Attachment, error) {
+	var out workflow.Attachment
+	path := fmt.Sprintf(workflow.MulticaAttachmentEndpoint, attachmentID)
+	err := c.request(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
 // StartTask marks a task as started.
 func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskStartEndpoint, taskID)

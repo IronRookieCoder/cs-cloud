@@ -401,6 +401,31 @@ func TestDriverSkipsRegistrationWithoutDeviceID(t *testing.T) {
 	}
 }
 
+func TestDriverSkipsRegistrationWithEmptyDeviceID(t *testing.T) {
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	d := NewDriver(testDriverConfig(t, 50*time.Millisecond), &Dependencies{
+		MulticaBaseURL: ts.URL,
+		TokenProvider:  tokenProvider("token-123"),
+		DeviceID:       func() (string, error) { return "", nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := d.Health(); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	d.Stop()
+
+	regs, _, _ := fm.snapshot()
+	if len(regs) != 0 {
+		t.Fatalf("expected no registrations, got %d", len(regs))
+	}
+}
+
 func TestDriverAbortTask(t *testing.T) {
 	installFakeAgent(t, "fakeagent")
 

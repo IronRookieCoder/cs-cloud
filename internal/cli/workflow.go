@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"time"
 
+	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/provider"
 )
 
 func workflowCmd(a *app.App, args []string) error {
@@ -19,8 +24,8 @@ func workflowCmd(a *app.App, args []string) error {
 		return workflowIssueCmd(a, args[1:])
 	case "project":
 		return workflowProjectCmd(a, args[1:])
-	case "task":
-		return workflowTaskCmd(a, args[1:])
+	case "deliverable":
+		return deliverableCmd(a, args[1:])
 	case "help", "-h", "--help":
 		printWorkflowUsage()
 		return nil
@@ -39,25 +44,44 @@ func printWorkflowUsage() {
 		{"workspace", "List/get/sync workspaces"},
 		{"issue", "List/create/update issues"},
 		{"project", "List projects"},
-		{"task", "Run/check workflow tasks"},
+		{"deliverable", "Submit/fetch document deliverables"},
 	}
 	fmt.Print(renderKV(cmds))
 }
 
-func workflowIssueCmd(a *app.App, args []string) error {
-	_ = a
-	_ = args
-	return fmt.Errorf("workflow issue commands are not implemented yet")
-}
-
 func workflowProjectCmd(a *app.App, args []string) error {
-	_ = a
-	_ = args
-	return fmt.Errorf("workflow project commands are not implemented yet")
+	if len(args) == 0 {
+		return workflowProjectList(a)
+	}
+	switch args[0] {
+	case "list":
+		return workflowProjectList(a)
+	default:
+		return fmt.Errorf("unknown workflow project command: %s", args[0])
+	}
 }
 
-func workflowTaskCmd(a *app.App, args []string) error {
-	_ = a
-	_ = args
-	return fmt.Errorf("workflow task commands are not implemented yet")
+func workflowProjectList(a *app.App) error {
+	cfg := a.Config()
+	creds, err := a.Credentials()
+	if err != nil {
+		return err
+	}
+	wsID := os.Getenv("MULTICA_WORKSPACE_ID")
+	if wsID == "" {
+		return fmt.Errorf("MULTICA_WORKSPACE_ID not set")
+	}
+	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+		return creds, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	projects, err := client.GetProjects(ctx, wsID)
+	if err != nil {
+		return err
+	}
+	for _, p := range projects {
+		fmt.Printf("%s  %s\n", p.ID, p.Name)
+	}
+	return nil
 }

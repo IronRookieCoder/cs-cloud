@@ -3,6 +3,7 @@ package workflow
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -15,18 +16,36 @@ func installFakeAgent(t *testing.T, name string) {
 	t.Helper()
 
 	dir := t.TempDir()
-	script := `#!/bin/sh
+	var bin string
+	if runtime.GOOS == "windows" {
+		script := `@echo off
+if not "%FAKE_AGENT_STARTED_FILE%"=="" <nul set /p=started>"%FAKE_AGENT_STARTED_FILE%"
+if not "%FAKE_AGENT_PRINT_ENV%"=="" call echo %%%FAKE_AGENT_PRINT_ENV%%%
+set first=%~1
+if /I "%first:~0,6%"=="sleep " powershell -NoProfile -Command "Start-Sleep -Seconds ([int]'%first:~6%')" & exit /b 0
+echo %*
+`
+		bin = filepath.Join(dir, name+".cmd")
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	} else {
+		script := `#!/bin/sh
 if [ -n "$FAKE_AGENT_STARTED_FILE" ]; then
 	printf '%s' 'started' > "$FAKE_AGENT_STARTED_FILE"
+fi
+if [ -n "$FAKE_AGENT_PRINT_ENV" ]; then
+	printenv "$FAKE_AGENT_PRINT_ENV"
 fi
 case "$1" in
   "sleep "*) exec sleep "${1#sleep }" ;;
   *) printf '%s\n' "$@" ;;
 esac
 `
-	bin := filepath.Join(dir, name)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake %s: %v", name, err)
+		bin = filepath.Join(dir, name)
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
 	}
 
 	path := os.Getenv("PATH")

@@ -155,3 +155,19 @@ type DaemonRegisterResponse struct {
 	ReposVersion string                  `json:"repos_version,omitempty"`
 	Settings     map[string]any          `json:"settings,omitempty"`
 }
+
+type Comment struct {
+	ID         string    `json:"id"`
+	Content    string    `json:"content"`
+	AuthorName string    `json:"author_name,omitempty"`
+	AuthorType string    `json:"author_type,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type Attachment struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	DownloadURL string `json:"download_url"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+}

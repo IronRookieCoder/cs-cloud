@@ -196,16 +196,31 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	if file.GCInterval != 0 && current.GCInterval == defaults.GCInterval {
 		current.GCInterval = file.GCInterval
 	}
+	if file.HeartbeatInterval != 0 && current.HeartbeatInterval == defaults.HeartbeatInterval {
+		current.HeartbeatInterval = file.HeartbeatInterval
+	}
 	if file.AgentTimeout != 0 && current.AgentTimeout == defaults.AgentTimeout {
 		current.AgentTimeout = file.AgentTimeout
 	}
 	if file.MaxConcurrentTasks != 0 && current.MaxConcurrentTasks == defaults.MaxConcurrentTasks {
 		current.MaxConcurrentTasks = file.MaxConcurrentTasks
 	}
-	if len(file.AllowedAgents) > 0 && len(current.AllowedAgents) == len(defaults.AllowedAgents) {
+	if len(file.AllowedAgents) > 0 && stringSlicesEqual(current.AllowedAgents, defaults.AllowedAgents) {
 		current.AllowedAgents = file.AllowedAgents
 	}
 	return current
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func configFilePath() (string, error) {
