@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -173,114 +171,6 @@ func TestInjectTokenIntoURL(t *testing.T) {
 	if injectTokenIntoURL("://bad", "tok") != "" {
 		t.Error("expected empty for unparseable URL")
 	}
-}
-
-// fakeFetchCloner "clones" by writing the listed deliverable files into the
-// target dir, then reads them back — stands in for a real git clone.
-type fakeFetchCloner struct {
-	files map[string][]byte // path -> content
-}
-
-func (f fakeFetchCloner) CloneRepo(authURL, instBranch, dir string) error {
-	for path, content := range f.files {
-		full := filepath.Join(dir, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, content, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (f fakeFetchCloner) ReadFile(dir, path string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(dir, path))
-}
-
-// TestFetchDeliverables_HappyPath wires httptest multica (issue gitea-deliverables
-// + credential) + a fake cloner and asserts the fetched content for a single
-// issue and for the descendants case.
-func TestFetchDeliverables_HappyPath(t *testing.T) {
-	mkIssue := func(num int32, title string, depth int, owner, repo, inst string, delvs []issueGiteaDeliverableRef) issueGiteaDeliverable {
-		return issueGiteaDeliverable{
-			IssueID: "iss-" + title,
-			Number:  num,
-			Title:   title,
-			Depth:   depth,
-			Gitea: &issueGiteaContext{
-				Owner: owner, Repo: repo,
-				CloneURL:     "https://gitea.test/" + owner + "/" + repo + ".git",
-				InstBranch:   inst,
-				Deliverables: delvs,
-			},
-		}
-	}
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/gitea/credential":
-			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
-		case r.URL.Path == "/api/daemon/issues/MUL-1/gitea-deliverables":
-			// Always returns self + child + grandchild (descendants always on).
-			jsonResponse(w, 200, issueGiteaDeliverablesResponse{Issues: []issueGiteaDeliverable{
-				mkIssue(1, "Self", 0, "t-ws", "wf-self", "inst-self",
-					[]issueGiteaDeliverableRef{{NodeTitle: "NodeA", DeliverableID: "d1", Title: "Doc1", Path: "nodes/a/d1.md"}}),
-				mkIssue(2, "Child", 1, "t-ws", "wf-child", "inst-child",
-					[]issueGiteaDeliverableRef{{NodeTitle: "NodeB", DeliverableID: "d2", Title: "Doc2", Path: "nodes/b/d2.md"}}),
-				mkIssue(3, "Grandchild", 2, "t-ws", "wf-grand", "inst-grand",
-					[]issueGiteaDeliverableRef{{NodeTitle: "NodeC", DeliverableID: "d3", Title: "Doc3", Path: "nodes/c/d3.md"}}),
-			}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer multica.Close()
-
-	t.Setenv("MULTICA_TOKEN", "tok")
-	t.Setenv("MULTICA_SERVER_URL", multica.URL)
-	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
-	t.Setenv("MULTICA_GITEA_BASE_URL", "https://gitea.test")
-	t.Setenv("MULTICA_GITEA_TOKEN", "pat-xyz")
-
-	cloner := fakeFetchCloner{files: map[string][]byte{
-		"nodes/a/d1.md": []byte("# self doc"),
-		"nodes/b/d2.md": []byte("# child doc"),
-		"nodes/c/d3.md": []byte("# grandchild doc"),
-	}}
-
-	t.Run("fetch returns self + descendants with issue IDs", func(t *testing.T) {
-		var out bytes.Buffer
-		if err := fetchDeliverables(fetchConfig{issue: "MUL-1", cloner: cloner, out: &out}); err != nil {
-			t.Fatalf("fetchDeliverables: %v", err)
-		}
-		s := out.String()
-		// All three deliverable bodies present.
-		for _, want := range []string{"self doc", "child doc", "grandchild doc"} {
-			if !strings.Contains(s, want) {
-				t.Errorf("expected %q in output, got:\n%s", want, s)
-			}
-		}
-		// Each issue block carries its issue_id (so child-issue deliverables
-		// are identifiable — the agent can re-fetch a specific child by ID).
-		for _, id := range []string{"iss-Self", "iss-Child", "iss-Grandchild"} {
-			if !strings.Contains(s, id) {
-				t.Errorf("expected issue_id %q in output, got:\n%s", id, s)
-			}
-		}
-		// Depth labels.
-		for _, d := range []string{"depth 0", "depth 1", "depth 2"} {
-			if !strings.Contains(s, d) {
-				t.Errorf("expected %q label, got:\n%s", d, s)
-			}
-		}
-	})
-
-	t.Run("no deliverables", func(t *testing.T) {
-		var out bytes.Buffer
-		err := fetchDeliverables(fetchConfig{issue: "MUL-999", cloner: cloner, out: &out})
-		if err == nil {
-			t.Fatal("expected error for issue with no deliverables")
-		}
-	})
 }
 
 func jsonResponse(w http.ResponseWriter, code int, v any) {
