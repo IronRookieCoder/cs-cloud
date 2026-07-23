@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,12 +15,42 @@ const gitTimeout = 5 * time.Minute
 
 // WorkspaceManager manages workspace directories and repo caches.
 type WorkspaceManager struct {
-	root string
+	root  string
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
 }
 
 // NewWorkspaceManager creates a new WorkspaceManager rooted at root.
 func NewWorkspaceManager(root string) *WorkspaceManager {
-	return &WorkspaceManager{root: root}
+	return &WorkspaceManager{root: root, locks: make(map[string]*sync.Mutex)}
+}
+
+// validateID rejects IDs that could escape wm.root via path traversal. IDs must
+// be a single safe path component: no separators, no "."/"..".
+func validateID(id string) error {
+	if id == "" || id == "." || id == ".." {
+		return fmt.Errorf("invalid id %q", id)
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("invalid id %q", id)
+	}
+	if strings.Contains(filepath.Clean(id), string(filepath.Separator)) {
+		return fmt.Errorf("invalid id %q", id)
+	}
+	return nil
+}
+
+// lockFor returns a per-path mutex used to serialize repo-cache provisioning so
+// concurrent tasks for the same repo do not race through RemoveAll + clone.
+func (wm *WorkspaceManager) lockFor(path string) *sync.Mutex {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	lock, ok := wm.locks[path]
+	if !ok {
+		lock = &sync.Mutex{}
+		wm.locks[path] = lock
+	}
+	return lock
 }
 
 // EnsureRoot creates the root directory if it does not exist.
@@ -48,6 +79,9 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 	if repoURL == "" {
 		return "", nil
 	}
+	if err := validateID(workspaceID); err != nil {
+		return "", err
+	}
 	cacheDir := wm.RepoCacheDir(workspaceID)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", err
@@ -55,6 +89,12 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 
 	name := repoName(repoURL)
 	cache := filepath.Join(cacheDir, name)
+
+	// Serialize provisioning per cache path: concurrent tasks for one repo can
+	// both observe a missing HEAD, then race through RemoveAll and git clone.
+	cacheLock := wm.lockFor(cache)
+	cacheLock.Lock()
+	defer cacheLock.Unlock()
 
 	head := filepath.Join(cache, "HEAD")
 	if _, err := os.Stat(head); err != nil {
@@ -78,6 +118,12 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 // for the task at the given ref. If repoURL is empty, it simply creates the
 // task directory without a git worktree.
 func (wm *WorkspaceManager) CreateWorktree(workspaceID, taskID, repoURL, ref string) (string, error) {
+	if err := validateID(workspaceID); err != nil {
+		return "", err
+	}
+	if err := validateID(taskID); err != nil {
+		return "", err
+	}
 	dir := wm.TaskWorktreeDir(workspaceID, taskID)
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return "", err

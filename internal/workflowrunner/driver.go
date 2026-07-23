@@ -147,10 +147,16 @@ func (d *Driver) cleanupOnError() {
 // Stop halts the runtime loop and clears the running state.
 func (d *Driver) Stop() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.runtime != nil {
-		_ = d.runtime.Stop()
+	rt := d.runtime
+	d.mu.Unlock()
+	// Stop the runtime loop WITHOUT holding d.mu: the maintain goroutine
+	// acquires d.mu, so waiting for it (wg.Wait) under the lock deadlocks.
+	if rt != nil {
+		_ = rt.Stop()
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	// Tell multica these runtimes went away so the runtime page doesn't
 	// wait for the sweeper to mark them offline. Best-effort: a

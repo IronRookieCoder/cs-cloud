@@ -76,6 +76,13 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task_id")
 		return
 	}
+	// Route is POST /workflow/tasks/{id}/run: reject when the path id is present
+	// but does not match the body, so /tasks/A/run with body task_id=B cannot
+	// silently run B.
+	if pathID := r.PathValue("id"); pathID != "" && pathID != payload.TaskID {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "path task id does not match body task_id")
+		return
+	}
 
 	// A disabled/not-running driver is a 503, not a 409: the caller should
 	// see "this device cannot run workflow tasks", not a task conflict.

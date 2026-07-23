@@ -6,7 +6,7 @@
 
 **Goal:** 在 cs-cloud 中以代码隔离的方式新增 workflow 子系统，使其能够接收 CoStrict 云端通过 Gateway 下发的任务、维护 multica 工作区模型、调度本地 Agent CLI、直接回写任务状态到 multica 后端，并提供 `cs-cloud workflow *` CLI 子命令。
 
-**Architecture:** 新增 `internal/workflow` 共享层与 `internal/agent/workflow` driver，扩展 `internal/runtime` 支持常驻型 persistent driver，在 `internal/localserver` 新增 `/api/v1/workflow/*` 路由作为 Gateway 入口，在 `internal/cli` 新增 workflow 子命令树。所有 workflow 状态写入 `~/.costrict/cs-cloud/workflow/`，不污染 cs-cloud 核心代码。
+**Architecture:** 新增 `internal/workflow` 共享层与 `internal/workflowrunner` driver，扩展 `internal/runtime` 支持常驻型 persistent driver，在 `internal/localserver` 新增 `/api/v1/workflow/*` 路由作为 Gateway 入口，在 `internal/cli` 新增 workflow 子命令树。所有 workflow 状态写入 `~/.costrict/cs-cloud/workflow/`，不污染 cs-cloud 核心代码。
 
 **Tech Stack:** Go 1.25+, 标准库 net/http, cs-cloud 现有 config/model/logger/platform/runtime/agent 模块。
 
@@ -22,12 +22,12 @@
 | `internal/workflow/models.go` | workspace、issue、project、task、daemon 等 DTO |
 | `internal/workflow/cache.go` | 本地 JSON 缓存读写（当前仅 workspaces） |
 | `internal/workflow/protocol.go` | multica 后端 API 路径常量 |
-| `internal/agent/workflow/driver.go` | workflow driver 实现：任务并发、注册、启停、abort tombstone |
-| `internal/agent/workflow/types.go` | Config 别名与 driverState |
-| `internal/agent/workflow/runtime.go` | driver 生命周期与后台 goroutine（sync / GC stub / heartbeat / maintain） |
-| `internal/agent/workflow/client.go` | multica 后端 REST 客户端（无自动刷新、无 usage/session、无 claim） |
-| `internal/agent/workflow/workspace.go` | 工作区/仓库缓存/worktree 创建（含 `.cs-workflow-ref` 标记） |
-| `internal/agent/workflow/task.go` | 任务执行器（单次输出上报，无实时流，无 COSTRICT_TOKEN 注入） |
+| `internal/workflowrunner/driver.go` | workflow driver 实现：任务并发、注册、启停、abort tombstone |
+| `internal/workflowrunner/types.go` | Config 别名与 driverState |
+| `internal/workflowrunner/runtime.go` | driver 生命周期与后台 goroutine（sync / GC stub / heartbeat / maintain） |
+| `internal/workflowrunner/client.go` | multica 后端 REST 客户端（无自动刷新、无 usage/session、无 claim） |
+| `internal/workflowrunner/workspace.go` | 工作区/仓库缓存/worktree 创建（含 `.cs-workflow-ref` 标记） |
+| `internal/workflowrunner/task.go` | 任务执行器（单次输出上报，无实时流，无 COSTRICT_TOKEN 注入） |
 | `internal/localserver/workflow_handler.go` | `/api/v1/workflow/*` 路由 handler（health / run / abort） |
 | `internal/cli/workflow.go` | `cs-cloud workflow` 子命令入口（issue/project/task stub） |
 | `internal/cli/workflow_workspace.go` | `cs-cloud workflow workspace list/sync` |
@@ -1296,7 +1296,7 @@ Expected: `{"ok":true,"data":{"status":"accepted"}}`；agent 在后台运行，�
 
 Run:
 ```bash
-go test ./internal/workflow/... ./internal/agent/workflow/... ./internal/localserver/... ./internal/cli/... ./internal/config/... ./internal/runtime/...
+go test ./internal/workflow/... ./internal/workflowrunner/... ./internal/localserver/... ./internal/cli/... ./internal/config/... ./internal/runtime/...
 ```
 Expected: all PASS
 

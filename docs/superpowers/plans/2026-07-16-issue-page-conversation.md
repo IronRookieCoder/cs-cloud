@@ -54,7 +54,7 @@ ALTER TABLE multica_project DROP COLUMN IF EXISTS local_directory;
 
 Run:
 ```bash
-cd /Users/linkai/code/multica/server
+cd <multica-repo>/server
 go run ./cmd/migrate up
 ```
 Expected: migrations applied successfully.
@@ -122,7 +122,7 @@ ORDER BY last_seen_at DESC;
 
 Run:
 ```bash
-cd /Users/linkai/code/multica/server
+cd <multica-repo>/server
 sqlc generate
 ```
 Expected: `pkg/db/generated/` updates成功，无报错。
@@ -613,7 +613,7 @@ Add import for `strings`.
 
 Run:
 ```bash
-cd /Users/linkai/code/multica/server
+cd <multica-repo>/server
 go test ./internal/handler -run TestGetIssueConversationSession -v
 ```
 Expected: both tests PASS.
@@ -633,7 +633,7 @@ git commit -m "test(handler): issue conversation session creation and reuse"
 
 Run:
 ```bash
-cd /Users/linkai/code/multica/server
+cd <multica-repo>/server
 go test ./internal/handler/... -count=1
 ```
 Expected: all tests PASS (or only pre-existing failures unrelated to this change).

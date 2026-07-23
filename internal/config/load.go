@@ -39,22 +39,22 @@ func Load() (*Config, error) {
 		cfg.Workflow.CacheDir = v
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_SYNC_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
+		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.SyncInterval = d
 		}
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
+		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.GCInterval = d
 		}
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
+		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.HeartbeatInterval = d
 		}
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
+		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.AgentTimeout = d
 		}
 	}
@@ -177,6 +177,18 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parsePositiveDuration parses a non-empty duration string and returns the
+// value only when it is strictly positive. Zero/negative durations are invalid
+// for loop intervals (a non-positive heartbeat/sync/gc interval makes the
+// runtime loop return immediately), so they are ignored like parse errors.
+func parsePositiveDuration(v string) (time.Duration, bool) {
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {

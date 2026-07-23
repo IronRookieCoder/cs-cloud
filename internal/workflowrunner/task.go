@@ -68,10 +68,22 @@ func (tr *TaskRunner) SetSessionRunner(r SessionRunner) {
 	tr.sessionRunner = r
 }
 
+// withAgentTimeout derives a child context bounded by the configured
+// agentTimeout when it is positive, so a hung CLI or CSC session cannot block
+// a task indefinitely. A zero agentTimeout leaves the caller context as-is.
+func (tr *TaskRunner) withAgentTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if tr.agentTimeout > 0 {
+		return context.WithTimeout(ctx, tr.agentTimeout)
+	}
+	return ctx, func() {}
+}
+
 // RunCSCSession runs the task prompt in the bound local csc session. It falls
 // back to the one-shot CLI if no session runner is configured.
 func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
 	if tr.sessionRunner != nil {
+		ctx, cancel := tr.withAgentTimeout(ctx)
+		defer cancel()
 		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree))
 	}
 
@@ -124,6 +136,8 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 // RunPrepared runs the agent in the already-prepared worktree. It returns the
 // combined stdout/stderr and any execution error.
 func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunPayload, worktree, agentPath string) ([]byte, error) {
+	ctx, cancel := tr.withAgentTimeout(ctx)
+	defer cancel()
 	args := tr.buildArgs(payload)
 
 	cmd := exec.CommandContext(ctx, agentPath, args...)

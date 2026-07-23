@@ -245,7 +245,7 @@ updater.check_latest（Gitee Release API，含失败重试）
 
 当前 cs-cloud 的常驻子系统由 `internal/localserver/server.go` 直接持有并在 `Start` / `Shutdown` 中显式启停（与 `filewatcher`、`gitwatcher` 等保持一致）。新增一个常驻子系统：
 
-1. 在 `internal/localserver/server.go` 的 `Server` 结构体中新增字段（如 `workflow *workflowagent.Driver`）。
+1. 在 `internal/localserver/server.go` 的 `Server` 结构体中新增字段（如 `workflow *workflowrunner.Driver`）。
 2. 提供 `WithXxx(...)` Option，在 `localserver.New(...)` 调用处注入（如 `internal/cli/serve.go`、`internal/cli/daemon.go`）。
 3. 在 `Server.Start()` 中显式调用其 `Start()` 方法；若为业务关键组件，启动失败应直接返回 error 阻断 daemon 启动。
 4. 在 `Server.Shutdown()` 中显式调用其 `Stop()` 方法。
