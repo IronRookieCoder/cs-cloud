@@ -26,7 +26,7 @@ const (
 	EnvMulticaTaskID      = "MULTICA_TASK_ID"
 	EnvMulticaPrompt      = "MULTICA_PROMPT"
 	EnvCSCloudWorktree    = "CS_CLOUD_WORKTREE"
-	// For in-task CLIs (cs-cloud gitea submit/fetch) that call multica.
+	// For in-task CLIs (cs-cloud gitea submit) that call multica.
 	EnvMulticaServerURL = "MULTICA_SERVER_URL"
 	EnvMulticaToken     = "MULTICA_TOKEN"
 )
@@ -39,7 +39,7 @@ type TaskRunner struct {
 	allowedAgents    []string
 	sessionRunner    SessionRunner
 	// multicaBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
-	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit/fetch`)
+	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
 	// can call multica's daemon-auth API. Set via SetMulticaEndpoint.
 	multicaBaseURL string
 	tokenProvider  func() (*provider.Credentials, error)
@@ -192,7 +192,7 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	env = setEnv(env, EnvMulticaPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
 	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
-	// submit/fetch) can authenticate to multica's daemon API. These are the
+	// submit) can authenticate to multica's daemon API. These are the
 	// daemon's own endpoint + credentials — cs-cloud owns this auth, not multica.
 	if tr.multicaBaseURL != "" {
 		env = setEnv(env, EnvMulticaServerURL, tr.multicaBaseURL)
