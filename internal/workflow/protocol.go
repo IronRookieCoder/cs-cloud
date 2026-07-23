@@ -14,13 +14,10 @@ const (
 	MulticaTaskSessionEndpoint  = "/api/daemon/tasks/%s/session"
 	MulticaNodeRunSessionEndpoint = "/api/daemon/node-runs/%s/session"
 
-	MulticaWorkspacesEndpoint  = "/api/workspaces"
-	MulticaIssuesEndpoint      = "/api/workspaces/%s/issues"
-	MulticaIssueEndpoint       = "/api/workspaces/%s/issues/%s"
-	MulticaIssueCommentsEndpoint = "/api/workspaces/%s/issues/%s/comments"
-	MulticaProjectsEndpoint    = "/api/workspaces/%s/projects"
-
-	MulticaAttachmentEndpoint  = "/api/attachments/%s"
+	MulticaWorkspacesEndpoint = "/api/workspaces"
+	MulticaIssuesEndpoint     = "/api/workspaces/%s/issues"
+	MulticaIssueEndpoint      = "/api/workspaces/%s/issues/%s"
+	MulticaProjectsEndpoint   = "/api/workspaces/%s/projects"
 
 	HeaderClientPlatform = "X-Client-Platform"
 	HeaderClientVersion  = "X-Client-Version"
