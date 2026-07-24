@@ -75,6 +75,10 @@ type TaskRunPayload struct {
 	Agent       string            `json:"agent"`
 	Prompt      string            `json:"prompt"`
 	Env         map[string]string `json:"env,omitempty"`
+	// RepoURL is the workspace/project code repository the agent should clone
+	// into its worktree and develop in. Empty for tasks without a code repo
+	// (the worktree is then a scratch dir, as before).
+	RepoURL string `json:"repo_url,omitempty"`
 	// Kind is the multica task kind (direct|comment|chat|quick_create|
 	// autopilot). Optional; consumers may ignore it.
 	Kind string `json:"kind,omitempty"`
@@ -154,20 +158,4 @@ type DaemonRegisterResponse struct {
 	Repos        []any                   `json:"repos,omitempty"`
 	ReposVersion string                  `json:"repos_version,omitempty"`
 	Settings     map[string]any          `json:"settings,omitempty"`
-}
-
-type Comment struct {
-	ID         string    `json:"id"`
-	Content    string    `json:"content"`
-	AuthorName string    `json:"author_name,omitempty"`
-	AuthorType string    `json:"author_type,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
-type Attachment struct {
-	ID          string `json:"id"`
-	Filename    string `json:"filename"`
-	DownloadURL string `json:"download_url"`
-	ContentType string `json:"content_type,omitempty"`
-	Size        int64  `json:"size,omitempty"`
 }

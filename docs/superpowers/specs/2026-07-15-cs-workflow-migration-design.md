@@ -2,7 +2,7 @@
 
 > 日期：2026-07-15  
 > 状态：待实现评审  
-> 关联评估：`/Users/linkai/code/multica/CS-CLOUD_迁移评估.xlsx`
+> 关联评估：`<multica-repo>/CS-CLOUD_迁移评估.xlsx`
 
 ---
 
@@ -11,7 +11,7 @@
 ### 1.1 背景
 
 - `cs-cloud` 是 CoStrict 生态下的本地设备代理守护进程，通过 WebSocket + yamux 隧道接入 CoStrict Gateway，本地暴露 REST Control Plane 供云端反向调用。
-- `cs-workflow`（位于 `/Users/linkai/code/multica/server/cmd/cs-workflow`）是 multica 原生的本地客户端/守护进程，直连 multica 后端，主动轮询任务并调度本地 AI Agent CLI 执行。
+- `cs-workflow`（位于 `<multica-repo>/server/cmd/cs-workflow`）是 multica 原生的本地客户端/守护进程，直连 multica 后端，主动轮询任务并调度本地 AI Agent CLI 执行。
 - 根据迁移评估，两者同属本地客户端/桥接程序，但归属不同生态，业务模型与通信架构差异较大。
 
 ### 1.2 目标
@@ -32,7 +32,7 @@
 | # | 问题 | 选择 |
 |---|------|------|
 | 1 | 移植方式 | **C**：把 cs-workflow 核心能力迁移进 cs-cloud，作为新子系统并保留 multica 后端兼容性 |
-| 2 | 与 cs-cloud 集成方式 | **A**：新增一个 Agent Driver 类型（`internal/agent/workflow`），由 runtime manager 调度 |
+| 2 | 与 cs-cloud 集成方式 | **A**：新增一个 Agent Driver 类型（`internal/workflowrunner`），由 runtime manager 调度 |
 | 3 | 认证方式 | **B**：CoStrict token 透传，workflow driver 复用 `~/.costrict/share/auth.json` 中的 token 调用 multica 后端 |
 | 4 | Gateway 适配 | **B**：在 cs-cloud `internal/localserver` 新增 `/api/v1/workflow/*` 路由，云端通过 Gateway 隧道调用 |
 | 5 | 任务调度 | **B**：改为云端推送，multica 后端同步任务给 CoStrict 云端，再由云端通过 Gateway 调用 cs-cloud 触发执行；driver 不再主动轮询 |
@@ -73,7 +73,7 @@
 │  └──────────────────────────┬───────────────────────────────────┘  │
 │                             │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐  │
-│  │              internal/agent/workflow (driver)                 │  │
+│  │              internal/workflowrunner (driver)                 │  │
 │  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐     │  │
 │  │  │   Gateway   │ │  Workspace  │ │   Multica Client    │     │  │
 │  │  │   Handler   │ │  Manager    │ │   (REST + WS wakeup)│     │  │
@@ -92,11 +92,11 @@
 
 | 模块 | 路径 | 职责 | 依赖 |
 |------|------|------|------|
-| **workflow driver** | `internal/agent/workflow` | 任务接收、工作区管理、Agent 执行、状态上报 | `internal/runtime`, `internal/config`, `internal/model`, `internal/logger` |
-| **workflow API handlers** | `internal/localserver/workflow_handler.go` | 暴露 `/api/v1/workflow/*` 路由，把 Gateway 请求转给 driver | `internal/agent/workflow`, `internal/localserver` |
-| **workflow CLI** | `internal/cli/workflow.go`, `internal/cli/workflow_workspace.go` | `cs-cloud workflow *` 子命令 | `internal/agent/workflow`, `internal/cli` |
+| **workflow driver** | `internal/workflowrunner` | 任务接收、工作区管理、Agent 执行、状态上报 | `internal/runtime`, `internal/config`, `internal/model`, `internal/logger` |
+| **workflow API handlers** | `internal/localserver/workflow_handler.go` | 暴露 `/api/v1/workflow/*` 路由，把 Gateway 请求转给 driver | `internal/workflowrunner`, `internal/localserver` |
+| **workflow CLI** | `internal/cli/workflow.go`, `internal/cli/workflow_workspace.go` | `cs-cloud workflow *` 子命令 | `internal/workflowrunner`, `internal/cli` |
 | **workflow 共享层** | `internal/workflow/` | 类型定义、配置、本地缓存、multica 协议常量 | `internal/model`, `internal/config` |
-| **runtime manager 扩展** | `internal/runtime/manager.go` | 支持常驻型 driver 的启动/停止/健康检查 | `internal/agent/workflow` |
+| **runtime manager 扩展** | `internal/runtime/manager.go` | 支持常驻型 driver 的启动/停止/健康检查 | `internal/workflowrunner` |
 
 ### 3.3 关键设计原则
 
@@ -109,10 +109,10 @@
 
 ## 4. 新增/修改的组件
 
-### 4.1 `internal/agent/workflow` — workflow driver 实现
+### 4.1 `internal/workflowrunner` — workflow driver 实现
 
 #### `driver.go`
-- 实现 `internal/agent/workflow/driver.go` 中的 `Driver` 类型，由 `internal/localserver/server.go` 直接持有并管理生命周期。
+- 实现 `internal/workflowrunner/driver.go` 中的 `Driver` 类型，由 `internal/localserver/server.go` 直接持有并管理生命周期。
 - 声明 driver 名称为 `"workflow"`。
 - 关键方法：
   - `Start(ctx, opts) error`：启动 workflow runtime，初始化 workspace manager、multica client、runtime loop、任务并发信号量，并异步向 multica 注册 cs-cloud runtime。
@@ -182,7 +182,7 @@ cs-cloud workflow
 其余命令（`issue`、`project`、`autopilot`、`repo`、`task`）已在 `internal/cli/workflow.go` 中预留入口，但实现为 stub，返回“not implemented yet”。
 
 实现：
-- 直接调用 multica 后端 API（复用 `internal/agent/workflow/client.go`）。
+- 直接调用 multica 后端 API（复用 `internal/workflowrunner/client.go`）。
 - 读取 `~/.costrict/share/auth.json` 获取 token。
 - 输出格式为简单文本（未对齐原 cs-workflow 的 table/json 输出）。
 
@@ -440,9 +440,9 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 | 测试文件 | 覆盖内容 |
 |----------|----------|
-| `internal/agent/workflow/*_test.go` | driver 启动/停止、任务解析、状态机转换 |
-| `internal/agent/workflow/client_test.go` | multica 客户端请求构造、token 注入、错误分类 |
-| `internal/agent/workflow/workspace_test.go` | repo cache 命中/未命中、worktree 命名、GC 策略 |
+| `internal/workflowrunner/*_test.go` | driver 启动/停止、任务解析、状态机转换 |
+| `internal/workflowrunner/client_test.go` | multica 客户端请求构造、token 注入、错误分类 |
+| `internal/workflowrunner/workspace_test.go` | repo cache 命中/未命中、worktree 命名、GC 策略 |
 | `internal/localserver/handlers/workflow_test.go` | 路由参数校验、driver 未启动时返回 503、success/fail envelope |
 | `internal/cli/workflow_test.go` | 命令行参数解析、输出格式（table/json） |
 | `internal/workflow/cache_test.go` | 缓存读写、过期、并发安全 |
@@ -451,9 +451,9 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 | 测试文件 | 覆盖内容 |
 |----------|----------|
-| `internal/agent/workflow/runtime_integration_test.go` | 使用 fake multica server（httptest）验证：注册、心跳、任务触发、状态上报 |
+| `internal/workflowrunner/runtime_integration_test.go` | 使用 fake multica server（httptest）验证：注册、心跳、任务触发、状态上报 |
 | `internal/localserver/workflow_http_test.go` | 启动完整 localserver + fake driver，验证 Gateway 调用链路 |
-| `internal/agent/workflow/exec_integration_test.go` | 用 dummy agent CLI 验证任务执行、stdout 收集、abort 信号 |
+| `internal/workflowrunner/exec_integration_test.go` | 用 dummy agent CLI 验证任务执行、stdout 收集、abort 信号 |
 
 ### 7.3 端到端/手动验证
 
@@ -474,7 +474,7 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 ### 7.5 CI 覆盖
 
-- 新增 `go test ./internal/agent/workflow/... ./internal/cli/... ./internal/localserver/...` 到 CI。
+- 新增 `go test ./internal/workflowrunner/... ./internal/cli/... ./internal/localserver/...` 到 CI。
 - 跨平台测试：Linux/macOS/Windows 至少各跑一次单元测试。
 
 ---
@@ -538,7 +538,7 @@ CLI `cs-cloud workflow workspace list` 优先读缓存
 
 ### 9.3 待实现/待确认
 
-1. 实现 `internal/agent/workflow/client.go` 的 `PostTaskUsage` / `PostTaskSession`。
+1. 实现 `internal/workflowrunner/client.go` 的 `PostTaskUsage` / `PostTaskSession`。
 2. 任务执行时向 agent env 注入 `COSTRICT_TOKEN`（若 `csc` 执行期间需要调 multica API）。
 3. 补齐 abort 的 SIGTERM → 5s → SIGKILL 优雅期。
 4. 实现 workspace GC 策略与 `/workflow/gc` 路由/CLI。

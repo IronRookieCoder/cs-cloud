@@ -15,13 +15,13 @@ func TestDefaultWorkflowConfig(t *testing.T) {
 	if !filepath.IsAbs(cfg.WorkspacesRoot) {
 		t.Fatalf("WorkspacesRoot is not absolute: %q", cfg.WorkspacesRoot)
 	}
-	if !strings.HasSuffix(cfg.WorkspacesRoot, "workflow/workspaces") {
+	if !strings.HasSuffix(filepath.ToSlash(cfg.WorkspacesRoot), "workflow/workspaces") {
 		t.Fatalf("WorkspacesRoot suffix wrong: %q", cfg.WorkspacesRoot)
 	}
 	if !filepath.IsAbs(cfg.CacheDir) {
 		t.Fatalf("CacheDir is not absolute: %q", cfg.CacheDir)
 	}
-	if !strings.HasSuffix(cfg.CacheDir, "workflow/cache") {
+	if !strings.HasSuffix(filepath.ToSlash(cfg.CacheDir), "workflow/cache") {
 		t.Fatalf("CacheDir suffix wrong: %q", cfg.CacheDir)
 	}
 	if cfg.SyncInterval != 5*time.Minute {
@@ -29,6 +29,9 @@ func TestDefaultWorkflowConfig(t *testing.T) {
 	}
 	if cfg.GCInterval != 24*time.Hour {
 		t.Fatalf("GCInterval = %v", cfg.GCInterval)
+	}
+	if cfg.HeartbeatInterval != 15*time.Second {
+		t.Fatalf("HeartbeatInterval = %v", cfg.HeartbeatInterval)
 	}
 	if cfg.AgentTimeout != 30*time.Minute {
 		t.Fatalf("AgentTimeout = %v", cfg.AgentTimeout)

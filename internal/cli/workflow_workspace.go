@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"cs-cloud/internal/app"
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner"
 )
 
 func workflowWorkspaceCmd(a *app.App, args []string) error {
@@ -43,7 +43,7 @@ func workflowWorkspaceSync(a *app.App) error {
 	if err != nil {
 		return err
 	}
-	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Workflow.AgentTimeout)

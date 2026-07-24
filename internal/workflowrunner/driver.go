@@ -1,4 +1,4 @@
-package workflow
+package workflowrunner
 
 import (
 	"context"
@@ -147,10 +147,16 @@ func (d *Driver) cleanupOnError() {
 // Stop halts the runtime loop and clears the running state.
 func (d *Driver) Stop() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.runtime != nil {
-		_ = d.runtime.Stop()
+	rt := d.runtime
+	d.mu.Unlock()
+	// Stop the runtime loop WITHOUT holding d.mu: the maintain goroutine
+	// acquires d.mu, so waiting for it (wg.Wait) under the lock deadlocks.
+	if rt != nil {
+		_ = rt.Stop()
 	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	// Tell multica these runtimes went away so the runtime page doesn't
 	// wait for the sweeper to mark them offline. Best-effort: a
@@ -329,6 +335,22 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 			_ = d.client.FailTask(ctx, payload.TaskID, runErr.Error(), "")
 		}
 		return runErr
+	}
+
+	// Code-repo task: commit the agent's changes, push a source branch, open a
+	// GitLab MR, and fold the MR URL into the output. multica's worker-output
+	// parser files the URL as the node's pull_request deliverable. Best-effort:
+	// an MR failure is surfaced in the output, not by failing the task.
+	if strings.TrimSpace(payload.RepoURL) != "" {
+		token := ""
+		if payload.Env != nil {
+			token = payload.Env["MULTICA_GITLAB_TOKEN"]
+		}
+		if mrURL, err := OpenCodeMR(ctx, worktree, payload.RepoURL, token, payload.TaskID); err == nil && mrURL != "" {
+			output = strings.TrimSpace(output) + "\n\nMerge request: " + mrURL + "\n"
+		} else if err != nil {
+			output = strings.TrimSpace(output) + "\n\n[open merge request failed: " + err.Error() + "]\n"
+		}
 	}
 
 	return d.client.CompleteTask(ctx, payload.TaskID, output)

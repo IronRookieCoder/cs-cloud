@@ -31,7 +31,22 @@ func (c *Cache) WriteWorkspaces(wss []Workspace) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.workspacesPath(), b, 0o644)
+	// Write through a temp file + atomic rename so concurrent readers (the
+	// runtime loop and the CLI share this cache) never observe partial JSON.
+	tmp, err := os.CreateTemp(c.dir, ".workspaces-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, c.workspacesPath())
 }
 
 func (c *Cache) ReadWorkspaces() ([]Workspace, error) {

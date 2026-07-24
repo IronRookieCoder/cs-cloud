@@ -1,4 +1,4 @@
-package workflow
+package workflowrunner
 
 import (
 	"context"
@@ -26,7 +26,7 @@ const (
 	EnvMulticaTaskID      = "MULTICA_TASK_ID"
 	EnvMulticaPrompt      = "MULTICA_PROMPT"
 	EnvCSCloudWorktree    = "CS_CLOUD_WORKTREE"
-	// For in-task CLIs (cs-cloud gitea submit/fetch) that call multica.
+	// For in-task CLIs (cs-cloud gitea submit) that call multica.
 	EnvMulticaServerURL = "MULTICA_SERVER_URL"
 	EnvMulticaToken     = "MULTICA_TOKEN"
 )
@@ -39,7 +39,7 @@ type TaskRunner struct {
 	allowedAgents    []string
 	sessionRunner    SessionRunner
 	// multicaBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
-	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit/fetch`)
+	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
 	// can call multica's daemon-auth API. Set via SetMulticaEndpoint.
 	multicaBaseURL string
 	tokenProvider  func() (*provider.Credentials, error)
@@ -68,10 +68,22 @@ func (tr *TaskRunner) SetSessionRunner(r SessionRunner) {
 	tr.sessionRunner = r
 }
 
+// withAgentTimeout derives a child context bounded by the configured
+// agentTimeout when it is positive, so a hung CLI or CSC session cannot block
+// a task indefinitely. A zero agentTimeout leaves the caller context as-is.
+func (tr *TaskRunner) withAgentTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if tr.agentTimeout > 0 {
+		return context.WithTimeout(ctx, tr.agentTimeout)
+	}
+	return ctx, func() {}
+}
+
 // RunCSCSession runs the task prompt in the bound local csc session. It falls
 // back to the one-shot CLI if no session runner is configured.
 func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
 	if tr.sessionRunner != nil {
+		ctx, cancel := tr.withAgentTimeout(ctx)
+		defer cancel()
 		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree))
 	}
 
@@ -97,7 +109,7 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 // worktree. It must be called before RunPrepared so the worktree path is
 // available when binding a conversation session.
 func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
-	repoURL, err := tr.resolveRepoURL(ctx, payload.WorkspaceID, payload.ProjectID)
+	repoURL, err := tr.resolveRepoURL(ctx, payload)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve repo: %w", err)
 	}
@@ -124,6 +136,8 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 // RunPrepared runs the agent in the already-prepared worktree. It returns the
 // combined stdout/stderr and any execution error.
 func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunPayload, worktree, agentPath string) ([]byte, error) {
+	ctx, cancel := tr.withAgentTimeout(ctx)
+	defer cancel()
 	args := tr.buildArgs(payload)
 
 	cmd := exec.CommandContext(ctx, agentPath, args...)
@@ -146,14 +160,13 @@ func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {
 	return []string{payload.Prompt}
 }
 
-func (tr *TaskRunner) resolveRepoURL(ctx context.Context, workspaceID, projectID string) (string, error) {
+// resolveRepoURL returns the code repository the agent should clone into its
+// worktree. It prefers the repo URL multica pushed in the payload (populated
+// from the workspace/project code repos); when absent the task has no code
+// repo and the worktree is a scratch dir.
+func (tr *TaskRunner) resolveRepoURL(ctx context.Context, payload workflow.TaskRunPayload) (string, error) {
 	_ = ctx
-	if projectID == "" || workspaceID == "" {
-		return "", nil
-	}
-	// Project-to-repo resolution is currently a no-op. In a full implementation
-	// this would query the multica backend for the project's repo_url.
-	return "", nil
+	return strings.TrimSpace(payload.RepoURL), nil
 }
 
 func (tr *TaskRunner) validateAgent(agent string) error {
@@ -178,7 +191,7 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	env = setEnv(env, EnvMulticaPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
 	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
-	// submit/fetch) can authenticate to multica's daemon API. These are the
+	// submit) can authenticate to multica's daemon API. These are the
 	// daemon's own endpoint + credentials — cs-cloud owns this auth, not multica.
 	if tr.multicaBaseURL != "" {
 		env = setEnv(env, EnvMulticaServerURL, tr.multicaBaseURL)

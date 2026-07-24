@@ -15,7 +15,7 @@ import (
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/terminal"
 	"cs-cloud/internal/updater"
-	workflowagent "cs-cloud/internal/agent/workflow"
+	"cs-cloud/internal/workflowrunner"
 )
 
 type TunnelStatus struct {
@@ -61,7 +61,7 @@ type Server struct {
 
 	dispatcher *CommandDispatcher
 
-	workflow *workflowagent.Driver
+	workflow *workflowrunner.Driver
 	// workflowErr records why the workflow driver failed to start. Non-nil
 	// means the subsystem is disabled but the daemon keeps serving its core
 	// business (tunnel, agent proxy); workflow endpoints report it as
@@ -230,7 +230,7 @@ func WithRootDir(dir string) Option {
 	return func(s *Server) { s.rootDir = dir }
 }
 
-func WithWorkflow(d *workflowagent.Driver) Option {
+func WithWorkflow(d *workflowrunner.Driver) Option {
 	return func(s *Server) {
 		s.workflow = d
 	}

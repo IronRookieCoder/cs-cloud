@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	workflowagent "cs-cloud/internal/agent/workflow"
 	"cs-cloud/internal/app"
 	"cs-cloud/internal/provider"
+	"cs-cloud/internal/workflowrunner"
 )
 
 func workflowCmd(a *app.App, args []string) error {
@@ -20,12 +20,8 @@ func workflowCmd(a *app.App, args []string) error {
 	switch args[0] {
 	case "workspace":
 		return workflowWorkspaceCmd(a, args[1:])
-	case "issue":
-		return workflowIssueCmd(a, args[1:])
 	case "project":
 		return workflowProjectCmd(a, args[1:])
-	case "deliverable":
-		return deliverableCmd(a, args[1:])
 	case "help", "-h", "--help":
 		printWorkflowUsage()
 		return nil
@@ -42,9 +38,7 @@ func printWorkflowUsage() {
 	printSection("Resources")
 	cmds := [][2]string{
 		{"workspace", "List/get/sync workspaces"},
-		{"issue", "List/create/update issues"},
 		{"project", "List projects"},
-		{"deliverable", "Submit/fetch document deliverables"},
 	}
 	fmt.Print(renderKV(cmds))
 }
@@ -71,7 +65,7 @@ func workflowProjectList(a *app.App) error {
 	if wsID == "" {
 		return fmt.Errorf("MULTICA_WORKSPACE_ID not set")
 	}
-	client := workflowagent.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
