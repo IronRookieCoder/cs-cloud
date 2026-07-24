@@ -22,6 +22,8 @@ func workflowCmd(a *app.App, args []string) error {
 		return workflowWorkspaceCmd(a, args[1:])
 	case "project":
 		return workflowProjectCmd(a, args[1:])
+	case "deliverable":
+		return deliverableCmd(a, args[1:])
 	case "help", "-h", "--help":
 		printWorkflowUsage()
 		return nil
@@ -39,6 +41,7 @@ func printWorkflowUsage() {
 	cmds := [][2]string{
 		{"workspace", "List/get/sync workspaces"},
 		{"project", "List projects"},
+		{"deliverable", "Submit document deliverables to Gitea"},
 	}
 	fmt.Print(renderKV(cmds))
 }
