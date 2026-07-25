@@ -467,11 +467,12 @@ func TestMaybeSweepAttachmentsDebouncesSecondCallWithinWindow(t *testing.T) {
 	// Simulate a call inside the debounce window by rewinding the stamp
 	// slightly so we don't depend on real-time tick granularity.
 	s.gcSweepMu.Lock()
-	s.lastGcSweep = time.Now().Add(-attachmentSweepDeb / 2)
+	expectedStamp := time.Now().Add(-attachmentSweepDeb / 2)
+	s.lastGcSweep = expectedStamp
 	s.gcSweepMu.Unlock()
 
 	s.maybeSweepAttachments(dir)
-	if !s.lastGcSweep.Equal(time.Now().Add(-attachmentSweepDeb / 2)) {
+	if !s.lastGcSweep.Equal(expectedStamp) {
 		t.Errorf("lastGcSweep changed inside debounce window; debounce failed")
 	}
 }
@@ -487,11 +488,11 @@ func TestMaybeSweepAttachmentsRunsAfterWindowExpires(t *testing.T) {
 	}
 
 	s.gcSweepMu.Lock()
-	s.lastGcSweep = time.Now().Add(-attachmentSweepDeb - time.Second)
+	oldStamp := time.Now().Add(-attachmentSweepDeb - time.Second)
+	s.lastGcSweep = oldStamp
 	s.gcSweepMu.Unlock()
 
 	s.maybeSweepAttachments(dir)
-	oldStamp := time.Now().Add(-attachmentSweepDeb - time.Second)
 	if !s.lastGcSweep.After(oldStamp) {
 		t.Errorf("lastGcSweep not updated after debounce window expired")
 	}
