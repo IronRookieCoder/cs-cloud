@@ -55,46 +55,64 @@ Usage:
 
 // runGiteaSubmit parses flags and runs the submit flow.
 func runGiteaSubmit(args []string) error {
-	deliverableID, filePath, err := parseSubmitArgs(args)
+	deliverableID, filePath, mrMode, repoURL, err := parseSubmitArgs(args)
 	if err != nil {
 		return err
 	}
 	return submitDeliverable(submitConfig{
 		deliverableID: deliverableID,
 		filePath:      filePath,
+		mrMode:        mrMode,
+		repoURL:       repoURL,
 		gitOps:        &execGitOps{},
 	})
 }
 
-// parseSubmitArgs parses `--deliverable <id> --file <path>` from the flat arg
+// parseSubmitArgs parses `--deliverable <id> --file <path> [--mr --repo <url>]` from the flat arg
 // slice (cs-cloud's dispatcher has no flag library, so we parse by hand).
-func parseSubmitArgs(args []string) (deliverable, file string, err error) {
+func parseSubmitArgs(args []string) (deliverable, file string, mrMode bool, repoURL string, err error) {
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "--deliverable":
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--deliverable needs a value")
+				return "", "", false, "", fmt.Errorf("--deliverable needs a value")
 			}
 			deliverable = args[i+1]
 			i += 2
 		case "--file":
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--file needs a value")
+				return "", "", false, "", fmt.Errorf("--file needs a value")
 			}
 			file = args[i+1]
 			i += 2
+		case "--mr":
+			mrMode = true
+			i++
+		case "--repo":
+			if i+1 >= len(args) {
+				return "", "", false, "", fmt.Errorf("--repo needs a value")
+			}
+			repoURL = args[i+1]
+			i += 2
 		default:
-			return "", "", fmt.Errorf("unknown argument: %s", args[i])
+			return "", "", false, "", fmt.Errorf("unknown argument: %s", args[i])
 		}
 	}
 	if deliverable == "" {
-		return "", "", fmt.Errorf("--deliverable is required")
+		return "", "", false, "", fmt.Errorf("--deliverable is required")
 	}
-	if file == "" {
-		return "", "", fmt.Errorf("--file is required")
+	if mrMode {
+		// --mr mode does not require --file (agent already edited in worktree).
+		if repoURL == "" {
+			return "", "", false, "", fmt.Errorf("--repo is required with --mr")
+		}
+	} else {
+		if file == "" {
+			return "", "", false, "", fmt.Errorf("--file is required")
+		}
 	}
-	return deliverable, file, nil
+	return deliverable, file, mrMode, repoURL, nil
 }
 
 // submitConfig parameterizes submitDeliverable for testing.
@@ -103,6 +121,8 @@ type submitConfig struct {
 	filePath          string
 	gitOps            gitOps
 	giteaBaseOverride string // test-only: override the Gitea base URL (else from credential)
+	mrMode            bool   // --mr: GitLab code MR mode
+	repoURL           string // GitLab mode: code repository URL (agent worktree already checked out)
 }
 
 // gitOps abstracts the git operations so the submit flow is unit-testable.
@@ -113,6 +133,7 @@ type gitOps interface {
 	WriteFile(dir, path string, content []byte) error
 	Commit(dir, message string) error
 	Push(dir, authURL, branch string) error
+	CurrentBranch(dir string) (string, error)
 }
 
 type giteaContext struct {
@@ -167,9 +188,66 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 	return "", fmt.Errorf("deliverable %q not in MULTICA_GITEA_DELIVERABLES", id)
 }
 
-// submitDeliverable is the testable core. Returns nil only after the PR is
+// submitGitlabMR handles the --mr (GitLab code MR) path: pushes the current
+// worktree branch, opens a GitLab MR, and reports to multica's submit endpoint.
+func submitGitlabMR(cfg submitConfig) error {
+	ctx := context.Background()
+
+	cred, err := readGitlabCredential()
+	if err != nil {
+		return fmt.Errorf("gitlab credential: %w", err)
+	}
+
+	worktree := os.Getenv("CS_CLOUD_WORKTREE")
+	if worktree == "" {
+		return fmt.Errorf("CS_CLOUD_WORKTREE not set")
+	}
+
+	nodeRunID := os.Getenv("MULTICA_NODE_RUN_ID")
+	if nodeRunID == "" {
+		return fmt.Errorf("MULTICA_NODE_RUN_ID not set")
+	}
+
+	// Determine current branch in the worktree.
+	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
+	if err != nil {
+		return fmt.Errorf("current branch: %w", err)
+	}
+
+	// Push current branch to the repo.
+	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
+	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
+	targetBranch := envOr("MULTICA_GITLAB_TARGET_BRANCH", "main")
+	title := "multica deliverable " + cfg.deliverableID
+	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
+	if err != nil {
+		return fmt.Errorf("open MR: %w", err)
+	}
+
+	serverURL := envOr("MULTICA_SERVER_URL", "")
+	if serverURL == "" {
+		return fmt.Errorf("MULTICA_SERVER_URL not set")
+	}
+	token := os.Getenv("MULTICA_TOKEN")
+	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
+	if err := reportToMultica(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
+		return fmt.Errorf("report submit: %w", err)
+	}
+
+	fmt.Println(mrURL)
+	return nil
+}
+
+// submitDeliverable is the testable core. Returns nil only after the PR/MR is
 // registered back to Multica.
 func submitDeliverable(cfg submitConfig) error {
+	if cfg.mrMode {
+		return submitGitlabMR(cfg)
+	}
+
 	ctx := context.Background()
 
 	gctx, err := readGiteaContext()
@@ -292,6 +370,64 @@ func readGiteaCredential() (struct {
 	}{BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITEA_BASE_URL")), Token: token}, nil
 }
 
+// gitlabCredential holds the GitLab PAT and base URL.
+type gitlabCredential struct {
+	BaseURL string
+	Token   string
+}
+
+// readGitlabCredential reads MULTICA_GITLAB_TOKEN and MULTICA_GITLAB_BASE_URL.
+func readGitlabCredential() (*gitlabCredential, error) {
+	token := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_TOKEN"))
+	if token == "" {
+		return nil, fmt.Errorf("MULTICA_GITLAB_TOKEN not set (the task payload must provide the GitLab PAT)")
+	}
+	return &gitlabCredential{
+		BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITLAB_BASE_URL")),
+		Token:   token,
+	}, nil
+}
+
+// openGitlabMR POSTs /api/v4/projects/<urlencoded>/merge_requests and returns web_url.
+func openGitlabMR(ctx context.Context, base, token, repoURL, sourceBranch, targetBranch, title string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(repoURL))
+	if err != nil {
+		return "", fmt.Errorf("parse repo URL %q: %w", repoURL, err)
+	}
+	// Extract project path (e.g. "group/repo" from "/group/repo.git").
+	project := strings.Trim(u.Path, "/")
+	project = strings.TrimSuffix(project, ".git")
+	if project == "" {
+		return "", fmt.Errorf("cannot extract project from repo URL %q", repoURL)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"source_branch": sourceBranch,
+		"target_branch": targetBranch,
+		"title":         title,
+	})
+	endpoint := strings.TrimRight(base, "/") + "/api/v4/projects/" + url.PathEscape(project) + "/merge_requests"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req.Header.Set("PRIVATE-TOKEN", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := giteaHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("create MR request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("gitlab create MR: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var mr struct {
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(respBody, &mr); err != nil {
+		return "", fmt.Errorf("parse MR response: %w", err)
+	}
+	return mr.WebURL, nil
+}
+
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.
 func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch, deliverableID string) (string, error) {
 	body, _ := json.Marshal(map[string]string{
@@ -322,23 +458,28 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 	return pr.HTMLURL, nil
 }
 
-// reportDeliverablePR POSTs the PR URL to the multica daemon report-pr endpoint.
-func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL string) error {
+// reportToMultica POSTs a pull_request_url to the given multica endpoint.
+func reportToMultica(ctx context.Context, serverURL, token, endpoint, prURL string) error {
 	body, _ := json.Marshal(map[string]string{"pull_request_url": prURL})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/report-pr", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := giteaHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("report-pr request: %w", err)
+		return fmt.Errorf("report request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("report-pr: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("report: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// reportDeliverablePR POSTs the PR URL to the multica daemon report-pr endpoint.
+func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL string) error {
+	return reportToMultica(ctx, serverURL, token,
+		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/report-pr", prURL)
 }
 
 // execGitOps implements gitOps via shelled-out git.
@@ -368,6 +509,14 @@ func (execGitOps) Push(dir, authURL, branch string) error {
 	// Force-push: a node branch has a single writer pre-merge; re-submit
 	// replaces WIP and the open PR auto-updates.
 	return runGitInDir(dir, "push", "--force", authURL, branch)
+}
+func (execGitOps) CurrentBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // runGitInDir runs git in the given dir ("" = inherit cwd), streaming stderr

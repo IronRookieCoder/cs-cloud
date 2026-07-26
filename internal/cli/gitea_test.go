@@ -12,15 +12,16 @@ import (
 // fakeGitOps records the sequence of git operations without touching the
 // filesystem or a real git binary.
 type fakeGitOps struct {
-	cloneCalls  []struct{ authURL, branch, dir string }
-	branchCalls []string
-	written     []struct {
+	cloneCalls    []struct{ authURL, branch, dir string }
+	branchCalls   []string
+	written       []struct {
 		dir     string
 		path    string
 		content []byte
 	}
-	commitMsgs []string
-	pushCalls  []string
+	commitMsgs    []string
+	pushCalls     []string
+	currentBranch string // value returned by CurrentBranch
 }
 
 func (f *fakeGitOps) Clone(authURL, branch, dir string) error {
@@ -46,6 +47,9 @@ func (f *fakeGitOps) Commit(dir, message string) error {
 func (f *fakeGitOps) Push(dir, authURL, branch string) error {
 	f.pushCalls = append(f.pushCalls, branch)
 	return nil
+}
+func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
+	return f.currentBranch, nil
 }
 
 // TestSubmitDeliverable_HappyPath wires a fake git + httptest Gitea + httptest
@@ -118,6 +122,76 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSubmitDeliverable_GitLabMR(t *testing.T) {
+	// Fake GitLab: POST /api/v4/projects/<enc>/merge_requests
+	var gitlabReqBody map[string]any
+	gitlabSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/merge_requests") {
+			if got := r.Header.Get("PRIVATE-TOKEN"); got != "gl-pat" {
+				t.Errorf("PRIVATE-TOKEN = %q, want gl-pat", got)
+			}
+			_ = json.NewDecoder(r.Body).Decode(&gitlabReqBody)
+			jsonResponse(w, 201, map[string]any{"web_url": "https://gitlab.test/group/repo/-/merge_requests/42"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer gitlabSrv.Close()
+
+	// Fake multica: POST /api/node-runs/<nr>/deliverables/<did>/submit
+	var submittedURL string
+	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			PullRequestURL string `json:"pull_request_url"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		submittedURL = body.PullRequestURL
+		jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+	}))
+	defer multica.Close()
+
+	t.Setenv("MULTICA_GITLAB_TOKEN", "gl-pat")
+	t.Setenv("MULTICA_GITLAB_BASE_URL", gitlabSrv.URL)
+	t.Setenv("MULTICA_SERVER_URL", multica.URL)
+	t.Setenv("MULTICA_TOKEN", "tok")
+	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_WORKTREE", t.TempDir())
+
+	fake := &fakeGitOps{
+		currentBranch: "feat/code-changes",
+	}
+	err := submitDeliverable(submitConfig{
+		mrMode:        true,
+		deliverableID: "d1",
+		repoURL:       "https://gitlab.test/group/repo.git",
+		gitOps:        fake,
+	})
+	if err != nil {
+		t.Fatalf("submitDeliverable (mr): %v", err)
+	}
+
+	// Assert push was called
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0] != "feat/code-changes" {
+		t.Errorf("expected push of feat/code-changes, got %+v", fake.pushCalls)
+	}
+
+	// Assert GitLab MR request
+	if gitlabReqBody == nil {
+		t.Fatal("GitLab merge_requests endpoint was not called")
+	}
+	if gitlabReqBody["source_branch"] != "feat/code-changes" {
+		t.Errorf("source_branch = %v, want feat/code-changes", gitlabReqBody["source_branch"])
+	}
+	if gitlabReqBody["target_branch"] != "main" {
+		t.Errorf("target_branch = %v, want main", gitlabReqBody["target_branch"])
+	}
+
+	// Assert multica submit received the MR URL
+	if submittedURL != "https://gitlab.test/group/repo/-/merge_requests/42" {
+		t.Errorf("submit received %q, want GitLab MR web_url", submittedURL)
+	}
+}
+
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
 	t.Setenv("MULTICA_NODE_RUN_ID", "")
 	if err := submitDeliverable(submitConfig{deliverableID: "d1", filePath: "x", gitOps: &fakeGitOps{}}); err == nil {
@@ -131,19 +205,23 @@ func TestParseSubmitArgs(t *testing.T) {
 		args        []string
 		wantDeliv   string
 		wantFile    string
+		wantMR      bool
+		wantRepo    string
 		wantErr     bool
 		errContains string
 	}{
-		{"both flags", []string{"--deliverable", "d1", "--file", "/p/f.md"}, "d1", "/p/f.md", false, ""},
-		{"flags reversed", []string{"--file", "/p/f.md", "--deliverable", "d1"}, "d1", "/p/f.md", false, ""},
-		{"missing deliverable", []string{"--file", "/p/f.md"}, "", "", true, "--deliverable"},
-		{"missing file", []string{"--deliverable", "d1"}, "", "", true, "--file"},
-		{"deliverable no value", []string{"--deliverable"}, "", "", true, "--deliverable needs a value"},
-		{"unknown arg", []string{"--deliverable", "d1", "--bogus"}, "", "", true, "unknown argument"},
+		{"both flags", []string{"--deliverable", "d1", "--file", "/p/f.md"}, "d1", "/p/f.md", false, "", false, ""},
+		{"flags reversed", []string{"--file", "/p/f.md", "--deliverable", "d1"}, "d1", "/p/f.md", false, "", false, ""},
+		{"missing deliverable", []string{"--file", "/p/f.md"}, "", "", false, "", true, "--deliverable"},
+		{"missing file", []string{"--deliverable", "d1"}, "", "", false, "", true, "--file"},
+		{"deliverable no value", []string{"--deliverable"}, "", "", false, "", true, "--deliverable needs a value"},
+		{"unknown arg", []string{"--deliverable", "d1", "--bogus"}, "", "", false, "", true, "unknown argument"},
+	{"mr mode", []string{"--deliverable", "d1", "--mr", "--repo", "https://gl.test/g/r.git"}, "d1", "", true, "https://gl.test/g/r.git", false, ""},
+	{"mr without repo", []string{"--deliverable", "d1", "--mr"}, "", "", false, "", true, "--repo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, f, err := parseSubmitArgs(tt.args)
+			d, f, mr, repo, err := parseSubmitArgs(tt.args)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -156,8 +234,8 @@ func TestParseSubmitArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if d != tt.wantDeliv || f != tt.wantFile {
-				t.Errorf("got (%q,%q), want (%q,%q)", d, f, tt.wantDeliv, tt.wantFile)
+			if d != tt.wantDeliv || f != tt.wantFile || mr != tt.wantMR || repo != tt.wantRepo {
+				t.Errorf("got (%q,%q,%v,%q), want (%q,%q,%v,%q)", d, f, mr, repo, tt.wantDeliv, tt.wantFile, tt.wantMR, tt.wantRepo)
 			}
 		})
 	}
