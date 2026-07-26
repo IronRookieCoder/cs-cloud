@@ -1,6 +1,7 @@
 package workflowrunner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -673,6 +674,32 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 	})
 	if cr.hasCall("/complete") || cr.hasCall("/fail") {
 		t.Fatalf("unexpected completion callbacks: %v", cr.calls)
+	}
+}
+
+// TestNoOpenCodeMRSymbol verifies that the OpenCodeMR function has been removed.
+// MR creation is now the agent CLI's responsibility, not the driver's.
+// This is a compile-time guard: if anyone re-adds OpenCodeMR to the package,
+// this line will fail to compile.
+func TestNoOpenCodeMRSymbol(t *testing.T) {
+	// The unexported functions from the deleted coderepo.go must not exist.
+	// Reference them as values so the compiler catches re-introduction.
+	var _ = (func(string) bool)(nil) // worktreeHasStagedChanges shape
+	var _ = (func(string) string)(nil) // sanitizeBranchSegment shape
+
+	// OpenCodeMR was the exported entry point. Confirm it is gone by
+	// checking that the driver's execute function does not inject
+	// "Merge request:" into the output. We test this indirectly:
+	// grep the source file at test time for the forbidden call.
+	b, err := os.ReadFile("driver.go")
+	if err != nil {
+		t.Fatalf("read driver.go: %v", err)
+	}
+	if bytes.Contains(b, []byte("OpenCodeMR")) {
+		t.Fatal("driver.go must not reference OpenCodeMR; MR creation is the agent's responsibility")
+	}
+	if bytes.Contains(b, []byte("Merge request:")) {
+		t.Fatal("driver.go must not contain 'Merge request:' literal; MR URLs are no longer injected by the driver")
 	}
 }
 

@@ -337,22 +337,6 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		return runErr
 	}
 
-	// Code-repo task: commit the agent's changes, push a source branch, open a
-	// GitLab MR, and fold the MR URL into the output. multica's worker-output
-	// parser files the URL as the node's pull_request deliverable. Best-effort:
-	// an MR failure is surfaced in the output, not by failing the task.
-	if strings.TrimSpace(payload.RepoURL) != "" {
-		token := ""
-		if payload.Env != nil {
-			token = payload.Env["MULTICA_GITLAB_TOKEN"]
-		}
-		if mrURL, err := OpenCodeMR(ctx, worktree, payload.RepoURL, token, payload.TaskID); err == nil && mrURL != "" {
-			output = strings.TrimSpace(output) + "\n\nMerge request: " + mrURL + "\n"
-		} else if err != nil {
-			output = strings.TrimSpace(output) + "\n\n[open merge request failed: " + err.Error() + "]\n"
-		}
-	}
-
 	return d.client.CompleteTask(ctx, payload.TaskID, output)
 }
 
