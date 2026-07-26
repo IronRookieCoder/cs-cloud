@@ -65,6 +65,31 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// RepoSpec mirrors multica's csCloudRepoSpec.
+type RepoSpec struct {
+	URL        string `json:"url"`
+	Provider   string `json:"provider"`
+	Role       string `json:"role"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Alias      string `json:"alias,omitempty"`
+	BotToken   string `json:"bot_token,omitempty"`
+}
+
+// DeliverableSpec mirrors multica's csCloudDeliverableSpec.
+type DeliverableSpec struct {
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	RepoAlias string     `json:"repo_alias,omitempty"`
+	Report    ReportSpec `json:"report"`
+}
+
+// ReportSpec mirrors multica's csCloudReportSpec.
+type ReportSpec struct {
+	Endpoint  string `json:"endpoint"`
+	Method    string `json:"method"`
+	BodyField string `json:"body_field"`
+}
+
 type TaskRunPayload struct {
 	TaskID      string            `json:"task_id"`
 	WorkspaceID string            `json:"workspace_id"`
@@ -78,10 +103,11 @@ type TaskRunPayload struct {
 	// RepoURL is the workspace/project code repository the agent should clone
 	// into its worktree and develop in. Empty for tasks without a code repo
 	// (the worktree is then a scratch dir, as before).
-	RepoURL string `json:"repo_url,omitempty"`
-	// Kind is the multica task kind (direct|comment|chat|quick_create|
-	// autopilot). Optional; consumers may ignore it.
-	Kind string `json:"kind,omitempty"`
+	// deprecated: superseded by Repos; will be removed in M2 cleanup.
+	RepoURL      string            `json:"repo_url,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Repos        []RepoSpec        `json:"repos,omitempty"`
+	Deliverables []DeliverableSpec `json:"deliverables,omitempty"`
 }
 
 // CreateChatSessionRequest mirrors multica's POST
