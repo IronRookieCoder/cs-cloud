@@ -92,6 +92,9 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL, accessToken st
 	}
 
 	name := repoName(repoURL)
+	if err := validateID(name); err != nil {
+		return "", fmt.Errorf("invalid repo url %q: %w", repoURL, err)
+	}
 	cache := filepath.Join(cacheDir, name)
 
 	// Serialize provisioning per cache path: concurrent tasks for one repo can
@@ -189,6 +192,16 @@ func runGitCtx(ctx context.Context, args ...string) error {
 		return fmt.Errorf("git %v: %w: %s", args, err, out)
 	}
 	return nil
+}
+
+// runGitOutput runs a git command with the default git timeout and returns its
+// stdout. Mirrors runGit but captures output for callers that need it (e.g.
+// base-ref discovery).
+func runGitOutput(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	return cmd.Output()
 }
 
 func worktreeRefPath(dir string) string {
@@ -306,13 +319,13 @@ func (wm *WorkspaceManager) resolveBaseRef(cache, baseBranch string) (string, er
 	if baseBranch != "" {
 		return baseBranch, nil
 	}
-	out, err := exec.Command("git", "-C", cache, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	out, err := runGitOutput("-C", cache, "rev-parse", "--abbrev-ref", "HEAD")
 	if err == nil {
 		if ref := strings.TrimSpace(string(out)); ref != "" && ref != "HEAD" {
 			return ref, nil
 		}
 	}
-	out, err = exec.Command("git", "-C", cache, "for-each-ref", "--format=%(refname:short)", "refs/heads").Output()
+	out, err = runGitOutput("-C", cache, "for-each-ref", "--format=%(refname:short)", "refs/heads")
 	if err != nil {
 		return "", fmt.Errorf("resolve base ref: %w", err)
 	}
@@ -335,6 +348,9 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 	}
 	if repoURL == "" {
 		return "", fmt.Errorf("checkout: empty repo url")
+	}
+	if err := validateID(repoName(repoURL)); err != nil {
+		return "", fmt.Errorf("invalid repo url %q: %w", repoURL, err)
 	}
 	cache, err := wm.EnsureRepoReady(workspaceID, repoURL, accessToken)
 	if err != nil {

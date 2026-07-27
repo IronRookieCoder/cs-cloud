@@ -300,3 +300,47 @@ func TestCheckoutRepo_ResetsExistingWorktree(t *testing.T) {
 		t.Errorf("round2 branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
 	}
 }
+
+func TestCheckoutRepo_RejectsTraversalRepoURL(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	_ = upstream // keep helper semantics consistent with other tests
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+	sibling := filepath.Join(root, "ws-1", "tasks", "sibling")
+	_ = os.MkdirAll(sibling, 0o755) // must survive
+
+	for _, bad := range []string{"..", ".", "https://h/x/.."} {
+		_, err := wm.CheckoutRepo("ws-1", taskRoot, bad, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "")
+		if err == nil {
+			t.Errorf("CheckoutRepo(%q) should have failed", bad)
+		}
+	}
+	// Sibling dir untouched (no traversal deletion).
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("sibling dir deleted by traversal: %v", err)
+	}
+	// EnsureRepoReady also rejects.
+	if _, err := wm.EnsureRepoReady("ws-1", "..", ""); err == nil {
+		t.Error("EnsureRepoReady(\"..\") should have failed")
+	}
+}
+
+func TestCheckoutRepo_ResolvesDefaultBaseBranch(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t) // commits to the system default branch (master)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+	// baseBranch="" => resolveBaseRef must discover the default from the mirror.
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "22222222-aaaa-bbbb-cccc-dddddddddddd", "", "")
+	if err != nil {
+		t.Fatalf("checkout with empty base: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("worktree not created with discovered base: %v", err)
+	}
+}
