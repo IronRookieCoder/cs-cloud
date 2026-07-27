@@ -526,6 +526,9 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 func sessionResultErrorMessage(data map[string]any) string {
 	if errorsList, ok := data["errors"].([]any); ok {
 		for _, item := range errorsList {
+			if message, ok := item.(string); ok && message != "" {
+				return message
+			}
 			if errorData, ok := item.(map[string]any); ok {
 				if message, _ := errorData["message"].(string); message != "" {
 					return message

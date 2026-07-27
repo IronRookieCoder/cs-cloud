@@ -165,7 +165,7 @@ func TestWaitForSessionDoneIgnoresTerminalEventsBeforeBusy(t *testing.T) {
 		"subtype": "current_failure",
 		"isError": true,
 		"errors": []any{
-			map[string]any{"message": "current failure message"},
+			"current failure message",
 		},
 	}}
 	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
@@ -186,8 +186,8 @@ func TestWaitForSessionDoneUsesResultErrorWithoutSessionErrorEvent(t *testing.T)
 		"subtype": "error_max_turns",
 		"isError": true,
 		"errors": []any{
-			map[string]any{"message": "Max turns reached"},
-			map[string]any{"message": "second error"},
+			"Max turns reached",
+			"second error",
 		},
 	}}
 	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
