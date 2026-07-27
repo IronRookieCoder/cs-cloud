@@ -244,3 +244,59 @@ func TestResetWorktree(t *testing.T) {
 		t.Errorf("branch = %q, want second", strings.TrimSpace(string(out)))
 	}
 }
+
+func TestCheckoutRepo_CreatesBranchWorktree(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "")
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	wantDir := filepath.Join(taskRoot, repoName(upstream))
+	if dir != wantDir {
+		t.Errorf("dir = %q, want %q", dir, wantDir)
+	}
+	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+	wantBranch := "agent/csc/11111111"
+	if strings.TrimSpace(string(out)) != wantBranch {
+		t.Errorf("branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+	}
+}
+
+func TestCheckoutRepo_ResetsExistingWorktree(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+
+	// Round 1: create worktree + pollute it.
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "aaaaaaaa-1111-2222-3333-444444444444", "master", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "junk.txt"), []byte("x"), 0o644)
+
+	// Round 2 (same taskRoot, NEW taskID): existing dir => reset + new branch.
+	dir2, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "bbbbbbbb-1111-2222-3333-444444444444", "master", "")
+	if err != nil {
+		t.Fatalf("checkout round2: %v", err)
+	}
+	if dir2 != dir {
+		t.Errorf("round2 dir = %q, want reuse %q", dir2, dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "junk.txt")); !os.IsNotExist(err) {
+		t.Errorf("junk.txt should be cleaned on reset, got %v", err)
+	}
+	out, _ := exec.Command("git", "-C", dir2, "branch", "--show-current").CombinedOutput()
+	wantBranch := "agent/csc/bbbbbbbb"
+	if strings.TrimSpace(string(out)) != wantBranch {
+		t.Errorf("round2 branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+	}
+}

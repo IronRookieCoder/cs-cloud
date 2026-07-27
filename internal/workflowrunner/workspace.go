@@ -293,3 +293,101 @@ func (wm *WorkspaceManager) ResetWorktree(workDir, branchName, baseRef string) e
 func isBranchCollision(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "a branch named")
 }
+
+// RepoWorktreeDir returns the per-repo worktree path under a task root:
+// <taskRoot>/<repoName>. One task may hold several repo worktrees.
+func RepoWorktreeDir(taskRoot, repoURL string) string {
+	return filepath.Join(taskRoot, repoName(repoURL))
+}
+
+// resolveBaseRef resolves the base ref for a new worktree: the given baseBranch
+// if non-empty, else the remote default branch discovered from the mirror cache.
+func (wm *WorkspaceManager) resolveBaseRef(cache, baseBranch string) (string, error) {
+	if baseBranch != "" {
+		return baseBranch, nil
+	}
+	out, err := exec.Command("git", "-C", cache, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err == nil {
+		if ref := strings.TrimSpace(string(out)); ref != "" && ref != "HEAD" {
+			return ref, nil
+		}
+	}
+	out, err = exec.Command("git", "-C", cache, "for-each-ref", "--format=%(refname:short)", "refs/heads").Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve base ref: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if ref := strings.TrimSpace(line); ref != "" {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no base ref in %s", cache)
+}
+
+// CheckoutRepo ensures the mirror cache for repoURL is ready, then creates a
+// per-repo worktree at <taskRoot>/<repoName>/ on a fresh agent branch off the
+// base ref. If the worktree already exists (resuming a prior round), it resets
+// it clean and checks out a new branch instead. No allowlist: any URL the agent
+// passes is cloned (the GitLab PAT is the real permission boundary).
+func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken string) (string, error) {
+	if err := validateID(workspaceID); err != nil {
+		return "", err
+	}
+	if repoURL == "" {
+		return "", fmt.Errorf("checkout: empty repo url")
+	}
+	cache, err := wm.EnsureRepoReady(workspaceID, repoURL, accessToken)
+	if err != nil {
+		return "", err
+	}
+	baseRef, err := wm.resolveBaseRef(cache, baseBranch)
+	if err != nil {
+		return "", err
+	}
+	dir := RepoWorktreeDir(taskRoot, repoURL)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+	branchName := agentBranch(agentName, taskID)
+	if _, err := os.Stat(dir); err == nil {
+		// Existing worktree (prior round): reset + new branch.
+		if isGitWorktree(dir) {
+			if err := wm.ResetWorktree(dir, branchName, baseRef); err != nil {
+				return "", err
+			}
+			return dir, nil
+		}
+		// Stale non-worktree dir in the way: remove and rebuild.
+		_ = os.RemoveAll(dir)
+	}
+	// Fresh worktree on a new branch. Collision => timestamp suffix retry.
+	if err := runGit("-C", cache, "worktree", "add", "-b", branchName, dir, baseRef); err != nil {
+		if isBranchCollision(err) {
+			branchName = fmt.Sprintf("%s-%d", branchName, time.Now().Unix())
+			if err := runGit("-C", cache, "worktree", "add", "-b", branchName, dir, baseRef); err != nil {
+				return "", fmt.Errorf("add worktree: %w", err)
+			}
+		} else {
+			return "", fmt.Errorf("add worktree: %w", err)
+		}
+	}
+	return dir, nil
+}
+
+// isGitWorktree reports whether dir is an active git worktree (has a .git file
+// pointing at the worktree metadata, or a .git directory).
+func isGitWorktree(dir string) bool {
+	gitPath := filepath.Join(dir, ".git")
+	fi, err := os.Stat(gitPath)
+	if err != nil {
+		return false
+	}
+	if fi.IsDir() {
+		return true
+	}
+	b, err := os.ReadFile(gitPath)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(b)), "gitdir:")
+}
