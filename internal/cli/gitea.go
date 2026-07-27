@@ -250,10 +250,23 @@ func submitDeliverable(cfg submitConfig) error {
 
 	ctx := context.Background()
 
+	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
+	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
+	// first, which created the delivery repo worktree at <taskRoot>/<repoName>/.
+	// Resolve that subdir — do NOT clone into a fresh temp dir. The env-provided
+	// MULTICA_GITEA_REPO matches the basename multica uses to build the clone
+	// URL, so it identifies the same subdir CheckoutRepo created.
+	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
+	if taskRoot == "" {
+		return fmt.Errorf("CS_CLOUD_WORKTREE not set (document submit must run after `cs-cloud repo checkout` inside a cs-cloud task)")
+	}
+
 	gctx, err := readGiteaContext()
 	if err != nil {
 		return err
 	}
+	worktree := filepath.Join(taskRoot, gctx.repo)
+
 	docPath, err := gctx.deliverablePath(cfg.deliverableID)
 	if err != nil {
 		return err
@@ -271,38 +284,35 @@ func submitDeliverable(cfg submitConfig) error {
 	if giteaBase == "" {
 		giteaBase = cred.BaseURL
 	}
-	// Prefer the server-provided full clone URL; fall back to self-building.
-	cloneAuth := ""
-	if gctx.cloneURL != "" {
-		cloneAuth = injectTokenIntoURL(gctx.cloneURL, cred.Token)
-	}
-	if cloneAuth == "" {
-		cloneAuth = injectToken(giteaBase, gctx.owner, gctx.repo, cred.Token)
-	}
 
-	dir, err := os.MkdirTemp("", "cscloud-gitea-*")
+	// The worktree is on the env-advertised node branch (CheckoutRepo put it
+	// there). PR head = this branch; PR base = inst branch.
+	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
 	if err != nil {
-		return err
+		return fmt.Errorf("current branch: %w", err)
 	}
-	defer os.RemoveAll(dir)
 
-	if err := cfg.gitOps.Clone(cloneAuth, gctx.instBranch, dir); err != nil {
-		return fmt.Errorf("clone: %w", err)
-	}
-	if err := cfg.gitOps.PrepareBranch(dir, gctx.nodeBranch); err != nil {
-		return fmt.Errorf("prepare node branch: %w", err)
-	}
-	if err := cfg.gitOps.WriteFile(dir, docPath, content); err != nil {
+	if err := cfg.gitOps.WriteFile(worktree, docPath, content); err != nil {
 		return fmt.Errorf("write document: %w", err)
 	}
-	if err := cfg.gitOps.Commit(dir, "deliverable: "+cfg.deliverableID); err != nil {
+	if err := cfg.gitOps.Commit(worktree, "deliverable: "+cfg.deliverableID); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
-	if err := cfg.gitOps.Push(dir, cloneAuth, gctx.nodeBranch); err != nil {
+
+	// Push URL: prefer the server-provided full clone URL; fall back to
+	// self-building from base + owner + repo.
+	authURL := ""
+	if gctx.cloneURL != "" {
+		authURL = injectTokenIntoURL(gctx.cloneURL, cred.Token)
+	}
+	if authURL == "" {
+		authURL = injectToken(giteaBase, gctx.owner, gctx.repo, cred.Token)
+	}
+	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, gctx.nodeBranch, gctx.instBranch, cfg.deliverableID)
+	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, currentBranch, gctx.instBranch, cfg.deliverableID)
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
 	}

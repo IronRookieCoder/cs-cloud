@@ -53,9 +53,13 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 }
 
 // TestSubmitDeliverable_HappyPath wires a fake git + httptest Gitea + httptest
-// Multica and asserts the full submit flow: credential fetch -> clone inst ->
-// prepare node branch -> write file -> commit -> push -> open PR -> report-pr
-// with the PR URL.
+// Multica and asserts the worktree-based document submit flow: the agent has
+// already run `cs-cloud repo checkout` (creating a delivery worktree under the
+// task root), so submit reads CS_CLOUD_WORKTREE (the task root), resolves the
+// per-repo worktree subdir, reads the current branch from that worktree, writes
+// the --file content into the deliverable path, commits, pushes the worktree's
+// branch, opens a Gitea PR (head=worktree branch, base=inst), and reports the
+// PR URL. NO clone / MkdirTemp / PrepareBranch — those are tmp-clone leftovers.
 func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	var reportedURL string
 	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +88,11 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}))
 	defer giteaSrv.Close()
 
+	// CS_CLOUD_WORKTREE is the TASK ROOT (set by task.go buildEnv), not the
+	// per-repo delivery worktree. The delivery worktree is a subdir
+	// <taskRoot>/<repoName>/ created by `cs-cloud repo checkout`.
+	taskRoot := t.TempDir()
+	t.Setenv("CS_CLOUD_WORKTREE", taskRoot)
 	t.Setenv("MULTICA_TOKEN", "tok")
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
@@ -98,7 +107,10 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 
 	tmpFile := tempFile(t, "# my document body")
 
-	fake := &fakeGitOps{}
+	// currentBranch mirrors what CheckoutRepo would have left the worktree on:
+	// the env-advertised MULTICA_REPO_NODE_BRANCH (here aliased as
+	// MULTICA_GITEA_NODE_BRANCH = "node/dd").
+	fake := &fakeGitOps{currentBranch: "node/dd"}
 	err := submitDeliverable(submitConfig{
 		giteaBaseOverride: giteaSrv.URL,
 		deliverableID:     "d1",
@@ -108,17 +120,61 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submitDeliverable: %v", err)
 	}
-	if len(fake.cloneCalls) != 1 || fake.cloneCalls[0].branch != "inst-cc" {
-		t.Errorf("expected one clone of inst-cc, got %+v", fake.cloneCalls)
+
+	// NO tmp-clone leftovers: the worktree already exists (agent ran checkout).
+	if len(fake.cloneCalls) != 0 {
+		t.Errorf("expected NO clone (worktree-based), got %+v", fake.cloneCalls)
+	}
+	if len(fake.branchCalls) != 0 {
+		t.Errorf("expected NO PrepareBranch (worktree-based), got %+v", fake.branchCalls)
+	}
+
+	// WriteFile + Commit + Push + CurrentBranch all operate on the delivery
+	// worktree subdir (<taskRoot>/<repoName>), NOT a random temp dir.
+	wantWorktree := taskRoot + string(os.PathSeparator) + "wf-bbb"
+	if len(fake.written) != 1 || fake.written[0].dir != wantWorktree {
+		t.Errorf("expected write to worktree %q, got %+v", wantWorktree, fake.written)
 	}
 	if len(fake.written) != 1 || fake.written[0].path != "nodes/dd/d1.md" {
 		t.Errorf("expected file written to nodes/dd/d1.md, got %+v", fake.written)
 	}
+	if len(fake.commitMsgs) != 1 {
+		t.Errorf("expected one commit, got %+v", fake.commitMsgs)
+	}
 	if len(fake.pushCalls) != 1 || fake.pushCalls[0] != "node/dd" {
-		t.Errorf("expected push of node/dd, got %+v", fake.pushCalls)
+		t.Errorf("expected push of worktree branch node/dd, got %+v", fake.pushCalls)
 	}
 	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
 		t.Errorf("report-pr received %q, want the PR html_url", reportedURL)
+	}
+}
+
+// TestSubmitDeliverable_MissingWorktreeEnv verifies the document path errors
+// early when CS_CLOUD_WORKTREE is unset (the agent is running outside a cs-cloud
+// task, or the worktree was never checked out). The check must fire BEFORE the
+// --file read so the error message is actionable.
+func TestSubmitDeliverable_MissingWorktreeEnv(t *testing.T) {
+	// readGiteaContext needs these; set them so the failure is specifically the
+	// missing CS_CLOUD_WORKTREE check, not a precondition.
+	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
+	t.Setenv("MULTICA_GITEA_OWNER", "t-aaa")
+	t.Setenv("MULTICA_GITEA_REPO", "wf-bbb")
+	t.Setenv("MULTICA_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("MULTICA_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("MULTICA_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+	t.Setenv("MULTICA_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_WORKTREE", "")
+
+	err := submitDeliverable(submitConfig{
+		deliverableID: "d1",
+		filePath:      "whatever",
+		gitOps:        &fakeGitOps{},
+	})
+	if err == nil {
+		t.Fatal("expected error when CS_CLOUD_WORKTREE is unset")
+	}
+	if !strings.Contains(err.Error(), "CS_CLOUD_WORKTREE") {
+		t.Errorf("err = %q, want substring \"CS_CLOUD_WORKTREE\"", err.Error())
 	}
 }
 
@@ -193,6 +249,9 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 }
 
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
+	// CS_CLOUD_WORKTREE is set so the worktree-dir check passes; the failure
+	// must come from readGiteaContext detecting the missing MULTICA_NODE_RUN_ID.
+	t.Setenv("CS_CLOUD_WORKTREE", t.TempDir())
 	t.Setenv("MULTICA_NODE_RUN_ID", "")
 	if err := submitDeliverable(submitConfig{deliverableID: "d1", filePath: "x", gitOps: &fakeGitOps{}}); err == nil {
 		t.Fatal("expected error when MULTICA_NODE_RUN_ID missing")
