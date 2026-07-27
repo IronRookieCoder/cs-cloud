@@ -33,6 +33,11 @@ const maxCallbackOutputBytes = 256 * 1024
 type taskRecord struct {
 	cancel  context.CancelFunc
 	aborted bool
+	// payload + taskRoot let the localserver's repo-checkout RPC serve the
+	// running task's context (agent name, workspace, env token, cwd) without
+	// the CLI having to re-send them.
+	payload  workflow.TaskRunPayload
+	taskRoot string
 }
 
 // Driver is a persistent driver for the cs-workflow subsystem.
@@ -312,6 +317,15 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
 		return err
 	}
+	// Record payload + taskRoot on the running task so the localserver's
+	// repo-checkout RPC can serve the task's context without the CLI
+	// re-sending it. worktree is the task root after Task 6's Prepare change.
+	d.mu.Lock()
+	if rec, ok := d.running[payload.TaskID]; ok {
+		rec.payload = payload
+		rec.taskRoot = worktree
+	}
+	d.mu.Unlock()
 
 	sessionID, err := d.bindSession(ctx, payload, worktree)
 	if err != nil {
@@ -413,6 +427,23 @@ func truncateOutput(s string) string {
 		return s
 	}
 	return strings.ToValidUTF8(s[:maxCallbackOutputBytes], "") + "\n... (output truncated)"
+}
+
+// CheckoutRepo serves an agent's on-demand `cs-cloud repo checkout` for a
+// running task: looks up the task's payload + taskRoot, then creates (or resets)
+// a per-repo branch worktree. baseBranch "" resolves the remote default.
+func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
+	d.mu.Lock()
+	rec, ok := d.running[taskID]
+	d.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("task %s is not running", taskID)
+	}
+	token := rec.payload.Env["MULTICA_GITLAB_TOKEN"]
+	return d.workspaceManager.CheckoutRepo(
+		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
+		rec.payload.Agent, taskID, baseBranch, token,
+	)
 }
 
 // AbortTask cancels a running task. When the task is not (yet) running, the

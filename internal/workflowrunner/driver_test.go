@@ -758,3 +758,39 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 		t.Fatalf("unexpected bind calls: %+v", binds)
 	}
 }
+
+func TestDriverCheckoutRepo(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	fm := newFakeMultica()
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+	d := asyncTestDriver(t, ts.URL)
+
+	taskID := "11111111-aaaa-bbbb-cccc-dddddddddddd"
+	wsID := "ws-1"
+	// Manually register a running task record (bypass RunTaskAsync; directly
+	// populate the state CheckoutRepo reads).
+	taskRoot := filepath.Join(d.cfg.WorkspacesRoot, wsID, "tasks", taskID)
+	if err := os.MkdirAll(taskRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.running[taskID] = &taskRecord{
+		payload:  workflow.TaskRunPayload{TaskID: taskID, WorkspaceID: wsID, Agent: AgentCsc},
+		taskRoot: taskRoot,
+	}
+	d.mu.Unlock()
+
+	dir, err := d.CheckoutRepo(taskID, upstream, "")
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("worktree not created: %v", err)
+	}
+	// Unknown task => error.
+	if _, err := d.CheckoutRepo("nonexistent-task", upstream, ""); err == nil {
+		t.Error("CheckoutRepo should error for a task that is not running")
+	}
+}
