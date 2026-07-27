@@ -466,6 +466,9 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 // emitted before our prompt starts cannot end the wait early.
 func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 	busy := false
+	terminalFailure := false
+	terminalSubtype := ""
+	terminalMessage := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -480,16 +483,43 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 					if t, _ := status["type"].(string); t == "busy" {
 						busy = true
 					} else if t == "idle" && busy {
-						return nil
+						return sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
+					}
+				}
+			case "session.result":
+				terminalSubtype, _ = ev.data["subtype"].(string)
+				isError, _ := ev.data["isError"].(bool)
+				if snakeCaseError, _ := ev.data["is_error"].(bool); snakeCaseError {
+					isError = true
+				}
+				terminalFailure = isError || (terminalSubtype != "" && terminalSubtype != "success")
+			case "session.error":
+				errorData, _ := ev.data["error"].(map[string]any)
+				if subtype, _ := errorData["subtype"].(string); subtype != "api_retry" {
+					if message, _ := errorData["message"].(string); message != "" {
+						terminalMessage = message
 					}
 				}
 			case "session.idle":
 				if busy {
-					return nil
+					return sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
 				}
 			}
 		}
 	}
+}
+
+func sessionCompletionError(failed bool, subtype, message string) error {
+	if !failed {
+		return nil
+	}
+	if message != "" {
+		return fmt.Errorf("%s", message)
+	}
+	if subtype != "" {
+		return fmt.Errorf("csc session failed: %s", subtype)
+	}
+	return fmt.Errorf("csc session failed")
 }
 
 // abortSession asks csc to abort the currently running prompt in a session.

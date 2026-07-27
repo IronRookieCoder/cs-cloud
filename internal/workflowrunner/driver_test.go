@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,6 +88,8 @@ type fakeMultica struct {
 	deregistered  []string
 	pinSessions   []pinSessionCall
 	bindSessions  []bindSessionCall
+	taskCalls     []string
+	taskBodies    map[string][]byte
 	sessions      []workflow.ChatSession
 	nextRuntimeID int
 	nextSessionID int
@@ -111,6 +114,7 @@ func newFakeMultica(workspaces ...workflow.Workspace) *fakeMultica {
 		nextRuntimeID: 1,
 		nextSessionID: 1,
 		runtimeAlive:  make(map[string]bool),
+		taskBodies:    make(map[string][]byte),
 	}
 }
 
@@ -194,6 +198,7 @@ func (f *fakeMultica) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(session)
 	})
 	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/session") {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) < 4 {
@@ -202,13 +207,17 @@ func (f *fakeMultica) handler() http.Handler {
 			}
 			taskID := parts[len(parts)-2]
 			var req workflow.PinTaskSessionRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.Unmarshal(body, &req)
 			f.mu.Lock()
 			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID})
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		f.mu.Lock()
+		f.taskCalls = append(f.taskCalls, r.URL.Path)
+		f.taskBodies[r.URL.Path] = body
+		f.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/api/daemon/node-runs/", func(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +266,17 @@ func (f *fakeMultica) sessionCalls() (pins []pinSessionCall, binds []bindSession
 	defer f.mu.Unlock()
 	return append([]pinSessionCall{}, f.pinSessions...),
 		append([]bindSessionCall{}, f.bindSessions...)
+}
+
+func (f *fakeMultica) taskCallback(suffix string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, path := range f.taskCalls {
+		if strings.HasSuffix(path, suffix) {
+			return append([]byte{}, f.taskBodies[path]...), true
+		}
+	}
+	return nil, false
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -729,5 +749,72 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 	}
 	if len(binds) != 1 || binds[0].NodeRunID != "nr-1" || binds[0].DeviceID != "dev-1" || binds[0].RuntimeID == "" || binds[0].SessionID != pins[0].SessionID {
 		t.Fatalf("unexpected bind calls: %+v", binds)
+	}
+}
+
+func TestDriverCSCSessionFailureReportsAgentError(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	sessionRunner := &fakeSessionRunner{err: errors.New("Max turns reached")}
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"csc"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  sessionRunner,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		regs, _, _ := fm.snapshot()
+		return len(regs) >= 1
+	})
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-fail",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if err == nil || err.Error() != "Max turns reached" {
+		t.Fatalf("RunTask error = %v, want Max turns reached", err)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("terminal CSC error called complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("terminal CSC error did not call fail callback")
+	}
+	var failure struct {
+		Error         string `json:"error"`
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.Error != "Max turns reached" {
+		t.Fatalf("failure error = %q, want Max turns reached", failure.Error)
+	}
+	if failure.FailureReason != "agent_error" {
+		t.Fatalf("failure reason = %q, want agent_error", failure.FailureReason)
 	}
 }

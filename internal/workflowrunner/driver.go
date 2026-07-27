@@ -332,7 +332,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		if d.aborted(payload.TaskID) {
 			_ = d.client.FailTask(ctx, payload.TaskID, "aborted", "cancelled")
 		} else {
-			_ = d.client.FailTask(ctx, payload.TaskID, runErr.Error(), "")
+			_ = d.client.FailTask(ctx, payload.TaskID, runErr.Error(), "agent_error")
 		}
 		return runErr
 	}

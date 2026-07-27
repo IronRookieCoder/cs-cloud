@@ -2,6 +2,8 @@ package csc
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -37,6 +39,113 @@ func TestWaitForSessionDoneIgnoresIdleBeforeBusy(t *testing.T) {
 	}
 }
 
+func TestWaitForSessionDoneReturnsTerminalSessionError(t *testing.T) {
+	events := make(chan sessionEvent, 4)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "error_max_turns",
+		"isError": true,
+	}}
+	events <- sessionEvent{name: "session.error", data: map[string]any{
+		"error": map[string]any{
+			"subtype": "error_max_turns",
+			"message": "Max turns reached",
+		},
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	err := waitForSessionDone(context.Background(), events)
+	if err == nil {
+		t.Fatal("expected terminal session error, got nil")
+	}
+	if got := err.Error(); got != "Max turns reached" {
+		t.Fatalf("error = %q, want %q", got, "Max turns reached")
+	}
+}
+
+func TestWaitForSessionDoneAllowsAPIRetryToRecover(t *testing.T) {
+	events := make(chan sessionEvent, 5)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.error", data: map[string]any{
+		"error": map[string]any{
+			"subtype": "api_retry",
+			"message": "rate limit",
+		},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "success",
+		"isError": false,
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	if err := waitForSessionDone(context.Background(), events); err != nil {
+		t.Fatalf("waitForSessionDone: %v", err)
+	}
+}
+
+func TestWaitForSessionDoneTreatsSnakeCaseErrorFlagAsFailure(t *testing.T) {
+	events := make(chan sessionEvent, 3)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype":  "success",
+		"is_error": true,
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	if err := waitForSessionDone(context.Background(), events); err == nil {
+		t.Fatal("expected result with is_error=true to fail")
+	}
+}
+
+func TestWaitForSessionDoneTreatsUnknownNonSuccessSubtypeAsFailure(t *testing.T) {
+	events := make(chan sessionEvent, 3)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "future_terminal_error",
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	err := waitForSessionDone(context.Background(), events)
+	if err == nil || err.Error() != "csc session failed: future_terminal_error" {
+		t.Fatalf("error = %v, want unknown subtype failure", err)
+	}
+}
+
+func TestWaitForSessionDoneAllowsToolErrorWhenSessionSucceeds(t *testing.T) {
+	events := make(chan sessionEvent, 4)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "message.part.updated", data: map[string]any{
+		"part": map[string]any{
+			"type":     "tool",
+			"is_error": true,
+			"output":   "command failed",
+		},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "success",
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	if err := waitForSessionDone(context.Background(), events); err != nil {
+		t.Fatalf("waitForSessionDone: %v", err)
+	}
+}
+
 func TestWaitForSessionDoneCancelled(t *testing.T) {
 	events := make(chan sessionEvent)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -53,6 +162,51 @@ func TestWaitForSessionDoneStreamClosedEarly(t *testing.T) {
 
 	if err := waitForSessionDone(context.Background(), events); err == nil {
 		t.Fatal("expected stream-closed error, got nil")
+	}
+}
+
+func TestRunSessionReturnsTerminalErrorFromEventStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("event: session.status\n"))
+			_, _ = w.Write([]byte("data: {\"status\":{\"type\":\"busy\"}}\n\n"))
+			_, _ = w.Write([]byte("event: session.result\n"))
+			_, _ = w.Write([]byte("data: {\"subtype\":\"error_max_turns\",\"isError\":true}\n\n"))
+			_, _ = w.Write([]byte("event: session.error\n"))
+			_, _ = w.Write([]byte("data: {\"error\":{\"subtype\":\"error_max_turns\",\"message\":\"Max turns reached\"}}\n\n"))
+			_, _ = w.Write([]byte("event: session.idle\n"))
+			_, _ = w.Write([]byte("data: {}\n\n"))
+		case r.Method == http.MethodPost && r.URL.Path == "/session/session-1/prompt_async":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	agent := &Agent{
+		endpoint:    server.URL,
+		rawEndpoint: server.URL,
+		httpClient:  server.Client(),
+	}
+	_, err := agent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	if err == nil {
+		t.Fatal("expected terminal session error, got nil")
+	}
+	if got, want := err.Error(), "wait for completion: Max turns reached"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 
