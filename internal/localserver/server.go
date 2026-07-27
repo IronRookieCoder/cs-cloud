@@ -217,6 +217,8 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
 
+	api.HandleFunc("POST /repo/checkout", s.handleRepoCheckout)
+
 	s.http = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
