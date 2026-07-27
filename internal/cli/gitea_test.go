@@ -10,18 +10,21 @@ import (
 )
 
 // fakeGitOps records the sequence of git operations without touching the
-// filesystem or a real git binary.
+// filesystem or a real git binary. Each method records the dir it was called
+// with so tests can assert operations target the correct worktree (not the
+// bare task root).
 type fakeGitOps struct {
-	cloneCalls    []struct{ authURL, branch, dir string }
-	branchCalls   []string
-	written       []struct {
+	cloneCalls       []struct{ authURL, branch, dir string }
+	branchCalls      []string
+	written          []struct {
 		dir     string
 		path    string
 		content []byte
 	}
-	commitMsgs    []string
-	pushCalls     []string
-	currentBranch string // value returned by CurrentBranch
+	commitMsgs       []string
+	pushCalls        []struct{ dir, authURL, branch string }
+	currentBranchDirs []string
+	currentBranch    string // value returned by CurrentBranch
 }
 
 func (f *fakeGitOps) Clone(authURL, branch, dir string) error {
@@ -45,10 +48,11 @@ func (f *fakeGitOps) Commit(dir, message string) error {
 	return nil
 }
 func (f *fakeGitOps) Push(dir, authURL, branch string) error {
-	f.pushCalls = append(f.pushCalls, branch)
+	f.pushCalls = append(f.pushCalls, struct{ dir, authURL, branch string }{dir, authURL, branch})
 	return nil
 }
 func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
+	f.currentBranchDirs = append(f.currentBranchDirs, dir)
 	return f.currentBranch, nil
 }
 
@@ -141,7 +145,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	if len(fake.commitMsgs) != 1 {
 		t.Errorf("expected one commit, got %+v", fake.commitMsgs)
 	}
-	if len(fake.pushCalls) != 1 || fake.pushCalls[0] != "node/dd" {
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "node/dd" {
 		t.Errorf("expected push of worktree branch node/dd, got %+v", fake.pushCalls)
 	}
 	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
@@ -211,7 +215,13 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	t.Setenv("MULTICA_SERVER_URL", multica.URL)
 	t.Setenv("MULTICA_TOKEN", "tok")
 	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
-	t.Setenv("CS_CLOUD_WORKTREE", t.TempDir())
+	// CS_CLOUD_WORKTREE is the TASK ROOT; the code-repo worktree is a subdir
+	// <taskRoot>/<repoName(repoURL)> created by `cs-cloud repo checkout`. Using
+	// a URL ending in /mycode.git makes the expected subdir deterministic
+	// (= <taskRoot>/mycode) so the test can assert submit resolves it instead
+	// of operating on the bare task root.
+	taskRoot := t.TempDir()
+	t.Setenv("CS_CLOUD_WORKTREE", taskRoot)
 
 	fake := &fakeGitOps{
 		currentBranch: "feat/code-changes",
@@ -219,15 +229,25 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	err := submitDeliverable(submitConfig{
 		mrMode:        true,
 		deliverableID: "d1",
-		repoURL:       "https://gitlab.test/group/repo.git",
+		repoURL:       "https://gitlab.test/group/mycode.git",
 		gitOps:        fake,
 	})
 	if err != nil {
 		t.Fatalf("submitDeliverable (mr): %v", err)
 	}
 
-	// Assert push was called
-	if len(fake.pushCalls) != 1 || fake.pushCalls[0] != "feat/code-changes" {
+	// The worktree subdir CheckoutRepo creates for the code repo. submit must
+	// push from THIS dir, not the bare task root (which has no .git).
+	wantWorktree := taskRoot + string(os.PathSeparator) + "mycode"
+	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != wantWorktree {
+		t.Errorf("CurrentBranch dir = %+v, want %q (the code-repo worktree subdir)",
+			fake.currentBranchDirs, wantWorktree)
+	}
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].dir != wantWorktree {
+		t.Errorf("Push dir = %+v, want %q (the code-repo worktree subdir)",
+			fake.pushCalls, wantWorktree)
+	}
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "feat/code-changes" {
 		t.Errorf("expected push of feat/code-changes, got %+v", fake.pushCalls)
 	}
 

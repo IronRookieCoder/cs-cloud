@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/workflowrunner"
 )
 
 // deliverableCmd implements `cs-cloud workflow deliverable <subcommand>`. It is the cs-cloud home
@@ -190,6 +191,8 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 
 // submitGitlabMR handles the --mr (GitLab code MR) path: pushes the current
 // worktree branch, opens a GitLab MR, and reports to multica's submit endpoint.
+// The agent already wrote + committed its code in the code-repo worktree (the
+// --mr flow does NOT pass --file); this function only pushes + opens the MR.
 func submitGitlabMR(cfg submitConfig) error {
 	ctx := context.Background()
 
@@ -198,10 +201,17 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("gitlab credential: %w", err)
 	}
 
-	worktree := os.Getenv("CS_CLOUD_WORKTREE")
-	if worktree == "" {
+	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
+	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
+	// first, which created the code-repo worktree at <taskRoot>/<repoName>/.
+	// Resolve that subdir via RepoWorktreeDir — the same helper CheckoutRepo
+	// uses — so submit pushes from the exact worktree checkout created, not the
+	// bare task root (which has no .git and would fail at git rev-parse).
+	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
+	if taskRoot == "" {
 		return fmt.Errorf("CS_CLOUD_WORKTREE not set")
 	}
+	worktree := workflowrunner.RepoWorktreeDir(taskRoot, cfg.repoURL)
 
 	nodeRunID := os.Getenv("MULTICA_NODE_RUN_ID")
 	if nodeRunID == "" {
