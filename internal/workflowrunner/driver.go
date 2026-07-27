@@ -487,9 +487,15 @@ func truncateOutput(s string) string {
 //
 // The repo's role (matched by URL against payload.Repos) drives BOTH the
 // worktree branch name and which env var supplies the clone token; see
-// lookupRepoRole + tokenForRepo. "delivery" → node/<shortNodeRunID> +
-// MULTICA_REPO_TOKEN (Gitea bot PAT); other/missing → agent/<agent>/<shortTaskID>
-// + MULTICA_GITLAB_TOKEN (GitLab PAT used for code repos since M1).
+// lookupRepoRole + tokenForRepo. "delivery" → MULTICA_REPO_NODE_BRANCH (the
+// node branch multica pre-created off inst in the Gitea wf repo, e.g.
+// "node/01-<shortHex>") + MULTICA_REPO_TOKEN (Gitea bot PAT); other/missing →
+// agent/<agent>/<shortTaskID> + MULTICA_GITLAB_TOKEN (GitLab PAT used for code
+// repos since M1).
+//
+// cs-cloud does NOT compute the delivery branch: it must use the exact branch
+// name multica sent, otherwise the worktree, the push, and the PR head would
+// diverge from the remote branch multica created.
 func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
 	d.mu.Lock()
 	rec, ok := d.running[taskID]
@@ -499,9 +505,16 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 	}
 	role := lookupRepoRole(rec.payload.Repos, repoURL)
 	token := tokenForRepo(role, rec.payload.Env)
+	// multica owns the node-branch convention and injects the fully-formed
+	// branch name (e.g. "node/01-<shortHex>") via MULTICA_REPO_NODE_BRANCH.
+	// Thread it through verbatim — do not derive a "node/<short>" here.
+	nodeBranch := ""
+	if rec.payload.Env != nil {
+		nodeBranch = rec.payload.Env["MULTICA_REPO_NODE_BRANCH"]
+	}
 	return d.workspaceManager.CheckoutRepo(
 		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
-		rec.payload.Agent, taskID, baseBranch, token, role, rec.payload.NodeRunID,
+		rec.payload.Agent, taskID, baseBranch, token, role, nodeBranch,
 	)
 }
 

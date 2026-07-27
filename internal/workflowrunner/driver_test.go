@@ -918,9 +918,11 @@ func TestDriverCheckoutRepo(t *testing.T) {
 
 // TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos verifies that when the
 // task payload carries a `repos[]` entry with role="delivery" for the requested
-// URL, the driver derives the branch from NodeRunID (node/<shortNodeRunID>)
-// rather than the code-repo agent/<agent>/<shortTaskID> convention. The driver
-// looks up the role by matching the repo URL against payload.Repos.
+// URL, the driver threads the env-provided MULTICA_REPO_NODE_BRANCH through to
+// the worktree (using that exact branch name verbatim, NOT a cs-cloud-computed
+// "node/<shortNodeRunID>"). multica creates the node branch off inst in the
+// Gitea wf repo at run-start and advertises the name via env; the driver looks
+// up the role by matching the repo URL against payload.Repos.
 func TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos(t *testing.T) {
 	requireGit(t)
 	upstream := initTestRepo(t)
@@ -932,6 +934,9 @@ func TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos(t *testing.T) {
 	taskID := "22222222-aaaa-bbbb-cccc-dddddddddddd"
 	wsID := "ws-1"
 	nodeRunID := "abcdef01-1234-5678-9abc-def012345678"
+	// The branch multica pre-created in the Gitea wf repo and pushed in the task
+	// env. The worktree must end up on THIS branch, not a cs-cloud-derived one.
+	envNodeBranch := "node/01-abcdef12"
 	taskRoot := filepath.Join(d.cfg.WorkspacesRoot, wsID, "tasks", taskID)
 	if err := os.MkdirAll(taskRoot, 0o755); err != nil {
 		t.Fatal(err)
@@ -949,8 +954,9 @@ func TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos(t *testing.T) {
 				{URL: upstream, Role: "delivery", Alias: "delivery"},
 			},
 			Env: map[string]string{
-				"MULTICA_GITLAB_TOKEN": "gitlab-pat",
-				"MULTICA_REPO_TOKEN":   "gitea-pat",
+				"MULTICA_GITLAB_TOKEN":     "gitlab-pat",
+				"MULTICA_REPO_TOKEN":       "gitea-pat",
+				"MULTICA_REPO_NODE_BRANCH": envNodeBranch,
 			},
 		},
 		taskRoot: taskRoot,
@@ -962,9 +968,9 @@ func TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos(t *testing.T) {
 		t.Fatalf("checkout: %v", err)
 	}
 	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
-	wantBranch := "node/" + shortID(nodeRunID) // node/abcdef01
-	if strings.TrimSpace(string(out)) != wantBranch {
-		t.Errorf("delivery branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+	if strings.TrimSpace(string(out)) != envNodeBranch {
+		t.Errorf("delivery branch = %q, want env-provided %q",
+			strings.TrimSpace(string(out)), envNodeBranch)
 	}
 }
 

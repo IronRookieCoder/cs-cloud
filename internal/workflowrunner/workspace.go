@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cs-cloud/internal/logger"
 )
 
 const gitTimeout = 5 * time.Minute
@@ -344,15 +346,19 @@ func (wm *WorkspaceManager) resolveBaseRef(cache, baseBranch string) (string, er
 // passes is cloned (the GitLab PAT is the real permission boundary).
 //
 // The branch name is role-aware:
-//   - role="delivery" → node/<shortNodeRunID> (matches multica's node-branch
-//     convention for deliverable PRs; the delivery repo is Gitea-hosted).
+//   - role="delivery" → nodeBranch verbatim (the branch multica pre-created off
+//     inst in the Gitea wf repo and advertised via MULTICA_REPO_NODE_BRANCH,
+//     e.g. "node/01-<shortHex>"). cs-cloud does NOT derive a "node/<short>"
+//     name — it must use the exact branch multica sent so the worktree, push,
+//     and PR head all agree with the remote.
 //   - role="code" or any other value (including "", the default) →
 //     agent/<sanitize(agent)>/<shortTaskID> (the existing code-repo convention).
 //
-// In practice multica only emits delivery repos for node-run tasks, so
-// nodeRunID is always present when role="delivery"; if it is missing we fall
-// back to the agent branch rather than producing an unhelpful "node/" prefix.
-func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken, role, nodeRunID string) (string, error) {
+// Defensive fallback: role="delivery" but nodeBranch="" (env missing — should
+// never happen for real document tasks since multica always sends it) falls
+// back to the agent branch and logs a warning, rather than producing an
+// unusable "node/"-prefixed partial name.
+func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken, role, nodeBranch string) (string, error) {
 	if err := validateID(workspaceID); err != nil {
 		return "", err
 	}
@@ -374,7 +380,7 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return "", err
 	}
-	branchName := deliveryBranch(nodeRunID, agentName, taskID, role)
+	branchName := deliveryBranch(nodeBranch, agentName, taskID, role)
 	if _, err := os.Stat(dir); err == nil {
 		// Existing worktree (prior round): reset + new branch.
 		if isGitWorktree(dir) {
@@ -401,12 +407,17 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 }
 
 // deliveryBranch picks the worktree branch for a repo checkout based on its
-// role. A "delivery" role with a populated nodeRunID produces the multica
-// node-branch convention (node/<shortNodeRunID>); everything else falls back to
-// the code-repo agent branch.
-func deliveryBranch(nodeRunID, agentName, taskID, role string) string {
-	if role == "delivery" && nodeRunID != "" {
-		return "node/" + shortID(nodeRunID)
+// role. A "delivery" role with a populated nodeBranch returns that branch
+// verbatim (multica owns the node-branch convention and pre-creates the branch
+// in the Gitea wf repo); everything else — including the defensive
+// role="delivery" but empty-nodeBranch case — falls back to the code-repo
+// agent branch.
+func deliveryBranch(nodeBranch, agentName, taskID, role string) string {
+	if role == "delivery" {
+		if nodeBranch != "" {
+			return nodeBranch
+		}
+		logger.Warn("workflow: delivery repo checkout missing MULTICA_REPO_NODE_BRANCH; falling back to agent branch")
 	}
 	return agentBranch(agentName, taskID)
 }

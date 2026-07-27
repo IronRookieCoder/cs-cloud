@@ -269,8 +269,11 @@ func TestCheckoutRepo_CreatesBranchWorktree(t *testing.T) {
 }
 
 // TestCheckoutRepo_DeliveryRoleUsesNodeBranch verifies a role="delivery" repo
-// checks out onto node/<shortNodeRunID> (matching multica's node-branch
-// convention for deliverable PRs), NOT agent/<agent>/<shortTaskID>.
+// checks out onto the branch multica pre-created and advertised via
+// MULTICA_REPO_NODE_BRANCH (e.g. "node/01-abcdef12"), NOT a cs-cloud-computed
+// "node/<shortNodeRunID>". multica owns the node-branch convention and creates
+// the branch in the Gitea wf repo at run-start; cs-cloud must use that exact
+// branch name so the worktree, the push, and the PR head all agree.
 func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
 	requireGit(t)
 	upstream := initTestRepo(t)
@@ -279,20 +282,51 @@ func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
 	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
 	_ = os.MkdirAll(taskRoot, 0o755)
 
-	// nodeRunID is a UUID; shortID keeps the first 8 hex chars.
-	nodeRunID := "abcdef01-1234-5678-9abc-def012345678"
+	// The branch name multica sent in the task env (multica creates this branch
+	// off inst in the Gitea wf repo at run-start). cs-cloud must use it verbatim.
+	nodeBranch := "node/01-abcdef12"
 	dir, err := wm.CheckoutRepo(
 		"ws-1", taskRoot, upstream, "csc",
 		"11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "",
-		"delivery", nodeRunID,
+		"delivery", nodeBranch,
 	)
 	if err != nil {
 		t.Fatalf("checkout: %v", err)
 	}
 	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
-	wantBranch := "node/" + shortID(nodeRunID) // node/abcdef01
+	if strings.TrimSpace(string(out)) != nodeBranch {
+		t.Errorf("delivery branch = %q, want %q (env-provided node branch)",
+			strings.TrimSpace(string(out)), nodeBranch)
+	}
+}
+
+// TestCheckoutRepo_DeliveryRoleMissingNodeBranchFallsBack verifies that when
+// role="delivery" but no env-provided node branch is threaded (multica should
+// always send one, but defensive code must not produce a "node/"-prefixed
+// partial name), CheckoutRepo falls back to the code-repo agent branch and
+// logs a warning instead of producing an unusable branch name.
+func TestCheckoutRepo_DeliveryRoleMissingNodeBranchFallsBack(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+
+	agent := "csc"
+	taskID := "55555555-aaaa-bbbb-cccc-dddddddddddd"
+	dir, err := wm.CheckoutRepo(
+		"ws-1", taskRoot, upstream, agent, taskID, "master", "",
+		"delivery", "", // missing — defensive fallback
+	)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+	wantBranch := agentBranch(agent, taskID)
 	if strings.TrimSpace(string(out)) != wantBranch {
-		t.Errorf("delivery branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+		t.Errorf("delivery-without-nodeBranch branch = %q, want fallback %q",
+			strings.TrimSpace(string(out)), wantBranch)
 	}
 }
 
@@ -319,9 +353,11 @@ func TestCheckoutRepo_CodeRoleDefaultsToAgentBranch(t *testing.T) {
 		taskRoot := filepath.Join(root, "ws-1", "tasks", tc.taskID)
 		_ = os.MkdirAll(taskRoot, 0o755)
 
+		// Last param is the env-provided node branch; irrelevant for non-delivery
+		// roles (the code path ignores it and uses agentBranch).
 		dir, err := wm.CheckoutRepo(
 			"ws-1", taskRoot, upstream, "csc", tc.taskID, "master", "",
-			tc.role, "somenoderun",
+			tc.role, "node/99-irrelevant",
 		)
 		if err != nil {
 			t.Fatalf("checkout role=%q: %v", tc.role, err)
