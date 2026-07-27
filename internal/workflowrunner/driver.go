@@ -382,18 +382,26 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		return "", nil
 	}
 
-	session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
-	if err != nil {
-		return "", fmt.Errorf("create chat session: %w", err)
-	}
-	if session.ID == "" {
-		return "", fmt.Errorf("multica returned empty chat session id")
+	// Resume: reuse the prior csc session id (still on disk in csc serve's
+	// store). Skip CreateChatSession so the conversation carries forward across
+	// rounds of the same (agent, issue). First round: create a new chat session.
+	sessionID := payload.PriorSessionID
+	if sessionID == "" {
+		session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
+		if err != nil {
+			return "", fmt.Errorf("create chat session: %w", err)
+		}
+		if session.ID == "" {
+			return "", fmt.Errorf("multica returned empty chat session id")
+		}
+		sessionID = session.ID
 	}
 
-	if err := d.client.PinTaskSession(ctx, payload.TaskID, session.ID, ""); err != nil {
+	// Pin the real workdir (task root) so the next round's prior_work_dir hits.
+	if err := d.client.PinTaskSession(ctx, payload.TaskID, sessionID, worktree); err != nil {
 		return "", fmt.Errorf("pin task session: %w", err)
 	}
-	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
+	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, sessionID); err != nil {
 		return "", fmt.Errorf("bind node run session: %w", err)
 	}
 
@@ -404,13 +412,13 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		// credentials multica pushed in the task payload. RunSession reuses
 		// this session, so the env must be present at creation.
 		env := d.runner.buildEnv(payload, worktree)
-		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree, env); err != nil {
-			logger.Warn("workflow: failed to bind local conversation session %s: %v", session.ID, err)
+		if err := d.deps.ConversationBinder.Bind(ctx, sessionID, worktree, env); err != nil {
+			logger.Warn("workflow: failed to bind local conversation session %s: %v", sessionID, err)
 		}
 	}
 
-	logger.Info("workflow: bound session %s to task %s node_run %s", session.ID, payload.TaskID, payload.NodeRunID)
-	return session.ID, nil
+	logger.Info("workflow: bound session %s to task %s node_run %s", sessionID, payload.TaskID, payload.NodeRunID)
+	return sessionID, nil
 }
 
 func chatSessionTitle(payload workflow.TaskRunPayload) string {

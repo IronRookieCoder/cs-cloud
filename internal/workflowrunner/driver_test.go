@@ -97,6 +97,7 @@ type fakeMultica struct {
 type pinSessionCall struct {
 	TaskID    string
 	SessionID string
+	WorkDir   string
 }
 
 type bindSessionCall struct {
@@ -205,7 +206,7 @@ func (f *fakeMultica) handler() http.Handler {
 			var req workflow.PinTaskSessionRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			f.mu.Lock()
-			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID})
+			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID, WorkDir: req.WorkDir})
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -756,6 +757,46 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 	}
 	if len(binds) != 1 || binds[0].NodeRunID != "nr-1" || binds[0].DeviceID != "dev-1" || binds[0].RuntimeID == "" || binds[0].SessionID != pins[0].SessionID {
 		t.Fatalf("unexpected bind calls: %+v", binds)
+	}
+}
+
+func TestBindSession_ReusesPriorSession(t *testing.T) {
+	f := newFakeMultica()
+	ts := httptest.NewServer(f.handler())
+	defer ts.Close()
+
+	d := &Driver{
+		deps: &Dependencies{
+			MulticaBaseURL: ts.URL,
+			DeviceID:       func() (string, error) { return "dev-1", nil },
+		},
+		client:           NewClient(ts.URL, ts.URL, tokenProvider("tok")),
+		workspaceManager: NewWorkspaceManager(t.TempDir()),
+		running:          map[string]*taskRecord{},
+		registrations:    map[string]string{"ws-1": "rt-1"},
+	}
+
+	workdir := "/some/taskroot"
+	sessionID, err := d.bindSession(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t1", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, PriorSessionID: "sess-prior",
+	}, workdir)
+	if err != nil {
+		t.Fatalf("bindSession: %v", err)
+	}
+	if sessionID != "sess-prior" {
+		t.Errorf("sessionID = %q, want reuse sess-prior", sessionID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sessions) != 0 {
+		t.Errorf("expected no CreateChatSession, got %d sessions", len(f.sessions))
+	}
+	if len(f.pinSessions) != 1 {
+		t.Fatalf("expected 1 pin call, got %d", len(f.pinSessions))
+	}
+	if f.pinSessions[0].WorkDir != workdir {
+		t.Errorf("pin work_dir = %q, want %q", f.pinSessions[0].WorkDir, workdir)
 	}
 }
 
