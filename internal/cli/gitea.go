@@ -130,7 +130,6 @@ type submitConfig struct {
 // The production impl (execGitOps) shells out to git.
 type gitOps interface {
 	Clone(authURL, branch, dir string) error
-	PrepareBranch(dir, nodeBranch string) error
 	WriteFile(dir, path string, content []byte) error
 	Commit(dir, message string) error
 	Push(dir, authURL, branch string) error
@@ -263,9 +262,9 @@ func submitDeliverable(cfg submitConfig) error {
 	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
 	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
 	// first, which created the delivery repo worktree at <taskRoot>/<repoName>/.
-	// Resolve that subdir — do NOT clone into a fresh temp dir. The env-provided
-	// MULTICA_GITEA_REPO matches the basename multica uses to build the clone
-	// URL, so it identifies the same subdir CheckoutRepo created.
+	// Resolve that subdir via the shared RepoWorktreeDir helper — the same
+	// helper CheckoutRepo and submitGitlabMR use — so all three paths
+	// (checkout, document submit, code --mr submit) derive the worktree identically.
 	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
 	if taskRoot == "" {
 		return fmt.Errorf("CS_CLOUD_WORKTREE not set (document submit must run after `cs-cloud repo checkout` inside a cs-cloud task)")
@@ -275,7 +274,7 @@ func submitDeliverable(cfg submitConfig) error {
 	if err != nil {
 		return err
 	}
-	worktree := filepath.Join(taskRoot, gctx.repo)
+	worktree := workflowrunner.RepoWorktreeDir(taskRoot, gctx.cloneURL)
 
 	docPath, err := gctx.deliverablePath(cfg.deliverableID)
 	if err != nil {
@@ -507,10 +506,6 @@ type execGitOps struct{}
 
 func (execGitOps) Clone(authURL, branch, dir string) error {
 	return runGitInDir("", "clone", "--depth", "1", "--single-branch", "--branch", branch, authURL, dir)
-}
-func (execGitOps) PrepareBranch(dir, nodeBranch string) error {
-	// -B resets the branch if it exists (idempotent re-submit from fresh clone).
-	return runGitInDir(dir, "checkout", "-B", nodeBranch, "HEAD")
 }
 func (execGitOps) WriteFile(dir, path string, content []byte) error {
 	full := filepath.Join(dir, path)

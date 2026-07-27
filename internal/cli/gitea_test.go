@@ -14,25 +14,20 @@ import (
 // with so tests can assert operations target the correct worktree (not the
 // bare task root).
 type fakeGitOps struct {
-	cloneCalls       []struct{ authURL, branch, dir string }
-	branchCalls      []string
-	written          []struct {
+	cloneCalls []struct{ authURL, branch, dir string }
+	written    []struct {
 		dir     string
 		path    string
 		content []byte
 	}
-	commitMsgs       []string
-	pushCalls        []struct{ dir, authURL, branch string }
+	commitMsgs        []string
+	pushCalls         []struct{ dir, authURL, branch string }
 	currentBranchDirs []string
-	currentBranch    string // value returned by CurrentBranch
+	currentBranch     string // value returned by CurrentBranch
 }
 
 func (f *fakeGitOps) Clone(authURL, branch, dir string) error {
 	f.cloneCalls = append(f.cloneCalls, struct{ authURL, branch, dir string }{authURL, branch, dir})
-	return nil
-}
-func (f *fakeGitOps) PrepareBranch(dir, nodeBranch string) error {
-	f.branchCalls = append(f.branchCalls, nodeBranch)
 	return nil
 }
 func (f *fakeGitOps) WriteFile(dir, path string, content []byte) error {
@@ -105,6 +100,10 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_GITEA_TOKEN", "pat-xyz")
 	t.Setenv("MULTICA_GITEA_OWNER", "t-aaa")
 	t.Setenv("MULTICA_GITEA_REPO", "wf-bbb")
+	// MULTICA_GITEA_CLONE_URL is what the document path feeds into
+	// RepoWorktreeDir to resolve the worktree subdir. Must match the
+	// <owner>/<repo>.git shape multica emits so repoName(cloneURL) = "wf-bbb".
+	t.Setenv("MULTICA_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
 	t.Setenv("MULTICA_GITEA_INST_BRANCH", "inst-cc")
 	t.Setenv("MULTICA_GITEA_NODE_BRANCH", "node/dd")
 	t.Setenv("MULTICA_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
@@ -126,16 +125,19 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}
 
 	// NO tmp-clone leftovers: the worktree already exists (agent ran checkout).
+	// (cloneCalls == 0 proves no tmp-clone; PrepareBranch was removed entirely.)
 	if len(fake.cloneCalls) != 0 {
 		t.Errorf("expected NO clone (worktree-based), got %+v", fake.cloneCalls)
 	}
-	if len(fake.branchCalls) != 0 {
-		t.Errorf("expected NO PrepareBranch (worktree-based), got %+v", fake.branchCalls)
-	}
 
 	// WriteFile + Commit + Push + CurrentBranch all operate on the delivery
-	// worktree subdir (<taskRoot>/<repoName>), NOT a random temp dir.
+	// worktree subdir (<taskRoot>/<repoName>), NOT a random temp dir or the
+	// bare task root. Same parity as the code-MR test (Fix 3).
 	wantWorktree := taskRoot + string(os.PathSeparator) + "wf-bbb"
+	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != wantWorktree {
+		t.Errorf("CurrentBranch dir = %+v, want %q (the delivery worktree subdir)",
+			fake.currentBranchDirs, wantWorktree)
+	}
 	if len(fake.written) != 1 || fake.written[0].dir != wantWorktree {
 		t.Errorf("expected write to worktree %q, got %+v", wantWorktree, fake.written)
 	}
@@ -144,6 +146,10 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}
 	if len(fake.commitMsgs) != 1 {
 		t.Errorf("expected one commit, got %+v", fake.commitMsgs)
+	}
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].dir != wantWorktree {
+		t.Errorf("Push dir = %+v, want %q (the delivery worktree subdir)",
+			fake.pushCalls, wantWorktree)
 	}
 	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "node/dd" {
 		t.Errorf("expected push of worktree branch node/dd, got %+v", fake.pushCalls)
@@ -295,8 +301,8 @@ func TestParseSubmitArgs(t *testing.T) {
 		{"missing file", []string{"--deliverable", "d1"}, "", "", false, "", true, "--file"},
 		{"deliverable no value", []string{"--deliverable"}, "", "", false, "", true, "--deliverable needs a value"},
 		{"unknown arg", []string{"--deliverable", "d1", "--bogus"}, "", "", false, "", true, "unknown argument"},
-	{"mr mode", []string{"--deliverable", "d1", "--mr", "--repo", "https://gl.test/g/r.git"}, "d1", "", true, "https://gl.test/g/r.git", false, ""},
-	{"mr without repo", []string{"--deliverable", "d1", "--mr"}, "", "", false, "", true, "--repo"},
+		{"mr mode", []string{"--deliverable", "d1", "--mr", "--repo", "https://gl.test/g/r.git"}, "d1", "", true, "https://gl.test/g/r.git", false, ""},
+		{"mr without repo", []string{"--deliverable", "d1", "--mr"}, "", "", false, "", true, "--repo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

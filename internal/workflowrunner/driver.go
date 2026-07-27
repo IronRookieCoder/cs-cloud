@@ -508,10 +508,8 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 	// multica owns the node-branch convention and injects the fully-formed
 	// branch name (e.g. "node/01-<shortHex>") via MULTICA_REPO_NODE_BRANCH.
 	// Thread it through verbatim — do not derive a "node/<short>" here.
-	nodeBranch := ""
-	if rec.payload.Env != nil {
-		nodeBranch = rec.payload.Env["MULTICA_REPO_NODE_BRANCH"]
-	}
+	// Map index on a nil map returns "" (the zero value), so no nil-guard needed.
+	nodeBranch := rec.payload.Env["MULTICA_REPO_NODE_BRANCH"]
 	return d.workspaceManager.CheckoutRepo(
 		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
 		rec.payload.Agent, taskID, baseBranch, token, role, nodeBranch,
