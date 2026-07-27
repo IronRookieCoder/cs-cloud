@@ -173,3 +173,47 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 		t.Fatalf("MULTICA_NODE_RUN_ID = %q, want nr-env", env["MULTICA_NODE_RUN_ID"])
 	}
 }
+
+func TestPrepare_TaskRootFresh(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc) // make exec.LookPath("csc") resolve
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(), AllowedAgents: []string{AgentCsc},
+	}
+	wm := NewWorkspaceManager(cfg.WorkspacesRoot)
+	tr := NewTaskRunner(wm, 0, cfg.AllowedAgents)
+
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "11111111-aaaa-bbbb-cccc-dddddddddddd", WorkspaceID: "ws-1", Agent: AgentCsc,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(cfg.WorkspacesRoot, "ws-1", "tasks", "11111111-aaaa-bbbb-cccc-dddddddddddd")
+	if worktree != want {
+		t.Errorf("taskRoot = %q, want %q", worktree, want)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Errorf("taskRoot not created: %v", err)
+	}
+}
+
+func TestPrepare_PriorWorkDirReused(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc)
+	root := t.TempDir()
+	prior := filepath.Join(root, "ws-1", "tasks", "prior-task")
+	_ = os.MkdirAll(prior, 0o755)
+	wm := NewWorkspaceManager(root)
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "new-task-id", WorkspaceID: "ws-1", Agent: AgentCsc, PriorWorkDir: prior,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if worktree != prior {
+		t.Errorf("taskRoot = %q, want reuse prior %q", worktree, prior)
+	}
+}

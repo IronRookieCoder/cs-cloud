@@ -105,15 +105,13 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 	return tr.RunPrepared(ctx, payload, worktree, agentPath)
 }
 
-// Prepare validates the agent, resolves its executable, and creates the task
-// worktree. It must be called before RunPrepared so the worktree path is
-// available when binding a conversation session.
+// Prepare determines the task root (reusing the prior workdir when resuming,
+// else a fresh per-task dir), ensures it exists, and pre-warms the mirror
+// caches for the task's Repos[] in the background so the agent's on-demand
+// `cs-cloud repo checkout` is fast. It returns the task root (the agent's cwd);
+// per-repo worktrees are created lazily by checkout, not here.
 func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
-	repoURL, err := tr.resolveRepoURL(ctx, payload)
-	if err != nil {
-		return "", "", fmt.Errorf("resolve repo: %w", err)
-	}
-
+	_ = ctx
 	if err := tr.validateAgent(payload.Agent); err != nil {
 		return "", "", err
 	}
@@ -126,11 +124,37 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 		return "", "", fmt.Errorf("resolve agent %q: %w", payload.Agent, err)
 	}
 
-	worktree, err = tr.workspaceManager.CreateWorktree(payload.WorkspaceID, payload.TaskID, repoURL, "HEAD")
-	if err != nil {
-		return "", "", fmt.Errorf("prepare worktree: %w", err)
+	taskRoot := payload.PriorWorkDir
+	if taskRoot == "" || !dirExists(taskRoot) {
+		taskRoot = tr.workspaceManager.TaskWorktreeDir(payload.WorkspaceID, payload.TaskID)
 	}
-	return worktree, agentPath, nil
+	if err := os.MkdirAll(taskRoot, 0o755); err != nil {
+		return "", "", fmt.Errorf("prepare task root: %w", err)
+	}
+
+	// Pre-warm mirror caches for all advertised repos (best-effort, background).
+	// The agent's checkout re-ensures (serialized per cache), so a missed warm-up
+	// just means a cold clone at checkout time.
+	go func() {
+		token := ""
+		if payload.Env != nil {
+			token = payload.Env["MULTICA_GITLAB_TOKEN"]
+		}
+		for _, r := range payload.Repos {
+			if r.URL == "" {
+				continue
+			}
+			_, _ = tr.workspaceManager.EnsureRepoReady(payload.WorkspaceID, r.URL, token)
+		}
+	}()
+
+	return taskRoot, agentPath, nil
+}
+
+// dirExists reports whether path is an existing directory.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 // RunPrepared runs the agent in the already-prepared worktree. It returns the
@@ -158,15 +182,6 @@ func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {
 		return []string{"-c", payload.Prompt}
 	}
 	return []string{payload.Prompt}
-}
-
-// resolveRepoURL returns the code repository the agent should clone into its
-// worktree. It prefers the repo URL multica pushed in the payload (populated
-// from the workspace/project code repos); when absent the task has no code
-// repo and the worktree is a scratch dir.
-func (tr *TaskRunner) resolveRepoURL(ctx context.Context, payload workflow.TaskRunPayload) (string, error) {
-	_ = ctx
-	return strings.TrimSpace(payload.RepoURL), nil
 }
 
 func (tr *TaskRunner) validateAgent(agent string) error {
