@@ -33,9 +33,10 @@ const maxCallbackOutputBytes = 256 * 1024
 type taskRecord struct {
 	cancel  context.CancelFunc
 	aborted bool
-	// payload + taskRoot let the localserver's repo-checkout RPC serve the
-	// running task's context (agent name, workspace, env token, cwd) without
-	// the CLI having to re-send them.
+	// payload is written once under d.mu in execute after Prepare; CheckoutRepo
+	// reads its fields without the lock. Safe only while payload is treated as
+	// read-only after that write — all current readers (CheckoutRepo, buildEnv,
+	// the pre-warm goroutine) treat it as immutable.
 	payload  workflow.TaskRunPayload
 	taskRoot string
 }
@@ -337,9 +338,12 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	var runErr error
 	if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
 		out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
-		// Resume failure fallback: if resuming the prior session failed to make
-		// progress, retry once with a fresh session (the prior session may be
-		// corrupt on disk). Mirrors multica daemon.go:2662-2677.
+		// Resume failure fallback: if the first RunCSCSession failed and we were
+		// resuming a prior session, retry once with a fresh session (the prior
+		// session may be corrupt on disk). Unlike multica's daemon.go:2662, which
+		// checks result.SessionID == "" to retry only on session-establishment
+		// failures, cs-cloud pre-binds the session in bindSession and has no
+		// equivalent signal — so this retries on any runErr. Bounded to one retry.
 		if runErr != nil && payload.PriorSessionID != "" && !d.aborted(payload.TaskID) {
 			logger.Warn("workflow: resumed session failed (%v); retrying with fresh session", runErr)
 			payload.PriorSessionID = "" // force bindSession to create a fresh chat session

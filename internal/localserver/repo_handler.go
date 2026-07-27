@@ -23,6 +23,14 @@ func (s *Server) handleRepoCheckout(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
 		return
 	}
+	if err := s.workflow.Health(); err != nil {
+		reason := err.Error()
+		if s.workflowErr != nil {
+			reason = "workflow driver disabled: " + s.workflowErr.Error()
+		}
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", reason)
+		return
+	}
 	var req repoCheckoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())

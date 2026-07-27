@@ -798,6 +798,9 @@ func TestBindSession_ReusesPriorSession(t *testing.T) {
 	if f.pinSessions[0].WorkDir != workdir {
 		t.Errorf("pin work_dir = %q, want %q", f.pinSessions[0].WorkDir, workdir)
 	}
+	if len(f.bindSessions) != 1 || f.bindSessions[0].SessionID != "sess-prior" {
+		t.Errorf("bind node-run session: %+v", f.bindSessions)
+	}
 }
 
 func TestDriverCheckoutRepo(t *testing.T) {
@@ -911,5 +914,57 @@ func TestExecute_ResumeFailureRetriesFresh(t *testing.T) {
 	defer fm.mu.Unlock()
 	if len(fm.sessions) != 1 {
 		t.Errorf("expected 1 CreateChatSession (fresh retry), got %d", len(fm.sessions))
+	}
+}
+
+// TestExecute_NonResumeFailureDoesNotRetry verifies that when there is no prior
+// session to resume (first round), a RunCSCSession failure does NOT trigger the
+// fresh-session retry — the retry path is gated on PriorSessionID != "".
+func TestExecute_NonResumeFailureDoesNotRetry(t *testing.T) {
+	installFakeAgent(t, AgentCsc)
+
+	flaky := &flakySessionRunner{} // call 1 fails, call 2 would succeed — but must not be reached
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot:    t.TempDir(),
+		CacheDir:          t.TempDir(),
+		SyncInterval:      time.Hour,
+		GCInterval:        time.Hour,
+		HeartbeatInterval: time.Hour,
+		AgentTimeout:      time.Minute,
+		AllowedAgents:     []string{AgentCsc},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  flaky,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.registrations["ws-1"]
+		return ok
+	})
+
+	err := d.execute(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t-fresh", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, Prompt: "do work",
+		// PriorSessionID OMITTED (first round)
+	}, &taskRecord{})
+	if err == nil {
+		t.Error("expected task to fail (flaky runner fails on call 1, no retry)")
+	}
+	if flaky.calls != 1 {
+		t.Errorf("flaky.calls = %d, want 1 (no retry on non-resume failure)", flaky.calls)
 	}
 }

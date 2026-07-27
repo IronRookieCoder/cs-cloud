@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,8 +27,19 @@ func TestRunRepoCheckout(t *testing.T) {
 	t.Setenv("MULTICA_TASK_ID", "t1")
 
 	cfg := checkoutConfig{repoURL: "https://gitlab/o/r.git"}
-	if err := runRepoCheckout(cfg); err != nil {
+	// capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err := runRepoCheckout(cfg)
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if err != nil {
 		t.Fatalf("runRepoCheckout: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "/work/repo" {
+		t.Errorf("stdout = %q, want /work/repo", strings.TrimSpace(string(out)))
 	}
 }
 

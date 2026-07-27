@@ -7,10 +7,34 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 	"cs-cloud/internal/workflowrunner"
 )
+
+// newStartedTestDriver returns a started workflow driver whose Health() passes,
+// for handler tests that need to get past the Health() gate. Points at a dummy
+// multica URL; CheckoutRepo does not need a real multica connection.
+func newStartedTestDriver(t *testing.T) *workflowrunner.Driver {
+	t.Helper()
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+	}
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
+		MulticaBaseURL: "http://localhost:1",
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	return d
+}
 
 // TestHandleRepoCheckout_NoDriver verifies the nil-driver 404 path: when the
 // workflow subsystem is not registered, the endpoint reports unavailable
@@ -27,10 +51,10 @@ func TestHandleRepoCheckout_NoDriver(t *testing.T) {
 }
 
 // TestHandleRepoCheckout_BadJSON verifies that a malformed body is rejected
-// with 400 before the driver is touched. Uses a non-nil-but-unstarted driver:
-// the handler validates before calling CheckoutRepo, so Start() is not needed.
+// with 400. The driver is started so the Health() gate passes, isolating the
+// 400 to the JSON decode failure.
 func TestHandleRepoCheckout_BadJSON(t *testing.T) {
-	d := workflowrunner.NewDriver(workflow.Config{}, nil)
+	d := newStartedTestDriver(t)
 	s := New(WithWorkflow(d))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/repo/checkout", strings.NewReader("{not json"))
@@ -42,10 +66,10 @@ func TestHandleRepoCheckout_BadJSON(t *testing.T) {
 }
 
 // TestHandleRepoCheckout_MissingFields verifies that missing task_id or
-// repo_url is rejected with 400. The handler never reaches CheckoutRepo, so an
-// unstarted driver is sufficient.
+// repo_url is rejected with 400. The driver is started so the Health() gate
+// passes; the handler never reaches CheckoutRepo.
 func TestHandleRepoCheckout_MissingFields(t *testing.T) {
-	d := workflowrunner.NewDriver(workflow.Config{}, nil)
+	d := newStartedTestDriver(t)
 	s := New(WithWorkflow(d))
 
 	cases := []struct {
@@ -70,11 +94,11 @@ func TestHandleRepoCheckout_MissingFields(t *testing.T) {
 }
 
 // TestHandleRepoCheckout_DriverError verifies that a CheckoutRepo failure
-// surfaces as a 500 CHECKOUT_FAILED. Using an unstarted driver: CheckoutRepo
-// looks up a running task and returns an error when none exists, without
-// needing git or a multica connection.
+// surfaces as a 500 CHECKOUT_FAILED. The driver is started so the Health() gate
+// passes; CheckoutRepo looks up a running task and returns an error when none
+// exists, without needing git or a multica connection.
 func TestHandleRepoCheckout_DriverError(t *testing.T) {
-	d := workflowrunner.NewDriver(workflow.Config{}, nil)
+	d := newStartedTestDriver(t)
 	s := New(WithWorkflow(d))
 
 	b, _ := json.Marshal(map[string]string{"task_id": "no-such-task", "repo_url": "https://x/y.git"})
