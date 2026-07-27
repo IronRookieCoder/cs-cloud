@@ -23,3 +23,18 @@ func TestTaskRunPayloadReposAndDeliverables(t *testing.T) {
 		t.Errorf("report endpoint: %+v", p.Deliverables[0].Report)
 	}
 }
+
+func TestTaskRunPayloadPriorSession(t *testing.T) {
+	raw := `{"task_id":"t1","agent":"csc","prompt":"p",
+		"prior_session_id":"sess-x","prior_work_dir":"/prior/dir"}`
+	var p TaskRunPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.PriorSessionID != "sess-x" {
+		t.Errorf("prior_session_id = %q", p.PriorSessionID)
+	}
+	if p.PriorWorkDir != "/prior/dir" {
+		t.Errorf("prior_work_dir = %q", p.PriorWorkDir)
+	}
+}

@@ -108,6 +108,13 @@ type TaskRunPayload struct {
 	Kind         string            `json:"kind,omitempty"`
 	Repos        []RepoSpec        `json:"repos,omitempty"`
 	Deliverables []DeliverableSpec `json:"deliverables,omitempty"`
+	// PriorSessionID is the csc session id of the last task on the same
+	// (agent, issue), letting this task resume the conversation. Empty on first
+	// round / manual rerun / runtime mismatch. Mirrors multica's payload.
+	PriorSessionID string `json:"prior_session_id,omitempty"`
+	// PriorWorkDir is the workdir of the last task on the same (agent, issue),
+	// so this task reuses (resets) the same checkout. Empty on first round.
+	PriorWorkDir string `json:"prior_work_dir,omitempty"`
 }
 
 // CreateChatSessionRequest mirrors multica's POST
