@@ -111,7 +111,6 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 // `cs-cloud repo checkout` is fast. It returns the task root (the agent's cwd);
 // per-repo worktrees are created lazily by checkout, not here.
 func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
-	_ = ctx
 	if err := tr.validateAgent(payload.Agent); err != nil {
 		return "", "", err
 	}
@@ -136,10 +135,7 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 	// The agent's checkout re-ensures (serialized per cache), so a missed warm-up
 	// just means a cold clone at checkout time.
 	go func() {
-		token := ""
-		if payload.Env != nil {
-			token = payload.Env["MULTICA_GITLAB_TOKEN"]
-		}
+		token := payload.Env["MULTICA_GITLAB_TOKEN"]
 		for _, r := range payload.Repos {
 			if r.URL == "" {
 				continue

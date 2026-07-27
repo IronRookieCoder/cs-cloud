@@ -217,3 +217,27 @@ func TestPrepare_PriorWorkDirReused(t *testing.T) {
 		t.Errorf("taskRoot = %q, want reuse prior %q", worktree, prior)
 	}
 }
+
+func TestPrepare_PriorWorkDirMissingFallsBackToFresh(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+
+	// PriorWorkDir set but does NOT exist on disk (e.g. GC'd, or different device).
+	missingPrior := filepath.Join(root, "ws-1", "tasks", "gone-task")
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "new-task-id", WorkspaceID: "ws-1", Agent: AgentCsc, PriorWorkDir: missingPrior,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(root, "ws-1", "tasks", "new-task-id") // TaskWorktreeDir
+	if worktree != want {
+		t.Errorf("taskRoot = %q, want fresh fallback %q", worktree, want)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Errorf("fresh taskRoot not created: %v", err)
+	}
+}
