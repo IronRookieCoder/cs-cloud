@@ -216,6 +216,8 @@ func dispatch(a *app.App) error {
 		return serve(a)
 	case "gc":
 		return gc(a)
+	case "workflow":
+		return workflowCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
@@ -258,6 +260,7 @@ func printUsage() {
 		{"logout", "Delete credentials and device info"},
 		{"serve", "Run server in foreground (no daemon)"},
 		{"gc", "Remove expired attachments and report freed bytes"},
+		{"workflow", "Manage multica workflow resources"},
 	}
 	fmt.Print(renderKV(cmds))
 }

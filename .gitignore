@@ -20,3 +20,7 @@ device.json
 data/
 internal/localserver/apidocs/
 .claude/
+cs-cloud
+
+# cs-cloud local e2e/runtime artifacts (logs, worktrees, state)
+.e2e-runtime/

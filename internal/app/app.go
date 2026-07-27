@@ -8,6 +8,7 @@ import (
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
+	"cs-cloud/internal/workflowrunner"
 )
 
 type App struct {
@@ -23,7 +24,7 @@ func New() (*App, error) {
 	return &App{rootDir: platform.AppDir(), cfg: cfg}, nil
 }
 
-func (a *App) RootDir() string      { return a.rootDir }
+func (a *App) RootDir() string        { return a.rootDir }
 func (a *App) Config() *config.Config { return a.cfg }
 
 func (a *App) EnsureRootDir() error {
@@ -42,6 +43,25 @@ func (a *App) OIDCBaseURL(credBaseURL string) string {
 
 func (a *App) Credentials() (*provider.Credentials, error) {
 	return provider.LoadCredentials()
+}
+
+func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
+	deps := &workflowrunner.Dependencies{
+		MulticaBaseURL: a.cfg.Workflow.MulticaBaseURL,
+		UserBaseURL:    a.cfg.Workflow.MulticaBaseURL,
+		TokenProvider:  a.Credentials,
+		DeviceID: func() (string, error) {
+			dev, err := a.Device()
+			if err != nil {
+				return "", err
+			}
+			if dev == nil {
+				return "", nil
+			}
+			return dev.DeviceID, nil
+		},
+	}
+	return workflowrunner.NewDriver(a.cfg.Workflow, deps)
 }
 
 func (a *App) Device() (*device.DeviceInfo, error) {

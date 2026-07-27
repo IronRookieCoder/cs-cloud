@@ -241,13 +241,31 @@ updater.check_latest（Gitee Release API，含失败重试）
 
 当前已支持：`csc`、`cs`、`acp`（兼容协议）。
 
+### 接入新的常驻子系统（以 workflow 为例）
+
+当前 cs-cloud 的常驻子系统由 `internal/localserver/server.go` 直接持有并在 `Start` / `Shutdown` 中显式启停（与 `filewatcher`、`gitwatcher` 等保持一致）。新增一个常驻子系统：
+
+1. 在 `internal/localserver/server.go` 的 `Server` 结构体中新增字段（如 `workflow *workflowrunner.Driver`）。
+2. 提供 `WithXxx(...)` Option，在 `localserver.New(...)` 调用处注入（如 `internal/cli/serve.go`、`internal/cli/daemon.go`）。
+3. 在 `Server.Start()` 中显式调用其 `Start()` 方法；若为业务关键组件，启动失败应直接返回 error 阻断 daemon 启动。
+4. 在 `Server.Shutdown()` 中显式调用其 `Stop()` 方法。
+5. handler 直接通过 `Server` 字段调用子系统能力，无需经过 `AgentManager`。
+
+当前已接入：`workflow`（cs-workflow 迁移，调用 multica 后端并暴露 `/api/v1/workflow/*` 路由）。当前实现的路由为：
+
+- `GET  /api/v1/workflow/health` — driver 健康检查
+- `POST /api/v1/workflow/tasks/{id}/run` — 接收云端推送的任务（异步返回 `accepted`）
+- `POST /api/v1/workflow/tasks/{id}/abort` — 中止任务
+
+handler 实现位于 `internal/localserver/workflow_handler.go`，路由注册在 `internal/localserver/server.go`。
+
 ### 接入新的本地 API
 
-`internal/localserver/router.go` 集中注册路由：
+`internal/localserver/server.go` 集中注册路由，handler 可放在 `internal/localserver/` 下（如 `internal/localserver/workflow_handler.go`）：
 
-1. 在 `internal/localserver/handlers/` 下新增 handler
-2. 在 router 注册路由 + Swagger 注解
-3. 自动出现在 `/swagger/index.html`
+1. 新增 handler 方法
+2. 在 `internal/localserver/server.go` 的 `New()` 中注册路由 + 必要选项（如 `WithWorkflowDriver`）
+3. 如需 Swagger，补充 `openapi.json` 与 `/docs` 路由（当前 workflow 路由为内部 Gateway 使用，未进 Swagger）
 
 ### 接入新平台
 

@@ -15,6 +15,7 @@ import (
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/terminal"
 	"cs-cloud/internal/updater"
+	"cs-cloud/internal/workflowrunner"
 )
 
 type TunnelStatus struct {
@@ -60,6 +61,13 @@ type Server struct {
 
 	dispatcher *CommandDispatcher
 
+	workflow *workflowrunner.Driver
+	// workflowErr records why the workflow driver failed to start. Non-nil
+	// means the subsystem is disabled but the daemon keeps serving its core
+	// business (tunnel, agent proxy); workflow endpoints report it as
+	// unavailable.
+	workflowErr error
+
 	tunnelStatus TunnelStatusProvider
 
 	prewarmMu  sync.Mutex
@@ -72,8 +80,8 @@ type Server struct {
 
 	// Post-upload attachment sweep debounce. Guards the lazy GC triggered by
 	// handleAttachmentUpload so bursty uploads don't pay N× the scan cost.
-	gcSweepMu    sync.Mutex
-	lastGcSweep  time.Time
+	gcSweepMu   sync.Mutex
+	lastGcSweep time.Time
 
 	// Host event watchers
 	fileWatcher *filewatcher.Watcher
@@ -91,11 +99,11 @@ func New(opts ...Option) *Server {
 		prewarmMap:  make(map[string]*prewarmState),
 		tuiRegistry: NewTUIRegistry(),
 	}
+	s.manager = runtime.NewAgentManager(s.eventBus)
 	for _, o := range opts {
 		o(s)
 	}
 	s.ringBuffer = NewRingBuffer(s.eventBus)
-	s.manager = runtime.NewAgentManager(s.eventBus)
 
 	// Initialize host event watchers
 	s.fileWatcher = filewatcher.New(s.eventBus)
@@ -205,6 +213,10 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /commands", s.handleCommandDispatch)
 	api.HandleFunc("GET /commands/status", s.handleCommandStatus)
 
+	api.HandleFunc("GET /workflow/health", s.handleWorkflowHealth)
+	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
+	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
+
 	s.http = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -228,6 +240,12 @@ func WithConfig(cfg *config.Config) Option {
 
 func WithRootDir(dir string) Option {
 	return func(s *Server) { s.rootDir = dir }
+}
+
+func WithWorkflow(d *workflowrunner.Driver) Option {
+	return func(s *Server) {
+		s.workflow = d
+	}
 }
 
 func (s *Server) Manager() *runtime.AgentManager {
@@ -267,6 +285,17 @@ func (s *Server) Start(addr string) error {
 	if s.gitWatcher != nil {
 		if err := s.gitWatcher.Start(ctx, s.fileWatcher); err != nil {
 			logger.Error("Failed to start git watcher: %v", err)
+		}
+	}
+
+	if s.workflow != nil {
+		if err := s.workflow.Start(); err != nil {
+			// The workflow subsystem is optional. A daemon registered
+			// against a server without the workflow backend (no multica
+			// base URL) must still come up — degrade to "workflow
+			// disabled" instead of failing the whole server.
+			logger.Warn("workflow driver disabled: %v", err)
+			s.workflowErr = err
 		}
 	}
 
@@ -314,6 +343,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Stop the TUI registry's cleanup goroutine.
 	if s.tuiRegistry != nil {
 		s.tuiRegistry.Stop()
+	}
+
+	if s.workflow != nil {
+		if err := s.workflow.Stop(); err != nil {
+			logger.Error("Failed to stop workflow driver: %v", err)
+		}
 	}
 
 	s.manager.KillAll()

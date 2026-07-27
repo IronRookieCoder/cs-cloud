@@ -90,7 +90,12 @@ func runDaemon(a *app.App) error {
 	}
 
 	logger.Info("[debug] initializing local server...")
-	srv := localserver.New(localserver.WithVersion(version.Get()), localserver.WithConfig(a.Config()), localserver.WithRootDir(a.RootDir()))
+	srv := localserver.New(
+		localserver.WithVersion(version.Get()),
+		localserver.WithConfig(a.Config()),
+		localserver.WithRootDir(a.RootDir()),
+		localserver.WithWorkflow(a.NewWorkflowDriver()),
+	)
 
 	ctx := context.Background()
 	agentType := a.Config().DefaultAgent
@@ -101,6 +106,7 @@ func runDaemon(a *app.App) error {
 		logger.Error("please check your agent_command configuration works correctly in your terminal")
 		return err
 	}
+	srv.BindWorkflowSessionBinder()
 	logger.Info("agent started (endpoint=%s)", srv.Manager().Endpoint())
 
 	logger.Info("[debug] agent init done, starting HTTP server...")

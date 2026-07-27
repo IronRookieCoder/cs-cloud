@@ -5,23 +5,66 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"cs-cloud/internal/platform"
+	"cs-cloud/internal/workflow"
 )
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		CloudBaseURL:   platform.Getenv("CLOUD_BASE_URL"),
-		BaseURL:        platform.Getenv("COSTRICT_BASE_URL"),
-		DefaultShell:   platform.Getenv("CS_CLOUD_SHELL"),
-		DefaultAgent:   platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
-		AgentPath:      platform.Getenv("CS_CLOUD_AGENT_PATH"),
-		AgentCommand:   platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
+		CloudBaseURL:        platform.Getenv("CLOUD_BASE_URL"),
+		BaseURL:             platform.Getenv("COSTRICT_BASE_URL"),
+		DefaultShell:        platform.Getenv("CS_CLOUD_SHELL"),
+		DefaultAgent:        platform.Getenv("CS_CLOUD_DEFAULT_AGENT"),
+		AgentPath:           platform.Getenv("CS_CLOUD_AGENT_PATH"),
+		AgentCommand:        platform.Getenv("CS_CLOUD_AGENT_COMMAND"),
 		AgentVersionCommand: platform.Getenv("CS_CLOUD_AGENT_VERSION_COMMAND"),
+		Workflow:            workflow.DefaultConfig(),
 	}
 
 	if cfg.CloudBaseURL == "" {
 		cfg.CloudBaseURL = platform.Getenv("COSTRICT_CLOUD_BASE_URL")
+	}
+
+	// Workflow config from environment variables.
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL"); v != "" {
+		cfg.Workflow.MulticaBaseURL = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_WORKSPACES_ROOT"); v != "" {
+		cfg.Workflow.WorkspacesRoot = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_CACHE_DIR"); v != "" {
+		cfg.Workflow.CacheDir = v
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_SYNC_INTERVAL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.SyncInterval = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_INTERVAL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCInterval = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.HeartbeatInterval = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.AgentTimeout = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Workflow.MaxConcurrentTasks = n
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_ALLOWED_AGENTS"); v != "" {
+		cfg.Workflow.AllowedAgents = strings.Split(v, ",")
 	}
 
 	if envJSON := platform.Getenv("CS_CLOUD_AGENT_ENV"); envJSON != "" {
@@ -78,6 +121,7 @@ func Load() (*Config, error) {
 				if cfg.IdleBufferSeconds == 0 {
 					cfg.IdleBufferSeconds = fileCfg.IdleBufferSeconds
 				}
+				cfg.Workflow = mergeWorkflowConfig(cfg.Workflow, fileCfg.Workflow)
 			}
 		}
 	}
@@ -122,7 +166,73 @@ func Load() (*Config, error) {
 		cfg.IdleBufferSeconds = 30
 	}
 
+	// If the workflow multica base URL is not explicitly configured and we
+	// have a CoStrict base URL, derive the test/enterprise workflow backend
+	// URL from it. Explicit env/file config always wins. The URL is not
+	// required at config load time so that commands like stop/restart work
+	// without a network configuration; workflow components validate it when
+	// they start.
+	if cfg.Workflow.MulticaBaseURL == "" && cfg.BaseURL != "" {
+		cfg.Workflow.MulticaBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
+	}
+
 	return cfg, nil
+}
+
+// parsePositiveDuration parses a non-empty duration string and returns the
+// value only when it is strictly positive. Zero/negative durations are invalid
+// for loop intervals (a non-positive heartbeat/sync/gc interval makes the
+// runtime loop return immediately), so they are ignored like parse errors.
+func parsePositiveDuration(v string) (time.Duration, bool) {
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
+	defaults := workflow.DefaultConfig()
+	if file.MulticaBaseURL != "" && current.MulticaBaseURL == "" {
+		current.MulticaBaseURL = file.MulticaBaseURL
+	}
+	if file.WorkspacesRoot != "" && current.WorkspacesRoot == defaults.WorkspacesRoot {
+		current.WorkspacesRoot = file.WorkspacesRoot
+	}
+	if file.CacheDir != "" && current.CacheDir == defaults.CacheDir {
+		current.CacheDir = file.CacheDir
+	}
+	if file.SyncInterval != 0 && current.SyncInterval == defaults.SyncInterval {
+		current.SyncInterval = file.SyncInterval
+	}
+	if file.GCInterval != 0 && current.GCInterval == defaults.GCInterval {
+		current.GCInterval = file.GCInterval
+	}
+	if file.HeartbeatInterval != 0 && current.HeartbeatInterval == defaults.HeartbeatInterval {
+		current.HeartbeatInterval = file.HeartbeatInterval
+	}
+	if file.AgentTimeout != 0 && current.AgentTimeout == defaults.AgentTimeout {
+		current.AgentTimeout = file.AgentTimeout
+	}
+	if file.MaxConcurrentTasks != 0 && current.MaxConcurrentTasks == defaults.MaxConcurrentTasks {
+		current.MaxConcurrentTasks = file.MaxConcurrentTasks
+	}
+	if len(file.AllowedAgents) > 0 && stringSlicesEqual(current.AllowedAgents, defaults.AllowedAgents) {
+		current.AllowedAgents = file.AllowedAgents
+	}
+	return current
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func configFilePath() (string, error) {

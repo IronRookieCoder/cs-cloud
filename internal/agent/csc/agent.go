@@ -25,15 +25,15 @@ type Agent struct {
 	id    string
 	state agent.AgentState
 
-	command    agent.Command
-	workDir    string
-	customEnv  map[string]string
-	endpoint   string
+	command     agent.Command
+	workDir     string
+	customEnv   map[string]string
+	endpoint    string
 	rawEndpoint string
-	cmd        *exec.Cmd
-	waitCh     chan error
-	cancel     context.CancelFunc
-	adapter    *AdapterServer
+	cmd         *exec.Cmd
+	waitCh      chan error
+	cancel      context.CancelFunc
+	adapter     *AdapterServer
 
 	sessionID    string
 	modelInfo    *agent.ModelInfo
@@ -50,18 +50,18 @@ func NewAgent(cfg agent.AgentConfig) *Agent {
 		}
 	}
 	return &Agent{
-		id:         cfg.ID,
-		command:    cmd,
-		workDir:    cfg.WorkingDir,
-		customEnv:  cfg.CustomEnv,
-		state:      agent.StateIdle,
+		id:        cfg.ID,
+		command:   cmd,
+		workDir:   cfg.WorkingDir,
+		customEnv: cfg.CustomEnv,
+		state:     agent.StateIdle,
 		httpClient: &http.Client{
 			Timeout: 300 * time.Second,
 		},
 	}
 }
 
-func (a *Agent) ID() string     { return a.id }
+func (a *Agent) ID() string      { return a.id }
 func (a *Agent) Backend() string { return "csc" }
 func (a *Agent) Driver() string  { return "http" }
 func (a *Agent) PID() int {
@@ -330,7 +330,7 @@ type cscSession struct {
 }
 
 func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
-	respBody, err := a.doPost(ctx, "/session/", map[string]any{})
+	respBody, err := a.doPost(ctx, "/session", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -339,6 +339,284 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 		return nil, fmt.Errorf("parse session response: %w", err)
 	}
 	return &session, nil
+}
+
+// CreateSession creates a csc session with the requested ID and working
+// directory. If a session with that ID already exists, it returns without
+// error. This lets workflow tasks expose a stable conversation URL that
+// matches the multica chat_session.id.
+func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string) error {
+	return a.createSessionWithEnv(ctx, sessionID, cwd, env)
+}
+
+func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string, env []string) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+
+	// Avoid replacing an existing active session.
+	resp, err := a.doRawGet(ctx, "/session/"+sessionID)
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+	}
+
+	body := map[string]any{
+		"session_id": sessionID,
+		// "default" mode: read-only tools auto-allow, everything else asks.
+		// The asks surface as permission.asked/question.asked SSE events so
+		// the web UI can prompt the user while the task runs — bypassPermissions
+		// would suppress them entirely and leave the session unsupervised.
+		"permission_mode": "default",
+	}
+	if cwd != "" {
+		body["cwd"] = cwd
+	}
+	if len(env) > 0 {
+		body["env"] = envSliceToMap(env)
+	}
+	// csc registers POST /session without a trailing slash; Hono matches
+	// strictly, so "/session/" would 404.
+	_, err = a.doPost(ctx, "/session", body)
+	return err
+}
+
+// PromptSession sends a prompt to an existing csc session asynchronously.
+func (a *Agent) PromptSession(ctx context.Context, sessionID, content string) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	body := map[string]any{"content": content}
+	_, err := a.doPost(ctx, "/session/"+sessionID+"/prompt_async", body)
+	return err
+}
+
+// sessionEvent is one parsed SSE event from the csc event stream.
+type sessionEvent struct {
+	name string
+	data map[string]any
+}
+
+// subscribeSessionEvents opens the csc event stream filtered to the session
+// and returns only after the HTTP connection is established. Callers can then
+// send a prompt without missing the busy/idle events it produces.
+func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<-chan sessionEvent, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.rawEndpoint+"/event?session_id="+sessionID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use a dedicated client without a request timeout so the SSE stream can
+	// stay open for the full workflow agent timeout.
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("event stream returned status %d", resp.StatusCode)
+	}
+
+	ch := make(chan sessionEvent, 64)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		var event string
+		var data map[string]any
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "event: ") {
+				event = strings.TrimPrefix(line, "event: ")
+				continue
+			}
+			if strings.HasPrefix(line, "data: ") {
+				data = nil
+				_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data)
+				continue
+			}
+			if line == "" {
+				if event != "" {
+					select {
+					case ch <- sessionEvent{name: event, data: data}:
+					case <-ctx.Done():
+						return
+					}
+				}
+				event = ""
+				data = nil
+			}
+		}
+	}()
+	return ch, nil
+}
+
+// waitForSessionDone consumes session events until the prompt finishes. It
+// gates completion on having seen the session go busy first, so an idle event
+// emitted before our prompt starts cannot end the wait early.
+func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
+	busy := false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				return fmt.Errorf("event stream closed before the session finished")
+			}
+			switch ev.name {
+			case "session.status":
+				if status, ok := ev.data["status"].(map[string]any); ok {
+					if t, _ := status["type"].(string); t == "busy" {
+						busy = true
+					} else if t == "idle" && busy {
+						return nil
+					}
+				}
+			case "session.idle":
+				if busy {
+					return nil
+				}
+			}
+		}
+	}
+}
+
+// abortSession asks csc to abort the currently running prompt in a session.
+func (a *Agent) abortSession(ctx context.Context, sessionID string) error {
+	_, err := a.doPost(ctx, "/session/"+sessionID+"/abort", nil)
+	return err
+}
+
+// GetSessionMessages fetches the message list for a csc session.
+func (a *Agent) GetSessionMessages(ctx context.Context, sessionID string) (json.RawMessage, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.rawEndpoint+"/session/"+sessionID+"/message", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return json.RawMessage(body), nil
+}
+
+// RunSession creates (or ensures) a csc session, sends the prompt, waits for
+// the session to finish, and returns the final assistant message text. The
+// event subscription is established before the prompt is sent so the
+// busy/idle events cannot race past the subscriber. If the context is
+// cancelled (e.g. the task is aborted), the session prompt is aborted
+// best-effort so the agent does not keep running detached.
+func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {
+	if err := a.createSessionWithEnv(ctx, sessionID, cwd, env); err != nil {
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+
+	// Derive a cancelable context so the SSE subscription is closed when the
+	// run ends instead of leaking one open connection per task.
+	subCtx, stopSub := context.WithCancel(ctx)
+	defer stopSub()
+
+	events, err := a.subscribeSessionEvents(subCtx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe events: %w", err)
+	}
+	if err := a.PromptSession(ctx, sessionID, prompt); err != nil {
+		return nil, fmt.Errorf("send prompt: %w", err)
+	}
+	if err := waitForSessionDone(subCtx, events); err != nil {
+		abortCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = a.abortSession(abortCtx, sessionID)
+		cancel()
+		return nil, fmt.Errorf("wait for completion: %w", err)
+	}
+	body, err := a.GetSessionMessages(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get messages: %w", err)
+	}
+	text, err := extractLastAssistantText(body)
+	if err != nil {
+		return nil, fmt.Errorf("extract output: %w", err)
+	}
+	return []byte(text), nil
+}
+
+func envSliceToMap(env []string) map[string]string {
+	result := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func extractLastAssistantText(body json.RawMessage) (string, error) {
+	var envelope struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", fmt.Errorf("parse messages: %w", err)
+	}
+
+	var parts []any
+	for i := len(envelope.Messages) - 1; i >= 0; i-- {
+		msg := envelope.Messages[i]
+		role, _ := msg["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		p, _ := msg["parts"].([]any)
+		if len(p) == 0 {
+			continue
+		}
+		parts = p
+		break
+	}
+	if parts == nil {
+		return "", nil
+	}
+
+	var b strings.Builder
+	for _, p := range parts {
+		part, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := part["type"].(string); t != "text" {
+			continue
+		}
+		if text, ok := part["text"].(string); ok && text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(text)
+		}
+	}
+	return b.String(), nil
 }
 
 func (a *Agent) subscribeEvents(ctx context.Context) {

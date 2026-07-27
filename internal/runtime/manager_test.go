@@ -107,3 +107,4 @@ func TestRestartDefaultAgentNonNilMessage(t *testing.T) {
 		t.Error("expected non-empty progress message")
 	}
 }
+
