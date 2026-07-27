@@ -17,7 +17,7 @@ import (
 
 // providerCSCloud is the multica runtime provider value the issue-conversation
 // flow searches for; registration must use exactly this string.
-const providerCSCloud = "cs-cloud"
+const providerCSCloud = "csc"
 
 // deregisterTimeout bounds the best-effort deregister call on Stop.
 const deregisterTimeout = 10 * time.Second
