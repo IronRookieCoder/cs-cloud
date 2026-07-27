@@ -328,6 +328,11 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	}
 	d.mu.Unlock()
 
+	// Write GC metadata so the gcLoop can reclaim this workdir once the task's
+	// parent record (issue / node-run / task) reaches a terminal state. The
+	// completion hook below rewrites it with the real finish time.
+	writeGCMetaForTask(worktree, payload, time.Time{})
+
 	sessionID, err := d.bindSession(ctx, payload, worktree)
 	if err != nil {
 		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
@@ -367,6 +372,10 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	}
 	output := truncateOutput(string(out))
 	_ = d.client.PostTaskMessages(ctx, payload.TaskID, output)
+	// Stamp the finish time into .gc_meta.json so the artifact-only and
+	// terminal TTLs anchor on when the task actually ended (covers both the
+	// success and run-err paths below).
+	writeGCMetaForTask(worktree, payload, time.Now().UTC())
 	if runErr != nil {
 		if d.aborted(payload.TaskID) {
 			_ = d.client.FailTask(ctx, payload.TaskID, "aborted", "cancelled")
