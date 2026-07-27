@@ -104,6 +104,16 @@ func (d *Driver) Start() error {
 	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
 	d.runtime.maintainFunc = d.maintainRegistrations
+	if d.cfg.GCEnabled {
+		// Plug the GC decision state machine (gc.go) into the runtime loop's
+		// existing gcFunc slot. The loop already ticks on GCInterval; this just
+		// fills in the work each tick does.
+		d.runtime.gcFunc = d.runGC
+		logger.Info("workflow: gc enabled: interval=%s ttl=%s orphan_ttl=%s artifact_ttl=%s",
+			d.cfg.GCInterval, d.cfg.GCTTL, d.cfg.GCOrphanTTL, d.cfg.GCArtifactTTL)
+	} else {
+		logger.Info("workflow: gc disabled")
+	}
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
 	if d.deps != nil && d.deps.SessionRunner != nil {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)

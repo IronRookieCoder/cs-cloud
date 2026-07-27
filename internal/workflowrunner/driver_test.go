@@ -47,6 +47,41 @@ func TestDriverLifecycleNoop(t *testing.T) {
 	}
 }
 
+func TestDriverStartWiresGC(t *testing.T) {
+	tokenProvider := func() (*provider.Credentials, error) { return nil, nil }
+
+	// GCEnabled=true (default) → gcFunc is plugged into the runtime loop.
+	cfgOn := workflow.DefaultConfig()
+	cfgOn.WorkspacesRoot = t.TempDir()
+	d := NewDriver(cfgOn, &Dependencies{
+		MulticaBaseURL: "https://multica.example.com",
+		TokenProvider:  tokenProvider,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	if d.runtime == nil || d.runtime.gcFunc == nil {
+		t.Fatal("expected runtime.gcFunc to be wired when GCEnabled=true")
+	}
+
+	// GCEnabled=false → gcFunc stays nil; doGC no-ops.
+	cfgOff := workflow.DefaultConfig()
+	cfgOff.GCEnabled = false
+	cfgOff.WorkspacesRoot = t.TempDir()
+	dOff := NewDriver(cfgOff, &Dependencies{
+		MulticaBaseURL: "https://multica.example.com",
+		TokenProvider:  tokenProvider,
+	})
+	if err := dOff.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = dOff.Stop() })
+	if dOff.runtime != nil && dOff.runtime.gcFunc != nil {
+		t.Fatal("expected runtime.gcFunc to be nil when GCEnabled=false")
+	}
+}
+
 func TestDriverHoldsConfigAndDeps(t *testing.T) {
 	cfg := workflow.Config{MulticaBaseURL: "https://cfg.example.com"}
 	deps := &Dependencies{
