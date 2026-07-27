@@ -481,19 +481,33 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 			case "session.status":
 				if status, ok := ev.data["status"].(map[string]any); ok {
 					if t, _ := status["type"].(string); t == "busy" {
-						busy = true
+						if !busy {
+							busy = true
+							terminalFailure = false
+							terminalSubtype = ""
+							terminalMessage = ""
+						}
 					} else if t == "idle" && busy {
 						return sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
 					}
 				}
 			case "session.result":
+				if !busy {
+					continue
+				}
 				terminalSubtype, _ = ev.data["subtype"].(string)
 				isError, _ := ev.data["isError"].(bool)
 				if snakeCaseError, _ := ev.data["is_error"].(bool); snakeCaseError {
 					isError = true
 				}
 				terminalFailure = isError || (terminalSubtype != "" && terminalSubtype != "success")
+				if message := sessionResultErrorMessage(ev.data); message != "" {
+					terminalMessage = message
+				}
 			case "session.error":
+				if !busy {
+					continue
+				}
 				errorData, _ := ev.data["error"].(map[string]any)
 				if subtype, _ := errorData["subtype"].(string); subtype != "api_retry" {
 					if message, _ := errorData["message"].(string); message != "" {
@@ -507,6 +521,30 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 			}
 		}
 	}
+}
+
+func sessionResultErrorMessage(data map[string]any) string {
+	if errorsList, ok := data["errors"].([]any); ok {
+		for _, item := range errorsList {
+			if errorData, ok := item.(map[string]any); ok {
+				if message, _ := errorData["message"].(string); message != "" {
+					return message
+				}
+			}
+		}
+	}
+	if errorData, ok := data["error"].(map[string]any); ok {
+		if message, _ := errorData["message"].(string); message != "" {
+			return message
+		}
+	}
+	if message, _ := data["error"].(string); message != "" {
+		return message
+	}
+	if message, _ := data["message"].(string); message != "" {
+		return message
+	}
+	return ""
 }
 
 func sessionCompletionError(failed bool, subtype, message string) error {

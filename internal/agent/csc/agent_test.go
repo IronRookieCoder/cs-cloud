@@ -146,6 +146,59 @@ func TestWaitForSessionDoneAllowsToolErrorWhenSessionSucceeds(t *testing.T) {
 	}
 }
 
+func TestWaitForSessionDoneIgnoresTerminalEventsBeforeBusy(t *testing.T) {
+	events := make(chan sessionEvent, 6)
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "stale_failure",
+		"isError": true,
+	}}
+	events <- sessionEvent{name: "session.error", data: map[string]any{
+		"error": map[string]any{
+			"subtype": "stale_failure",
+			"message": "stale failure message",
+		},
+	}}
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "current_failure",
+		"isError": true,
+		"errors": []any{
+			map[string]any{"message": "current failure message"},
+		},
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	err := waitForSessionDone(context.Background(), events)
+	if err == nil || err.Error() != "current failure message" {
+		t.Fatalf("error = %v, want current failure message", err)
+	}
+}
+
+func TestWaitForSessionDoneUsesResultErrorWithoutSessionErrorEvent(t *testing.T) {
+	events := make(chan sessionEvent, 3)
+	events <- sessionEvent{name: "session.status", data: map[string]any{
+		"status": map[string]any{"type": "busy"},
+	}}
+	events <- sessionEvent{name: "session.result", data: map[string]any{
+		"subtype": "error_max_turns",
+		"isError": true,
+		"errors": []any{
+			map[string]any{"message": "Max turns reached"},
+			map[string]any{"message": "second error"},
+		},
+	}}
+	events <- sessionEvent{name: "session.idle", data: map[string]any{}}
+	close(events)
+
+	err := waitForSessionDone(context.Background(), events)
+	if err == nil || err.Error() != "Max turns reached" {
+		t.Fatalf("error = %v, want first result error", err)
+	}
+}
+
 func TestWaitForSessionDoneCancelled(t *testing.T) {
 	events := make(chan sessionEvent)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
