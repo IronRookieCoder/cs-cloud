@@ -181,6 +181,31 @@ func TestShortID(t *testing.T) {
 	}
 }
 
+func TestInjectToken(t *testing.T) {
+	// http/https: inject oauth2:<token> userinfo.
+	got := injectToken("https://gitlab.example.com/o/r.git", "tok123")
+	if got != "https://oauth2:tok123@gitlab.example.com/o/r.git" {
+		t.Errorf("https inject = %q", got)
+	}
+	got = injectToken("http://gitea:3000/t/r.git", "tok123")
+	if got != "http://oauth2:tok123@gitea:3000/t/r.git" {
+		t.Errorf("http inject = %q", got)
+	}
+	// ssh: left untouched (token basic-auth meaningless over ssh).
+	got = injectToken("ssh://git@gitlab.example.com/o/r.git", "tok123")
+	if got != "ssh://git@gitlab.example.com/o/r.git" {
+		t.Errorf("ssh should be unchanged = %q", got)
+	}
+	// empty token: untouched.
+	if got := injectToken("https://gitlab.example.com/o/r.git", ""); got != "https://gitlab.example.com/o/r.git" {
+		t.Errorf("empty token = %q", got)
+	}
+	// local path (hostless): untouched.
+	if got := injectToken("/tmp/some/repo", "tok123"); got != "/tmp/some/repo" {
+		t.Errorf("local path = %q", got)
+	}
+}
+
 func TestResetWorktree(t *testing.T) {
 	requireGit(t)
 	upstream := initTestRepo(t)
@@ -194,8 +219,12 @@ func TestResetWorktree(t *testing.T) {
 	if err := runGit("-C", cache, "worktree", "add", "-b", "first", workDir, "HEAD"); err != nil {
 		t.Fatalf("worktree add: %v", err)
 	}
-	// Pollute: an untracked file + confirm clean state after reset.
+	// Pollute: an untracked file + the worktree-ref marker; confirm junk is
+	// cleaned but the marker survives (reset must exempt it via -e).
 	if err := os.WriteFile(filepath.Join(workDir, "junk.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".cs-workflow-ref"), []byte("HEAD\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := wm.ResetWorktree(workDir, "second", "HEAD"); err != nil {
@@ -203,6 +232,9 @@ func TestResetWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workDir, "junk.txt")); !os.IsNotExist(err) {
 		t.Errorf("junk.txt should be cleaned, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".cs-workflow-ref")); err != nil {
+		t.Errorf("worktree-ref marker should survive reset, got %v", err)
 	}
 	out, err := exec.Command("git", "-C", workDir, "branch", "--show-current").CombinedOutput()
 	if err != nil {

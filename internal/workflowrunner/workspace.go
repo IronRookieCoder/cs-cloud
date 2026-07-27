@@ -246,8 +246,10 @@ func agentBranch(agentName, taskID string) string {
 
 // injectToken embeds an access token as HTTP basic auth (oauth2:<token>) into a
 // git URL so `git clone`/`fetch` can authenticate to a private GitLab. Empty
-// token or a non-host URL (e.g. local path) leaves the URL untouched. Used for
-// the local daemon's mirror clone; the token is visible in the git process args
+// token, a non-host URL (e.g. local path), or a non-http(s) scheme (e.g. ssh://,
+// git://, file://) leaves the URL untouched: token basic-auth is meaningless
+// over those transports and injecting it would corrupt the URL. Used for the
+// local daemon's mirror clone; the token is visible in the git process args
 // on this host.
 func injectToken(rawURL, token string) string {
 	if token == "" {
@@ -256,6 +258,9 @@ func injectToken(rawURL, token string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
 		return rawURL
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return rawURL // ssh/git/file URLs: token basic-auth is meaningless, leave untouched
 	}
 	u.User = url.UserPassword("oauth2", token)
 	return u.String()
@@ -268,7 +273,7 @@ func (wm *WorkspaceManager) ResetWorktree(workDir, branchName, baseRef string) e
 	if err := runGit("-C", workDir, "reset", "--hard"); err != nil {
 		return fmt.Errorf("reset: %w", err)
 	}
-	if err := runGit("-C", workDir, "clean", "-fd"); err != nil {
+	if err := runGit("-C", workDir, "clean", "-fd", "-e", ".cs-workflow-ref"); err != nil {
 		return fmt.Errorf("clean: %w", err)
 	}
 	if err := runGit("-C", workDir, "checkout", "-b", branchName, baseRef); err != nil {
