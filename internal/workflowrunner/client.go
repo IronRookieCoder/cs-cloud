@@ -277,3 +277,51 @@ func (c *Client) BindNodeRunSession(ctx context.Context, nodeRunID, runtimeID, d
 		SessionID: sessionID,
 	}, nil)
 }
+
+// GCCheckStatus is the minimal payload returned by multica's gc-check endpoints.
+// UpdatedAt is the TTL anchor for issue/chat rows; CompletedAt for
+// autopilot/task/node-run. Either may be zero on non-terminal rows. A 404 is
+// returned as *StatusError (StatusCode == 404) so callers can distinguish
+// "parent record gone" from transient errors.
+type GCCheckStatus struct {
+	Status      string    `json:"status"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+// GetIssueGCCheck queries issue status + updated_at for the GC loop.
+func (c *Client) GetIssueGCCheck(ctx context.Context, issueID string) (GCCheckStatus, error) {
+	var out GCCheckStatus
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), nil, &out)
+	return out, err
+}
+
+// GetChatSessionGCCheck queries chat-session status + updated_at. A 404 means
+// the session was hard-deleted — the strongest reclaim signal.
+func (c *Client) GetChatSessionGCCheck(ctx context.Context, sessionID string) (GCCheckStatus, error) {
+	var out GCCheckStatus
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.MulticaChatSessionGCCheckEndpoint, sessionID), nil, &out)
+	return out, err
+}
+
+// GetAutopilotRunGCCheck queries autopilot-run status + completed_at.
+func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (GCCheckStatus, error) {
+	var out GCCheckStatus
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.MulticaAutopilotRunGCCheckEndpoint, runID), nil, &out)
+	return out, err
+}
+
+// GetTaskGCCheck queries agent-task status + completed_at (quick-create path).
+func (c *Client) GetTaskGCCheck(ctx context.Context, taskID string) (GCCheckStatus, error) {
+	var out GCCheckStatus
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.MulticaTaskGCCheckEndpoint, taskID), nil, &out)
+	return out, err
+}
+
+// GetWorkflowNodeRunGCCheck queries workflow-node-run status + completed_at.
+// cs-cloud's workflow tasks (issue_id NULL) key their workdir GC on the node run.
+func (c *Client) GetWorkflowNodeRunGCCheck(ctx context.Context, nodeRunID string) (GCCheckStatus, error) {
+	var out GCCheckStatus
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, nodeRunID), nil, &out)
+	return out, err
+}

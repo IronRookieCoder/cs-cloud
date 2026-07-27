@@ -438,3 +438,54 @@ func TestClientBindNodeRunSession(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestClientGetWorkflowNodeRunGCCheck(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %q", r.Method)
+		}
+		wantPath := fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, "nr-1")
+		if r.URL.Path != wantPath {
+			t.Fatalf("path = %q, want %q", r.URL.Path, wantPath)
+		}
+		if r.Header.Get("Authorization") != "Bearer token-123" {
+			t.Fatalf("missing auth header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"completed","completed_at":"2025-01-02T03:04:05Z"}`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "", tokenProvider("token-123"))
+	got, err := c.GetWorkflowNodeRunGCCheck(context.Background(), "nr-1")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if got.Status != "completed" {
+		t.Fatalf("status = %q", got.Status)
+	}
+	if got.CompletedAt.IsZero() {
+		t.Fatal("completed_at should be set")
+	}
+}
+
+func TestClientGetIssueGCCheck_404(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"issue not found"}`))
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "", tokenProvider("token-123"))
+	_, err := c.GetIssueGCCheck(context.Background(), "issue-1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var stErr *StatusError
+	if !errors.As(err, &stErr) {
+		t.Fatalf("expected *StatusError, got %T", err)
+	}
+	if stErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("StatusCode = %d", stErr.StatusCode)
+	}
+}
