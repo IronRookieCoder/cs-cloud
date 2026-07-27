@@ -3,9 +3,11 @@ package workflowrunner
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -75,7 +77,9 @@ func (wm *WorkspaceManager) TaskWorktreeDir(workspaceID, taskID string) string {
 
 // EnsureRepoReady ensures a mirror clone of repoURL exists for the workspace.
 // On first use it clones; on subsequent calls it updates the existing mirror.
-func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string, error) {
+// accessToken (optional) is embedded as HTTP basic auth for private GitLab
+// repos; empty token or a non-host URL (e.g. local path) leaves repoURL as-is.
+func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL, accessToken string) (string, error) {
 	if repoURL == "" {
 		return "", nil
 	}
@@ -96,6 +100,7 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 	cacheLock.Lock()
 	defer cacheLock.Unlock()
 
+	authedURL := injectToken(repoURL, accessToken)
 	head := filepath.Join(cache, "HEAD")
 	if _, err := os.Stat(head); err != nil {
 		if !os.IsNotExist(err) {
@@ -103,7 +108,7 @@ func (wm *WorkspaceManager) EnsureRepoReady(workspaceID, repoURL string) (string
 		}
 		// Remove any incomplete cache left by an interrupted clone, then clone.
 		_ = os.RemoveAll(cache)
-		if err := runGit("clone", "--mirror", repoURL, cache); err != nil {
+		if err := runGit("clone", "--mirror", authedURL, cache); err != nil {
 			return "", fmt.Errorf("clone repo: %w", err)
 		}
 	} else {
@@ -136,7 +141,7 @@ func (wm *WorkspaceManager) CreateWorktree(workspaceID, taskID, repoURL, ref str
 		return dir, nil
 	}
 
-	cache, err := wm.EnsureRepoReady(workspaceID, repoURL)
+	cache, err := wm.EnsureRepoReady(workspaceID, repoURL, "")
 	if err != nil {
 		return "", err
 	}
@@ -200,4 +205,86 @@ func readWorktreeRef(dir string) (string, error) {
 
 func writeWorktreeRef(dir, ref string) error {
 	return os.WriteFile(worktreeRefPath(dir), []byte(ref+"\n"), 0o644)
+}
+
+var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
+
+// sanitizeName lowercases and collapses non-alphanumerics to '-', capping
+// length. Empty/non-ascii input falls back to "agent". Mirrors multica repocache
+// sanitizeName (cache.go:968).
+func sanitizeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "agent"
+	}
+	s = nonAlnum.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return "agent"
+	}
+	if len(s) > 30 {
+		s = s[:30]
+	}
+	return s
+}
+
+// shortID returns the first 8 hex chars of a UUID (dashes stripped), mirroring
+// multica repocache shortID (cache.go:983).
+func shortID(id string) string {
+	r := strings.ReplaceAll(id, "-", "")
+	if len(r) > 8 {
+		r = r[:8]
+	}
+	return r
+}
+
+// agentBranch builds the per-task working branch for a code repo:
+// agent/<sanitize(agent)>/<shortTaskID>. Mirrors multica cache.go:449.
+func agentBranch(agentName, taskID string) string {
+	return fmt.Sprintf("agent/%s/%s", sanitizeName(agentName), shortID(taskID))
+}
+
+// injectToken embeds an access token as HTTP basic auth (oauth2:<token>) into a
+// git URL so `git clone`/`fetch` can authenticate to a private GitLab. Empty
+// token or a non-host URL (e.g. local path) leaves the URL untouched. Used for
+// the local daemon's mirror clone; the token is visible in the git process args
+// on this host.
+func injectToken(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	u.User = url.UserPassword("oauth2", token)
+	return u.String()
+}
+
+// ResetWorktree resets an existing worktree to a clean base and checks out a new
+// branch off baseRef, discarding uncommitted changes (committed/pushed work is
+// in the remote, not lost). Used when resuming a prior workdir for a new round.
+func (wm *WorkspaceManager) ResetWorktree(workDir, branchName, baseRef string) error {
+	if err := runGit("-C", workDir, "reset", "--hard"); err != nil {
+		return fmt.Errorf("reset: %w", err)
+	}
+	if err := runGit("-C", workDir, "clean", "-fd"); err != nil {
+		return fmt.Errorf("clean: %w", err)
+	}
+	if err := runGit("-C", workDir, "checkout", "-b", branchName, baseRef); err != nil {
+		if isBranchCollision(err) {
+			retry := fmt.Sprintf("%s-%d", branchName, time.Now().Unix())
+			if err2 := runGit("-C", workDir, "checkout", "-b", retry, baseRef); err2 == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("checkout -b: %w", err)
+	}
+	return nil
+}
+
+// isBranchCollision reports whether err is git's "a branch named ... already
+// exists" collision. Mirrors multica isBranchCollisionError (cache.go:599).
+func isBranchCollision(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "a branch named")
 }
