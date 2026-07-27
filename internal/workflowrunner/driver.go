@@ -334,6 +334,13 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		return err
 	}
 
+	// finalSessionID tracks the chat session that actually ran the agent. It
+	// defaults to the bound sessionID and is overwritten with freshSessionID
+	// when the resume-failure retry path runs. CompleteTask forwards it to
+	// multica so the task row's session_id is preserved (not NULLed) for the
+	// next round's GetLastTaskSession lookup.
+	finalSessionID := sessionID
+
 	var out []byte
 	var runErr error
 	if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
@@ -353,6 +360,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 				return bindErr
 			}
 			out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, freshSessionID)
+			finalSessionID = freshSessionID
 		}
 	} else {
 		out, runErr = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
@@ -368,7 +376,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		return runErr
 	}
 
-	return d.client.CompleteTask(ctx, payload.TaskID, output)
+	return d.client.CompleteTask(ctx, payload.TaskID, output, finalSessionID, worktree)
 }
 
 // bindSession creates a chat session for the task and binds it to both the

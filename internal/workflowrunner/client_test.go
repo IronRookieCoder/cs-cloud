@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/provider"
@@ -99,11 +100,57 @@ func TestClientCompleteTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", tokenProvider("token-123"))
-	if err := c.CompleteTask(context.Background(), "task-1", "done"); err != nil {
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", ""); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
 		t.Fatal("server not called")
+	}
+}
+
+func TestClientCompleteTaskIncludesSessionAndWorkDir(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
+	if err := c.CompleteTask(context.Background(), "t1", "the output", "sess-123", "/work/dir"); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if !strings.Contains(gotBody, `"session_id":"sess-123"`) {
+		t.Errorf("body missing session_id: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"work_dir":"/work/dir"`) {
+		t.Errorf("body missing work_dir: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"output":"the output"`) {
+		t.Errorf("body missing output: %s", gotBody)
+	}
+}
+
+func TestClientCompleteTaskOmitsEmptySessionAndWorkDir(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
+	if err := c.CompleteTask(context.Background(), "t1", "done", "", ""); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if strings.Contains(gotBody, "session_id") {
+		t.Errorf("body should not contain session_id: %s", gotBody)
+	}
+	if strings.Contains(gotBody, "work_dir") {
+		t.Errorf("body should not contain work_dir: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"output":"done"`) {
+		t.Errorf("body missing output: %s", gotBody)
 	}
 }
 

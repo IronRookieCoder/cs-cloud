@@ -178,10 +178,21 @@ func (c *Client) StartTask(ctx context.Context, taskID string) error {
 	return c.request(ctx, http.MethodPost, path, nil, nil)
 }
 
-// CompleteTask marks a task as complete with the given output.
-func (c *Client) CompleteTask(ctx context.Context, taskID string, output string) error {
+// CompleteTask marks a task as complete with the given output. sessionID and
+// workDir, when non-empty, are forwarded so multica preserves the resume
+// pointer — its CompleteAgentTask SQL is a direct SET (not COALESCE), so
+// omitting them NULLs the columns that bindSession pinned mid-run and breaks
+// GetLastTaskSession for the next round.
+func (c *Client) CompleteTask(ctx context.Context, taskID, output, sessionID, workDir string) error {
 	path := fmt.Sprintf(workflow.MulticaTaskCompleteEndpoint, taskID)
-	return c.request(ctx, http.MethodPost, path, map[string]any{"output": output}, nil)
+	body := map[string]any{"output": output}
+	if sessionID != "" {
+		body["session_id"] = sessionID
+	}
+	if workDir != "" {
+		body["work_dir"] = workDir
+	}
+	return c.request(ctx, http.MethodPost, path, body, nil)
 }
 
 // FailTask marks a task as failed with the given reason. failureReason is
