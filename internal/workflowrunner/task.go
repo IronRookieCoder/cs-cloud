@@ -146,14 +146,17 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 
 	// Pre-warm mirror caches for all advertised repos (best-effort, background).
 	// The agent's checkout re-ensures (serialized per cache), so a missed warm-up
-	// just means a cold clone at checkout time.
+	// just means a cold clone at checkout time. Token is per-role: a delivery
+	// repo (Gitea) must clone with MULTICA_REPO_TOKEN, not the GitLab PAT, or the
+	// pre-warm 401s silently — sharing tokenForRepo with Driver.CheckoutRepo
+	// keeps the two paths consistent.
 	go func() {
-		token := payload.Env["MULTICA_GITLAB_TOKEN"]
 		for _, r := range payload.Repos {
 			if r.URL == "" {
 				continue
 			}
-			_, _ = tr.workspaceManager.EnsureRepoReady(payload.WorkspaceID, r.URL, token)
+			role := lookupRepoRole(payload.Repos, r.URL)
+			_, _ = tr.workspaceManager.EnsureRepoReady(payload.WorkspaceID, r.URL, tokenForRepo(role, payload.Env))
 		}
 	}()
 

@@ -486,12 +486,10 @@ func truncateOutput(s string) string {
 // a per-repo branch worktree. baseBranch "" resolves the remote default.
 //
 // The repo's role (matched by URL against payload.Repos) drives BOTH the
-// worktree branch name and which env var supplies the clone token:
-//   - "delivery" → branch node/<shortNodeRunID>, token from MULTICA_REPO_TOKEN
-//     (the Gitea bot PAT; multica emits a cred-less URL precisely because we
-//     inject it here — using the GitLab PAT would 401 against Gitea).
-//   - other/missing → branch agent/<agent>/<shortTaskID>, token from
-//     MULTICA_GITLAB_TOKEN (the GitLab PAT used for code repos since M1).
+// worktree branch name and which env var supplies the clone token; see
+// lookupRepoRole + tokenForRepo. "delivery" → node/<shortNodeRunID> +
+// MULTICA_REPO_TOKEN (Gitea bot PAT); other/missing → agent/<agent>/<shortTaskID>
+// + MULTICA_GITLAB_TOKEN (GitLab PAT used for code repos since M1).
 func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
 	d.mu.Lock()
 	rec, ok := d.running[taskID]
@@ -500,12 +498,7 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 		return "", fmt.Errorf("task %s is not running", taskID)
 	}
 	role := lookupRepoRole(rec.payload.Repos, repoURL)
-	token := rec.payload.Env["MULTICA_GITLAB_TOKEN"]
-	if role == "delivery" {
-		// Delivery repos live on Gitea and authenticate with the bot PAT, not
-		// the GitLab PAT. Falling through to the GitLab token 401s the clone.
-		token = rec.payload.Env["MULTICA_REPO_TOKEN"]
-	}
+	token := tokenForRepo(role, rec.payload.Env)
 	return d.workspaceManager.CheckoutRepo(
 		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
 		rec.payload.Agent, taskID, baseBranch, token, role, rec.payload.NodeRunID,
@@ -516,7 +509,10 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 // matches repoURL. Returns "code" when repos is empty or no entry matches
 // (backward-compat: a repo not listed in the payload defaults to the code-repo
 // treatment). Plain equality is sufficient — multica sends the same URL string
-// in payload.Repos[] and the checkout request.
+// in payload.Repos[] and the checkout request. A miss on a non-empty repos list
+// is logged so a future URL-shape mismatch (trailing slash, .git, host case)
+// downgrading a delivery repo to the GitLab token is debuggable instead of a
+// silent 401.
 func lookupRepoRole(repos []workflow.RepoSpec, repoURL string) string {
 	for _, r := range repos {
 		if r.URL == repoURL {
@@ -526,7 +522,29 @@ func lookupRepoRole(repos []workflow.RepoSpec, repoURL string) string {
 			return "code"
 		}
 	}
+	if len(repos) > 0 {
+		known := make([]string, 0, len(repos))
+		for _, r := range repos {
+			if r.URL != "" {
+				known = append(known, r.URL)
+			}
+		}
+		logger.Warn("workflow: repo %q matched no entry in payload.Repos; defaulting role to \"code\" (known: %v)", repoURL, known)
+	}
 	return "code"
+}
+
+// tokenForRepo selects the clone token for a repo by role. Delivery repos are
+// Gitea and authenticate with the bot PAT (MULTICA_REPO_TOKEN); code repos use
+// the GitLab PAT (MULTICA_GITLAB_TOKEN). Empty env → empty token (EnsureRepoReady
+// / injectToken treat empty as "clone without auth", e.g. for file:// test
+// upstreams). Shared between Driver.CheckoutRepo (agent-triggered checkout) and
+// TaskRunner.Prepare's pre-warm loop so both paths pick the same token.
+func tokenForRepo(role string, env map[string]string) string {
+	if role == "delivery" {
+		return env["MULTICA_REPO_TOKEN"]
+	}
+	return env["MULTICA_GITLAB_TOKEN"]
 }
 
 // SetLocalServerURL threads the daemon's localserver listen URL to the task

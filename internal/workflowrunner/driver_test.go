@@ -977,23 +977,55 @@ func TestLookupRepoRole(t *testing.T) {
 		{URL: "https://gitea.example.com/o/docs.git", Role: "delivery"},
 	}
 	cases := []struct {
-		name string
-		url  string
-		want string
+		name      string
+		url       string
+		want      string
+		emptyPool bool // use a nil repos slice instead of the shared pool above
 	}{
-		{"delivery match", "https://gitea.example.com/o/docs.git", "delivery"},
-		{"code match", "https://gitlab.example.com/o/code.git", "code"},
-		{"no match defaults to code", "https://other.example.com/o/other.git", "code"},
-		{"empty repos defaults to code", "https://gitlab.example.com/o/code.git", "code"},
+		{name: "delivery match", url: "https://gitea.example.com/o/docs.git", want: "delivery"},
+		{name: "code match", url: "https://gitlab.example.com/o/code.git", want: "code"},
+		{name: "no match defaults to code", url: "https://other.example.com/o/other.git", want: "code"},
+		{name: "empty repos defaults to code", url: "https://gitlab.example.com/o/code.git", want: "code", emptyPool: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := repos
-			if tc.name == "empty repos defaults to code" {
+			if tc.emptyPool {
 				pool = nil
 			}
 			if got := lookupRepoRole(pool, tc.url); got != tc.want {
 				t.Errorf("lookupRepoRole(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTokenForRepo pins the env-var selection that Driver.CheckoutRepo (agent
+// checkout) and TaskRunner.Prepare (pre-warm) now share. "delivery" → Gitea
+// bot PAT; any other role (including the default "") → GitLab PAT; missing env
+// → empty string (EnsureRepoReady / injectToken treat empty as anonymous).
+func TestTokenForRepo(t *testing.T) {
+	envBoth := map[string]string{
+		"MULTICA_REPO_TOKEN":   "gitea-pat",
+		"MULTICA_GITLAB_TOKEN": "gitlab-pat",
+	}
+	cases := []struct {
+		name string
+		role string
+		env  map[string]string
+		want string
+	}{
+		{name: "delivery picks repo token", role: "delivery", env: envBoth, want: "gitea-pat"},
+		{name: "code picks gitlab token", role: "code", env: envBoth, want: "gitlab-pat"},
+		{name: "empty role defaults to gitlab token", role: "", env: envBoth, want: "gitlab-pat"},
+		{name: "unknown role defaults to gitlab token", role: "weird", env: envBoth, want: "gitlab-pat"},
+		{name: "delivery with empty env returns empty", role: "delivery", env: nil, want: ""},
+		{name: "code with empty env returns empty", role: "code", env: nil, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tokenForRepo(tc.role, tc.env); got != tc.want {
+				t.Errorf("tokenForRepo(%q) = %q, want %q", tc.role, got, tc.want)
 			}
 		})
 	}
