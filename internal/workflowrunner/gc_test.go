@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -456,5 +457,87 @@ func backDate(t *testing.T, dir string, ago time.Duration) {
 	past := time.Now().Add(-ago)
 	if err := os.Chtimes(dir, past, past); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// makeBareRepo creates an empty bare repo at dir (skips if git is unavailable).
+func makeBareRepo(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH — cannot exercise pruneRepoWorktrees")
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+}
+
+// TestRunGC_EndToEnd exercises the full top-level GC pipeline against a mock
+// multica backend on the real filesystem: root scan → per-workspace tasks/
+// scan → shouldCleanTaskDir → real HTTP gc-check → real file deletion → bare
+// repo worktree prune. It also closes the loop between the execute() meta-write
+// hook (writeGCMetaForTask) and the GC read path.
+func TestRunGC_EndToEnd(t *testing.T) {
+	issueDone := "d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1" // done + stale → clean
+	issueOpen := "e2e2e2e2-e2e2-e2e2-e2e2-e2e2e2e2e2e2" // in_progress → preserve
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueDone), func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"status": "done", "updated_at": time.Now().Add(-10 * 24 * time.Hour)})
+	})
+	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueOpen), func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"status": "in_progress", "updated_at": time.Now()})
+	})
+
+	d := newGCDriver(t, mux)
+	d.cfg.GCOrphanTTL = time.Hour // orphan path: dirs older than 1h reclaim
+	root := d.cfg.WorkspacesRoot
+	ws := "ws-e2e"
+
+	// 1) Completed+stale issue task — written via the SAME writeGCMetaForTask
+	//    path execute() uses, with an explicit finish time. GC should reclaim.
+	doneDir := filepath.Join(root, ws, "tasks", "done-task")
+	if err := os.MkdirAll(doneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGCMetaForTask(doneDir, workflow.TaskRunPayload{
+		TaskID: "done-task", WorkspaceID: ws, IssueID: issueDone,
+	}, time.Now().Add(-10*24*time.Hour))
+
+	// 2) Open-issue task — preserved (artifact path doesn't fire: CompletedAt
+	//    is recent relative to GCArtifactTTL).
+	openDir := filepath.Join(root, ws, "tasks", "open-task")
+	if err := os.MkdirAll(openDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGCMetaForTask(openDir, workflow.TaskRunPayload{
+		TaskID: "open-task", WorkspaceID: ws, IssueID: issueOpen,
+	}, time.Now())
+
+	// 3) Orphan dir (no meta), back-dated past GCOrphanTTL — reclaimed.
+	orphanDir := filepath.Join(root, ws, "tasks", "orphan-task")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backDate(t, orphanDir, 2*time.Hour)
+
+	// 4) Bare repo cache present — pruneRepoWorktrees must scan + invoke git
+	//    worktree prune without erroring the cycle.
+	makeBareRepo(t, filepath.Join(root, ws, "repos", "proj.git"))
+
+	if err := d.runGC(); err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+
+	if _, err := os.Stat(doneDir); !os.IsNotExist(err) {
+		t.Errorf("done+stale issue task dir should be reclaimed, stat=%v", err)
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Errorf("old orphan dir should be reclaimed, stat=%v", err)
+	}
+	if _, err := os.Stat(openDir); err != nil {
+		t.Errorf("open-issue task dir should be preserved, stat=%v", err)
 	}
 }

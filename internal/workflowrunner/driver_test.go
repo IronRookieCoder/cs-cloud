@@ -17,6 +17,7 @@ import (
 
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner/execenv"
 )
 
 func TestDriverName(t *testing.T) {
@@ -635,6 +636,46 @@ func TestDriverRunTaskAsyncCompletes(t *testing.T) {
 	out, _ := complete["output"].(string)
 	if !strings.Contains(out, "hello") {
 		t.Fatalf("complete output = %q", out)
+	}
+}
+
+// TestDriverExecuteWritesGCMeta proves the execute() lifecycle hook actually
+// writes .gc_meta.json during a real (fake-agent) task run, with the right Kind
+// + IDs + a non-zero CompletedAt — so the gcLoop has a meta to read after the
+// task finishes. Closes the loop the gc.go port depends on.
+func TestDriverExecuteWritesGCMeta(t *testing.T) {
+	cr := newCallbackRecorder()
+	ts := httptest.NewServer(cr.handler())
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+	installFakeAgent(t, "fakeagent")
+
+	const (
+		wsID   = "ws-1"
+		taskID = "task-meta"
+	)
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: taskID, WorkspaceID: wsID, IssueID: "issue-1",
+		Agent: "fakeagent", Prompt: "echo hi",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+	waitFor(t, "complete callback", func() bool { return cr.hasCall("/complete") })
+
+	taskRoot := filepath.Join(d.cfg.WorkspacesRoot, wsID, "tasks", taskID)
+	meta, err := execenv.ReadGCMeta(taskRoot)
+	if err != nil {
+		t.Fatalf("expected .gc_meta.json at %s: %v", taskRoot, err)
+	}
+	if meta.Kind != execenv.GCKindIssue {
+		t.Errorf("Kind: want %q, got %q", execenv.GCKindIssue, meta.Kind)
+	}
+	if meta.IssueID != "issue-1" {
+		t.Errorf("IssueID: want issue-1, got %q", meta.IssueID)
+	}
+	if meta.CompletedAt.IsZero() {
+		t.Error("CompletedAt should be stamped by the completion hook")
 	}
 }
 
