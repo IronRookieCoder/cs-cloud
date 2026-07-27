@@ -29,6 +29,9 @@ const (
 	// For in-task CLIs (cs-cloud gitea submit) that call multica.
 	EnvMulticaServerURL = "MULTICA_SERVER_URL"
 	EnvMulticaToken     = "MULTICA_TOKEN"
+	// EnvCSCloudServerURL lets in-task `cs-cloud repo checkout` reach the
+	// daemon's localserver RPC. Threaded in by the daemon via SetLocalServerURL.
+	EnvCSCloudServerURL = "CS_CLOUD_SERVER_URL"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -43,6 +46,10 @@ type TaskRunner struct {
 	// can call multica's daemon-auth API. Set via SetMulticaEndpoint.
 	multicaBaseURL string
 	tokenProvider  func() (*provider.Credentials, error)
+	// localServerURL is the daemon's localserver listen URL, injected into
+	// task env as CS_CLOUD_SERVER_URL so in-task `cs-cloud repo checkout`
+	// can reach the localserver RPC. Set via SetLocalServerURL.
+	localServerURL string
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -59,6 +66,12 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 func (tr *TaskRunner) SetMulticaEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
 	tr.multicaBaseURL = baseURL
 	tr.tokenProvider = tp
+}
+
+// SetLocalServerURL lets the daemon thread its localserver listen URL into the
+// task env so in-task `cs-cloud repo checkout` can reach the RPC.
+func (tr *TaskRunner) SetLocalServerURL(url string) {
+	tr.localServerURL = url
 }
 
 // SetSessionRunner injects a runner that executes prompts inside an already
@@ -201,6 +214,11 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	env = setEnv(env, EnvMulticaTaskID, payload.TaskID)
 	env = setEnv(env, EnvMulticaPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
+	// CS_CLOUD_SERVER_URL lets in-task `cs-cloud repo checkout` reach the
+	// daemon's localserver RPC. Threaded in by the daemon after it binds.
+	if tr.localServerURL != "" {
+		env = setEnv(env, EnvCSCloudServerURL, tr.localServerURL)
+	}
 	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
 	// submit) can authenticate to multica's daemon API. These are the
 	// daemon's own endpoint + credentials — cs-cloud owns this auth, not multica.

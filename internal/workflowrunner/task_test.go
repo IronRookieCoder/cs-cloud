@@ -174,6 +174,19 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 	}
 }
 
+func TestBuildEnv_LocalServerURL(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+	tr.SetLocalServerURL("http://127.0.0.1:9999")
+	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1", Agent: AgentCsc}, "/work")
+	for _, e := range env {
+		if e == "CS_CLOUD_SERVER_URL=http://127.0.0.1:9999" {
+			return // found
+		}
+	}
+	t.Error("buildEnv missing CS_CLOUD_SERVER_URL=http://127.0.0.1:9999")
+}
+
 func TestPrepare_TaskRootFresh(t *testing.T) {
 	requireGit(t)
 	installFakeAgent(t, AgentCsc) // make exec.LookPath("csc") resolve

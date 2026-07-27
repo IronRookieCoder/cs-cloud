@@ -446,6 +446,19 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 	)
 }
 
+// SetLocalServerURL threads the daemon's localserver listen URL to the task
+// runner so it can be injected into the agent env (CS_CLOUD_SERVER_URL),
+// letting in-task `cs-cloud repo checkout` reach the localserver RPC. The
+// nil-guard on d.runner is defensive — runner is set in Start(), and the
+// daemon calls this after Start() has succeeded.
+func (d *Driver) SetLocalServerURL(url string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.runner != nil {
+		d.runner.SetLocalServerURL(url)
+	}
+}
+
 // AbortTask cancels a running task. When the task is not (yet) running, the
 // ID is tombstoned so a run request that arrives later — the abort raced
 // ahead of the server-side push — is rejected instead of executed.
