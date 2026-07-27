@@ -127,11 +127,6 @@ func runDaemon(a *app.App) error {
 		logger.Error("failed to save server url: %v", err)
 		return err
 	}
-	// Thread the localserver URL into the workflow runner so in-task
-	// `cs-cloud repo checkout` can reach the localserver RPC. srv.URL() is
-	// the final bound address (wildcards normalized to 127.0.0.1) set by
-	// srv.Start before the workflow driver is started.
-	workflowDriver.SetLocalServerURL(srv.URL())
 	if err := a.SaveState("running"); err != nil {
 		logger.Error("failed to save state: %v", err)
 		return err

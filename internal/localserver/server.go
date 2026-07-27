@@ -301,6 +301,13 @@ func (s *Server) Start(addr string) error {
 		}
 	}
 
+	// Thread the localserver URL into the task env (CS_CLOUD_SERVER_URL) before
+	// the serve goroutine starts, so the `go` statement provides happens-before
+	// to task goroutines that read it in buildEnv (mirrors SetMulticaEndpoint).
+	if s.workflow != nil {
+		s.workflow.SetLocalServerURL(s.url)
+	}
+
 	// Start the ring buffer drain goroutine (subscribes to EventBus).
 	if s.ringBuffer != nil {
 		s.ringBuffer.Start(ctx)

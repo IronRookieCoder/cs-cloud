@@ -47,11 +47,6 @@ func serve(a *app.App) error {
 	if err := a.SaveServerURL(srv.URL()); err != nil {
 		return err
 	}
-	// Thread the localserver URL into the workflow runner so in-task
-	// `cs-cloud repo checkout` can reach the localserver RPC. srv.URL() is
-	// the final bound address (wildcards normalized to 127.0.0.1) set by
-	// srv.Start before the workflow driver is started.
-	workflowDriver.SetLocalServerURL(srv.URL())
 
 	printTitle("cs-cloud serve")
 	printSuccess("Server running")

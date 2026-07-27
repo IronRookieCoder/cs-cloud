@@ -187,6 +187,18 @@ func TestBuildEnv_LocalServerURL(t *testing.T) {
 	t.Error("buildEnv missing CS_CLOUD_SERVER_URL=http://127.0.0.1:9999")
 }
 
+func TestBuildEnv_LocalServerURLAbsentByDefault(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+	// NOTE: SetLocalServerURL NOT called.
+	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1", Agent: AgentCsc}, "/work")
+	for _, e := range env {
+		if strings.HasPrefix(e, "CS_CLOUD_SERVER_URL=") {
+			t.Errorf("CS_CLOUD_SERVER_URL should be absent without SetLocalServerURL; got %q", e)
+		}
+	}
+}
+
 func TestPrepare_TaskRootFresh(t *testing.T) {
 	requireGit(t)
 	installFakeAgent(t, AgentCsc) // make exec.LookPath("csc") resolve
