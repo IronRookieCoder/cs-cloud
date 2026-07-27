@@ -48,6 +48,30 @@ func Load() (*Config, error) {
 			cfg.Workflow.GCInterval = d
 		}
 	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ENABLED"); v != "" {
+		cfg.Workflow.GCEnabled = v == "true" || v == "1" || v == "yes"
+	} else if platform.Getenv("CS_CLOUD_WORKFLOW_GC_DISABLED") != "" {
+		// Explicit opt-out for operators who want to keep every workdir.
+		cfg.Workflow.GCEnabled = false
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCTTL = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ORPHAN_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCOrphanTTL = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ARTIFACT_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCArtifactTTL = d
+		}
+	}
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ARTIFACT_PATTERNS"); v != "" {
+		cfg.Workflow.GCArtifactPatterns = strings.Split(v, ",")
+	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL"); v != "" {
 		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.HeartbeatInterval = d
@@ -207,6 +231,26 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	}
 	if file.GCInterval != 0 && current.GCInterval == defaults.GCInterval {
 		current.GCInterval = file.GCInterval
+	}
+	// GC TTLs: file overrides only when current still equals the default (env
+	// wins over file, mirroring GCInterval). GCEnabled is OR-ed — a file that
+	// explicitly sets it false only takes effect when env hasn't set it (the env
+	// path above leaves the default true when unset, so we cannot distinguish
+	// "default true" from "env true" here; treat file false as authoritative).
+	if file.GCTTL != 0 && current.GCTTL == defaults.GCTTL {
+		current.GCTTL = file.GCTTL
+	}
+	if file.GCOrphanTTL != 0 && current.GCOrphanTTL == defaults.GCOrphanTTL {
+		current.GCOrphanTTL = file.GCOrphanTTL
+	}
+	if file.GCArtifactTTL != 0 && current.GCArtifactTTL == defaults.GCArtifactTTL {
+		current.GCArtifactTTL = file.GCArtifactTTL
+	}
+	if len(file.GCArtifactPatterns) > 0 && stringSlicesEqual(current.GCArtifactPatterns, defaults.GCArtifactPatterns) {
+		current.GCArtifactPatterns = file.GCArtifactPatterns
+	}
+	if !file.GCEnabled {
+		current.GCEnabled = false
 	}
 	if file.HeartbeatInterval != 0 && current.HeartbeatInterval == defaults.HeartbeatInterval {
 		current.HeartbeatInterval = file.HeartbeatInterval
