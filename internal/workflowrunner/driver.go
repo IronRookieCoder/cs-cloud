@@ -484,6 +484,14 @@ func truncateOutput(s string) string {
 // CheckoutRepo serves an agent's on-demand `cs-cloud repo checkout` for a
 // running task: looks up the task's payload + taskRoot, then creates (or resets)
 // a per-repo branch worktree. baseBranch "" resolves the remote default.
+//
+// The repo's role (matched by URL against payload.Repos) drives BOTH the
+// worktree branch name and which env var supplies the clone token:
+//   - "delivery" → branch node/<shortNodeRunID>, token from MULTICA_REPO_TOKEN
+//     (the Gitea bot PAT; multica emits a cred-less URL precisely because we
+//     inject it here — using the GitLab PAT would 401 against Gitea).
+//   - other/missing → branch agent/<agent>/<shortTaskID>, token from
+//     MULTICA_GITLAB_TOKEN (the GitLab PAT used for code repos since M1).
 func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
 	d.mu.Lock()
 	rec, ok := d.running[taskID]
@@ -491,11 +499,34 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 	if !ok {
 		return "", fmt.Errorf("task %s is not running", taskID)
 	}
+	role := lookupRepoRole(rec.payload.Repos, repoURL)
 	token := rec.payload.Env["MULTICA_GITLAB_TOKEN"]
+	if role == "delivery" {
+		// Delivery repos live on Gitea and authenticate with the bot PAT, not
+		// the GitLab PAT. Falling through to the GitLab token 401s the clone.
+		token = rec.payload.Env["MULTICA_REPO_TOKEN"]
+	}
 	return d.workspaceManager.CheckoutRepo(
 		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
-		rec.payload.Agent, taskID, baseBranch, token,
+		rec.payload.Agent, taskID, baseBranch, token, role, rec.payload.NodeRunID,
 	)
+}
+
+// lookupRepoRole returns the Role of the first RepoSpec in repos whose URL
+// matches repoURL. Returns "code" when repos is empty or no entry matches
+// (backward-compat: a repo not listed in the payload defaults to the code-repo
+// treatment). Plain equality is sufficient — multica sends the same URL string
+// in payload.Repos[] and the checkout request.
+func lookupRepoRole(repos []workflow.RepoSpec, repoURL string) string {
+	for _, r := range repos {
+		if r.URL == repoURL {
+			if r.Role != "" {
+				return r.Role
+			}
+			return "code"
+		}
+	}
+	return "code"
 }
 
 // SetLocalServerURL threads the daemon's localserver listen URL to the task

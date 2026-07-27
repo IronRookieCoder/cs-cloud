@@ -338,11 +338,21 @@ func (wm *WorkspaceManager) resolveBaseRef(cache, baseBranch string) (string, er
 }
 
 // CheckoutRepo ensures the mirror cache for repoURL is ready, then creates a
-// per-repo worktree at <taskRoot>/<repoName>/ on a fresh agent branch off the
-// base ref. If the worktree already exists (resuming a prior round), it resets
-// it clean and checks out a new branch instead. No allowlist: any URL the agent
+// per-repo worktree at <taskRoot>/<repoName>/ on a fresh branch off the base
+// ref. If the worktree already exists (resuming a prior round), it resets it
+// clean and checks out a new branch instead. No allowlist: any URL the agent
 // passes is cloned (the GitLab PAT is the real permission boundary).
-func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken string) (string, error) {
+//
+// The branch name is role-aware:
+//   - role="delivery" → node/<shortNodeRunID> (matches multica's node-branch
+//     convention for deliverable PRs; the delivery repo is Gitea-hosted).
+//   - role="code" or any other value (including "", the default) →
+//     agent/<sanitize(agent)>/<shortTaskID> (the existing code-repo convention).
+//
+// In practice multica only emits delivery repos for node-run tasks, so
+// nodeRunID is always present when role="delivery"; if it is missing we fall
+// back to the agent branch rather than producing an unhelpful "node/" prefix.
+func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken, role, nodeRunID string) (string, error) {
 	if err := validateID(workspaceID); err != nil {
 		return "", err
 	}
@@ -364,7 +374,7 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return "", err
 	}
-	branchName := agentBranch(agentName, taskID)
+	branchName := deliveryBranch(nodeRunID, agentName, taskID, role)
 	if _, err := os.Stat(dir); err == nil {
 		// Existing worktree (prior round): reset + new branch.
 		if isGitWorktree(dir) {
@@ -388,6 +398,17 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 		}
 	}
 	return dir, nil
+}
+
+// deliveryBranch picks the worktree branch for a repo checkout based on its
+// role. A "delivery" role with a populated nodeRunID produces the multica
+// node-branch convention (node/<shortNodeRunID>); everything else falls back to
+// the code-repo agent branch.
+func deliveryBranch(nodeRunID, agentName, taskID, role string) string {
+	if role == "delivery" && nodeRunID != "" {
+		return "node/" + shortID(nodeRunID)
+	}
+	return agentBranch(agentName, taskID)
 }
 
 // isGitWorktree reports whether dir is an active git worktree (has a .git file

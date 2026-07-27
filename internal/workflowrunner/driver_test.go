@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -761,7 +762,7 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 func TestNoOpenCodeMRSymbol(t *testing.T) {
 	// The unexported functions from the deleted coderepo.go must not exist.
 	// Reference them as values so the compiler catches re-introduction.
-	var _ = (func(string) bool)(nil) // worktreeHasStagedChanges shape
+	var _ = (func(string) bool)(nil)   // worktreeHasStagedChanges shape
 	var _ = (func(string) string)(nil) // sanitizeBranchSegment shape
 
 	// OpenCodeMR was the exported entry point. Confirm it is gone by
@@ -912,6 +913,89 @@ func TestDriverCheckoutRepo(t *testing.T) {
 	// Unknown task => error.
 	if _, err := d.CheckoutRepo("nonexistent-task", upstream, ""); err == nil {
 		t.Error("CheckoutRepo should error for a task that is not running")
+	}
+}
+
+// TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos verifies that when the
+// task payload carries a `repos[]` entry with role="delivery" for the requested
+// URL, the driver derives the branch from NodeRunID (node/<shortNodeRunID>)
+// rather than the code-repo agent/<agent>/<shortTaskID> convention. The driver
+// looks up the role by matching the repo URL against payload.Repos.
+func TestDriverCheckoutRepo_DeliveryRoleFromPayloadRepos(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	fm := newFakeMultica()
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+	d := asyncTestDriver(t, ts.URL)
+
+	taskID := "22222222-aaaa-bbbb-cccc-dddddddddddd"
+	wsID := "ws-1"
+	nodeRunID := "abcdef01-1234-5678-9abc-def012345678"
+	taskRoot := filepath.Join(d.cfg.WorkspacesRoot, wsID, "tasks", taskID)
+	if err := os.MkdirAll(taskRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.running[taskID] = &taskRecord{
+		payload: workflow.TaskRunPayload{
+			TaskID:      taskID,
+			WorkspaceID: wsID,
+			Agent:       AgentCsc,
+			NodeRunID:   nodeRunID,
+			// multica sends the delivery repo with role="delivery" and the code
+			// repo with role="code". Only the delivery URL is requested below.
+			Repos: []workflow.RepoSpec{
+				{URL: upstream, Role: "delivery", Alias: "delivery"},
+			},
+			Env: map[string]string{
+				"MULTICA_GITLAB_TOKEN": "gitlab-pat",
+				"MULTICA_REPO_TOKEN":   "gitea-pat",
+			},
+		},
+		taskRoot: taskRoot,
+	}
+	d.mu.Unlock()
+
+	dir, err := d.CheckoutRepo(taskID, upstream, "")
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+	wantBranch := "node/" + shortID(nodeRunID) // node/abcdef01
+	if strings.TrimSpace(string(out)) != wantBranch {
+		t.Errorf("delivery branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+	}
+}
+
+// TestLookupRepoRole covers the URL → role mapping used by Driver.CheckoutRepo:
+// returns the matching repo's role, defaulting to "code" when no entry matches
+// (backward-compat for repos not listed in payload.Repos).
+func TestLookupRepoRole(t *testing.T) {
+	repos := []workflow.RepoSpec{
+		{URL: "https://gitlab.example.com/o/code.git", Role: "code"},
+		{URL: "https://gitea.example.com/o/docs.git", Role: "delivery"},
+	}
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"delivery match", "https://gitea.example.com/o/docs.git", "delivery"},
+		{"code match", "https://gitlab.example.com/o/code.git", "code"},
+		{"no match defaults to code", "https://other.example.com/o/other.git", "code"},
+		{"empty repos defaults to code", "https://gitlab.example.com/o/code.git", "code"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := repos
+			if tc.name == "empty repos defaults to code" {
+				pool = nil
+			}
+			if got := lookupRepoRole(pool, tc.url); got != tc.want {
+				t.Errorf("lookupRepoRole(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
 	}
 }
 

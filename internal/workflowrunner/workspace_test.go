@@ -162,7 +162,7 @@ func TestEnsureRepoReady_WithAccessToken(t *testing.T) {
 
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"产品经理":       "agent", // non-ascii collapses to nothing -> fallback "agent"
+		"产品经理":          "agent", // non-ascii collapses to nothing -> fallback "agent"
 		"Backend / API": "backend-api",
 		"Foo.Bar_Baz":   "foo-bar-baz",
 		"":              "agent",
@@ -253,7 +253,7 @@ func TestCheckoutRepo_CreatesBranchWorktree(t *testing.T) {
 	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
 	_ = os.MkdirAll(taskRoot, 0o755)
 
-	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "")
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "", "code", "")
 	if err != nil {
 		t.Fatalf("checkout: %v", err)
 	}
@@ -268,6 +268,72 @@ func TestCheckoutRepo_CreatesBranchWorktree(t *testing.T) {
 	}
 }
 
+// TestCheckoutRepo_DeliveryRoleUsesNodeBranch verifies a role="delivery" repo
+// checks out onto node/<shortNodeRunID> (matching multica's node-branch
+// convention for deliverable PRs), NOT agent/<agent>/<shortTaskID>.
+func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
+	_ = os.MkdirAll(taskRoot, 0o755)
+
+	// nodeRunID is a UUID; shortID keeps the first 8 hex chars.
+	nodeRunID := "abcdef01-1234-5678-9abc-def012345678"
+	dir, err := wm.CheckoutRepo(
+		"ws-1", taskRoot, upstream, "csc",
+		"11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "",
+		"delivery", nodeRunID,
+	)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+	wantBranch := "node/" + shortID(nodeRunID) // node/abcdef01
+	if strings.TrimSpace(string(out)) != wantBranch {
+		t.Errorf("delivery branch = %q, want %q", strings.TrimSpace(string(out)), wantBranch)
+	}
+}
+
+// TestCheckoutRepo_CodeRoleDefaultsToAgentBranch verifies role="code" (and the
+// empty role, treated as the default) still produces agent/<agent>/<shortTaskID>
+// — i.e. the new role parameter does not regress the existing code-repo path.
+func TestCheckoutRepo_CodeRoleDefaultsToAgentBranch(t *testing.T) {
+	requireGit(t)
+	upstream := initTestRepo(t)
+
+	// Distinct taskIDs per iteration so the two worktrees live in separate dirs
+	// and on separate branches (otherwise the second checkout hits the existing
+	// branch from the first and trips the collision-retry suffix).
+	cases := []struct {
+		role   string
+		taskID string
+	}{
+		{"code", "33333333-aaaa-bbbb-cccc-dddddddddddd"},
+		{"", "44444444-aaaa-bbbb-cccc-dddddddddddd"},
+	}
+	for _, tc := range cases {
+		root := t.TempDir()
+		wm := NewWorkspaceManager(root)
+		taskRoot := filepath.Join(root, "ws-1", "tasks", tc.taskID)
+		_ = os.MkdirAll(taskRoot, 0o755)
+
+		dir, err := wm.CheckoutRepo(
+			"ws-1", taskRoot, upstream, "csc", tc.taskID, "master", "",
+			tc.role, "somenoderun",
+		)
+		if err != nil {
+			t.Fatalf("checkout role=%q: %v", tc.role, err)
+		}
+		out, _ := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+		wantBranch := "agent/csc/" + shortID(tc.taskID)
+		if strings.TrimSpace(string(out)) != wantBranch {
+			t.Errorf("role=%q branch = %q, want %q", tc.role, strings.TrimSpace(string(out)), wantBranch)
+		}
+	}
+}
+
 func TestCheckoutRepo_ResetsExistingWorktree(t *testing.T) {
 	requireGit(t)
 	upstream := initTestRepo(t)
@@ -277,14 +343,14 @@ func TestCheckoutRepo_ResetsExistingWorktree(t *testing.T) {
 	_ = os.MkdirAll(taskRoot, 0o755)
 
 	// Round 1: create worktree + pollute it.
-	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "aaaaaaaa-1111-2222-3333-444444444444", "master", "")
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "aaaaaaaa-1111-2222-3333-444444444444", "master", "", "code", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(dir, "junk.txt"), []byte("x"), 0o644)
 
 	// Round 2 (same taskRoot, NEW taskID): existing dir => reset + new branch.
-	dir2, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "bbbbbbbb-1111-2222-3333-444444444444", "master", "")
+	dir2, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "bbbbbbbb-1111-2222-3333-444444444444", "master", "", "code", "")
 	if err != nil {
 		t.Fatalf("checkout round2: %v", err)
 	}
@@ -313,7 +379,7 @@ func TestCheckoutRepo_RejectsTraversalRepoURL(t *testing.T) {
 	_ = os.MkdirAll(sibling, 0o755) // must survive
 
 	for _, bad := range []string{"..", ".", "https://h/x/.."} {
-		_, err := wm.CheckoutRepo("ws-1", taskRoot, bad, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "")
+		_, err := wm.CheckoutRepo("ws-1", taskRoot, bad, "csc", "11111111-aaaa-bbbb-cccc-dddddddddddd", "master", "", "code", "")
 		if err == nil {
 			t.Errorf("CheckoutRepo(%q) should have failed", bad)
 		}
@@ -336,7 +402,7 @@ func TestCheckoutRepo_ResolvesDefaultBaseBranch(t *testing.T) {
 	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
 	_ = os.MkdirAll(taskRoot, 0o755)
 	// baseBranch="" => resolveBaseRef must discover the default from the mirror.
-	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "22222222-aaaa-bbbb-cccc-dddddddddddd", "", "")
+	dir, err := wm.CheckoutRepo("ws-1", taskRoot, upstream, "csc", "22222222-aaaa-bbbb-cccc-dddddddddddd", "", "", "code", "")
 	if err != nil {
 		t.Fatalf("checkout with empty base: %v", err)
 	}
