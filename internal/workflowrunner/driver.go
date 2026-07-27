@@ -337,6 +337,19 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	var runErr error
 	if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
 		out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
+		// Resume failure fallback: if resuming the prior session failed to make
+		// progress, retry once with a fresh session (the prior session may be
+		// corrupt on disk). Mirrors multica daemon.go:2662-2677.
+		if runErr != nil && payload.PriorSessionID != "" && !d.aborted(payload.TaskID) {
+			logger.Warn("workflow: resumed session failed (%v); retrying with fresh session", runErr)
+			payload.PriorSessionID = "" // force bindSession to create a fresh chat session
+			freshSessionID, bindErr := d.bindSession(ctx, payload, worktree)
+			if bindErr != nil {
+				_ = d.client.FailTask(ctx, payload.TaskID, bindErr.Error(), "")
+				return bindErr
+			}
+			out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, freshSessionID)
+		}
 	} else {
 		out, runErr = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
 	}

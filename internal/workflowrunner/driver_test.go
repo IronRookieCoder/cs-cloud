@@ -835,3 +835,81 @@ func TestDriverCheckoutRepo(t *testing.T) {
 		t.Error("CheckoutRepo should error for a task that is not running")
 	}
 }
+
+// flakySessionRunner fails its first RunSession call (simulating a corrupt
+// resumed session) and succeeds on the second (the fresh retry).
+type flakySessionRunner struct {
+	calls int
+}
+
+func (f *flakySessionRunner) RunSession(ctx context.Context, sessionID, worktree, prompt string, env []string) ([]byte, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, fmt.Errorf("resumed session boom")
+	}
+	return []byte("ok-round2"), nil
+}
+
+// TestExecute_ResumeFailureRetriesFresh verifies that when a resumed prior
+// session FAILS on the first RunCSCSession, execute retries once with a fresh
+// session (clears PriorSessionID → bindSession creates a new chat session →
+// RunCSCSession again). Mirrors multica daemon.go:2662-2677.
+func TestExecute_ResumeFailureRetriesFresh(t *testing.T) {
+	installFakeAgent(t, AgentCsc)
+
+	flaky := &flakySessionRunner{}
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot:    t.TempDir(),
+		CacheDir:          t.TempDir(),
+		SyncInterval:      time.Hour,
+		GCInterval:        time.Hour,
+		HeartbeatInterval: time.Hour,
+		AgentTimeout:      time.Minute,
+		AllowedAgents:     []string{AgentCsc},
+	}
+	// SessionRunner is set in deps before Start so Start injects it into the
+	// runner; execute's CSC-session branch checks d.deps.SessionRunner, and
+	// RunCSCSession reads tr.sessionRunner — both must be non-nil.
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  flaky,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	// Wait for the async maintainRegistrations goroutine to register ws-1 so
+	// bindSession sees a runtime for the workspace.
+	waitFor(t, "registration", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.registrations["ws-1"]
+		return ok
+	})
+
+	err := d.execute(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t-resume", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, Prompt: "do work", PriorSessionID: "sess-prior",
+	}, &taskRecord{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if flaky.calls != 2 {
+		t.Errorf("flakySessionRunner calls = %d, want 2 (failed resume + fresh retry)", flaky.calls)
+	}
+	// The fresh retry creates a new chat session (the resume attempt skipped
+	// CreateChatSession because PriorSessionID was set).
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.sessions) != 1 {
+		t.Errorf("expected 1 CreateChatSession (fresh retry), got %d", len(fm.sessions))
+	}
+}
