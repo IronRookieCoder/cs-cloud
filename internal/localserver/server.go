@@ -88,6 +88,12 @@ type Server struct {
 	gitWatcher  *gitwatcher.Watcher
 
 	updateChecker *updater.Checker
+
+	// agentPIDWriter persists the current agent PID to disk so that
+	// StopDaemon / ForceCleanupStale can locate the right process after
+	// the agent has been restarted in-place. Optional; when nil, restart
+	// paths skip persistence (used in tests).
+	agentPIDWriter func(pid int)
 }
 
 func New(opts ...Option) *Server {
@@ -370,6 +376,21 @@ func (s *Server) Dispatcher() *CommandDispatcher {
 
 func (s *Server) SetTunnelStatusProvider(p TunnelStatusProvider) {
 	s.tunnelStatus = p
+}
+
+// SetAgentPIDWriter registers a callback invoked whenever the active agent
+// PID changes (initial start, RestartDefaultAgent, /runtime/dispose). Pass
+// nil to clear. The callback receives 0 when no agent is alive.
+func (s *Server) SetAgentPIDWriter(fn func(pid int)) {
+	s.agentPIDWriter = fn
+}
+
+// persistAgentPID is a no-op when no writer is registered.
+func (s *Server) persistAgentPID() {
+	if s.agentPIDWriter == nil {
+		return
+	}
+	s.agentPIDWriter(s.manager.AgentPID())
 }
 
 func (s *Server) MarkStarted(dir string) {

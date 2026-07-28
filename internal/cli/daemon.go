@@ -116,6 +116,17 @@ func runDaemon(a *app.App) error {
 			logger.Warn("failed to save agent pid: %v", err)
 		}
 	}
+	// Wire up agent PID persistence so any later restart/dispose updates
+	// agent.pid instead of leaving it pointing at a dead process.
+	srv.SetAgentPIDWriter(func(pid int) {
+		if pid > 0 {
+			if err := a.WriteAgentPID(pid); err != nil {
+				logger.Warn("failed to save agent pid: %v", err)
+			}
+			return
+		}
+		a.RemoveAgentPID()
+	})
 
 	if err := srv.Start(net.JoinHostPort(host, fmt.Sprintf("%d", port))); err != nil {
 		logger.Error("failed to start server: %v", err)
@@ -235,7 +246,18 @@ func runDaemon(a *app.App) error {
 		}
 		dispatcher.BindRestarter(restarter)
 		dispatcher.BindAgentRestarter(func(ctx context.Context, onProgress func(phase string, progress float64, message string)) error {
-			return srv.Manager().RestartDefaultAgent(ctx, agentType, agentCommand, a.Config().AgentVersionCommand, a.Config().AgentWorkspace, a.Config().AgentEnv, onProgress)
+			err := srv.Manager().RestartDefaultAgent(ctx, agentType, agentCommand, a.Config().AgentVersionCommand, a.Config().AgentWorkspace, a.Config().AgentEnv, onProgress)
+			// Persist the new agent PID regardless of outcome: on success
+			// so StopDaemon hits the right process, on failure so a stale
+			// PID doesn't survive a subsequent restart.
+			if pid := srv.Manager().AgentPID(); pid > 0 {
+				if werr := a.WriteAgentPID(pid); werr != nil {
+					logger.Warn("failed to save agent pid after restart: %v", werr)
+				}
+			} else {
+				a.RemoveAgentPID()
+			}
+			return err
 		})
 
 		triggerHeartbeat := device.HeartbeatLoop(cloudCtx, a.Config(), tunnelMgr.IsConnected, func(cmds []device.CloudCommand) {
