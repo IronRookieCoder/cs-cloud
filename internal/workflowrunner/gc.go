@@ -86,18 +86,35 @@ func (d *Driver) gcWorkspace(wsDir string, stats *gcStats) {
 		taskDir := filepath.Join(tasksDir, entry.Name())
 		switch d.shouldCleanTaskDir(taskDir) {
 		case gcActionClean:
+			// TOCTOU re-check: shouldCleanTaskDir's isActiveEnvRoot gate ran
+			// before an HTTP gc-check round-trip (up to gcAPITimeout) and a
+			// dirSize walk; a task resuming via prior_work_dir can claim this
+			// exact dir inside that window. Re-verify under d.mu immediately
+			// before the destructive op so we never wipe an in-flight task.
+			if d.isActiveEnvRoot(taskDir) {
+				stats.skipped++
+				continue
+			}
 			bytes := dirSize(taskDir)
 			d.cleanTaskDir(taskDir)
 			stats.cleaned++
 			stats.bytesReclaimed += bytes
 			cleanedHere++
 		case gcActionOrphan:
+			if d.isActiveEnvRoot(taskDir) {
+				stats.skipped++
+				continue
+			}
 			bytes := dirSize(taskDir)
 			d.cleanTaskDir(taskDir)
 			stats.orphaned++
 			stats.bytesReclaimed += bytes
 			cleanedHere++
 		case gcActionCleanArtifacts:
+			if d.isActiveEnvRoot(taskDir) {
+				stats.skipped++
+				continue
+			}
 			removed, bytes, perPattern := d.cleanTaskArtifacts(taskDir, d.cfg.GCArtifactPatterns)
 			if removed > 0 {
 				stats.artifactDirs++
