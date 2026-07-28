@@ -368,13 +368,19 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 		}
 	}
 
+	// Default to "default" mode (read-only tools auto-allow, others ask via
+	// permission.asked/question.asked SSE). When ACP_PERMISSION_MODE=bypassPermissions
+	// is set in CS_CLOUD_AGENT_ENV (typical for unattended deployments), forward
+	// it so csc starts the session in bypass mode. csc's HTTP /session handler
+	// treats body.permission_mode as authoritative and would otherwise override
+	// whatever the user settings file declares.
+	permMode := "default"
+	if v, ok := a.customEnv["ACP_PERMISSION_MODE"]; ok && v == "bypassPermissions" {
+		permMode = "bypassPermissions"
+	}
 	body := map[string]any{
-		"session_id": sessionID,
-		// "default" mode: read-only tools auto-allow, everything else asks.
-		// The asks surface as permission.asked/question.asked SSE events so
-		// the web UI can prompt the user while the task runs — bypassPermissions
-		// would suppress them entirely and leave the session unsupervised.
-		"permission_mode": "default",
+		"session_id":      sessionID,
+		"permission_mode": permMode,
 	}
 	if cwd != "" {
 		body["cwd"] = cwd
