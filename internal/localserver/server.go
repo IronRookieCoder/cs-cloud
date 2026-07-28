@@ -208,6 +208,8 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /questions/{id}/reply", s.handleQuestionReply)
 	api.HandleFunc("POST /questions/{id}/reject", s.handleQuestionReject)
 
+	api.HandleFunc("DELETE /workspace", s.handleWorkspaceDelete)
+
 	api.HandleFunc("POST /terminal", s.handleTerminalCreate)
 	api.HandleFunc("DELETE /terminal/{id}", s.handleTerminalKill)
 	api.HandleFunc("POST /terminal/{id}/resize", s.handleTerminalResize)
