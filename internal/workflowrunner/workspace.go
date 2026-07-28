@@ -2,6 +2,7 @@ package workflowrunner
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"os"
@@ -170,13 +171,20 @@ func (wm *WorkspaceManager) CreateWorktree(workspaceID, taskID, repoURL, ref str
 	return dir, nil
 }
 
-// repoName extracts the repository name from a URL.
-func repoName(url string) string {
-	base := filepath.Base(url)
+// repoName returns a filesystem-safe, collision-resistant directory name for a
+// repo URL: <basename>-<8 hex of sha256(url)>. The basename alone is unsafe now
+// that Repos[] allows several repos per task — distinct repos with the same
+// basename (e.g. gitlab/team-a/api.git vs gitlab/team-b/api.git) would otherwise
+// share one mirror cache (the second clone silently no-ops because HEAD exists,
+// and 'remote update' runs against the first repo's remote) and one worktree
+// dir. The digest suffix makes collisions astronomically unlikely.
+func repoName(rawURL string) string {
+	base := filepath.Base(rawURL)
 	if ext := filepath.Ext(base); ext == ".git" {
-		return base[:len(base)-len(".git")]
+		base = base[:len(base)-len(".git")]
 	}
-	return base
+	sum := sha256.Sum256([]byte(rawURL))
+	return fmt.Sprintf("%s-%x", base, sum[:4])
 }
 
 // runGit runs a git command with a default timeout and returns a wrapped error

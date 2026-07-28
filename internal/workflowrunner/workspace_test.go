@@ -1,6 +1,8 @@
 package workflowrunner
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,18 +44,35 @@ func TestWorkspaceManagerPaths(t *testing.T) {
 }
 
 func TestRepoName(t *testing.T) {
+	// repoName is now <basename>-<8 hex of sha256(url)> so distinct repos that
+	// share a basename no longer collide on the mirror cache / worktree dir.
+	digest := func(url string) string {
+		sum := sha256.Sum256([]byte(url))
+		return fmt.Sprintf("%x", sum[:4])
+	}
 	cases := []struct {
 		url  string
-		want string
+		base string
 	}{
 		{"https://example.com/repo.git", "repo"},
 		{"https://example.com/repo", "repo"},
 		{"git@example.com:org/repo.git", "repo"},
 	}
 	for _, tc := range cases {
-		if got := repoName(tc.url); got != tc.want {
-			t.Fatalf("repoName(%q) = %q, want %q", tc.url, got, tc.want)
+		want := tc.base + "-" + digest(tc.url)
+		if got := repoName(tc.url); got != want {
+			t.Fatalf("repoName(%q) = %q, want %q", tc.url, got, want)
 		}
+	}
+
+	// Same-basename repos in different orgs MUST disambiguate.
+	a := repoName("https://gitlab/team-a/api.git")
+	b := repoName("https://gitlab/team-b/api.git")
+	if a == b {
+		t.Fatalf("distinct repos collapsed to same name: %q", a)
+	}
+	if !strings.HasPrefix(a, "api-") || !strings.HasPrefix(b, "api-") {
+		t.Fatalf("expected api-* names, got %q / %q", a, b)
 	}
 }
 

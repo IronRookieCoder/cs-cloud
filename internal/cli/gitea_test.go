@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"cs-cloud/internal/workflowrunner"
 )
 
 // fakeGitOps records the sequence of git operations without touching the
@@ -131,9 +133,11 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}
 
 	// WriteFile + Commit + Push + CurrentBranch all operate on the delivery
-	// worktree subdir (<taskRoot>/<repoName>), NOT a random temp dir or the
-	// bare task root. Same parity as the code-MR test (Fix 3).
-	wantWorktree := taskRoot + string(os.PathSeparator) + "wf-bbb"
+	// worktree subdir (<taskRoot>/<repoName(repoURL)>), NOT a random temp dir
+	// or the bare task root. Derive the expected path from the same production
+	// helper CheckoutRepo uses, so the assertion tracks repoName evolution
+	// (the name now carries a URL digest suffix to avoid basename collisions).
+	wantWorktree := workflowrunner.RepoWorktreeDir(taskRoot, "https://gitea.test/t-aaa/wf-bbb.git")
 	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != wantWorktree {
 		t.Errorf("CurrentBranch dir = %+v, want %q (the delivery worktree subdir)",
 			fake.currentBranchDirs, wantWorktree)
@@ -243,8 +247,11 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	}
 
 	// The worktree subdir CheckoutRepo creates for the code repo. submit must
-	// push from THIS dir, not the bare task root (which has no .git).
-	wantWorktree := taskRoot + string(os.PathSeparator) + "mycode"
+	// push from THIS dir, not the bare task root (which has no .git). Derive
+	// the expected path from the same production helper CheckoutRepo uses so
+	// the assertion tracks repoName evolution (digest suffix added to avoid
+	// basename collisions across orgs).
+	wantWorktree := workflowrunner.RepoWorktreeDir(taskRoot, "https://gitlab.test/group/mycode.git")
 	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != wantWorktree {
 		t.Errorf("CurrentBranch dir = %+v, want %q (the code-repo worktree subdir)",
 			fake.currentBranchDirs, wantWorktree)
