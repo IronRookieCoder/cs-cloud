@@ -217,6 +217,15 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("MULTICA_NODE_RUN_ID not set")
 	}
 
+	// Validate the report-back URL BEFORE pushing/opening the MR: otherwise a
+	// missing MULTICA_SERVER_URL leaves an orphaned MR on GitLab that no retry
+	// can recover (the second push would hit "merge request already exists").
+	serverURL := envOr("MULTICA_SERVER_URL", "")
+	if serverURL == "" {
+		return fmt.Errorf("MULTICA_SERVER_URL not set")
+	}
+	token := os.Getenv("MULTICA_TOKEN")
+
 	// Determine current branch in the worktree.
 	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
 	if err != nil {
@@ -236,11 +245,6 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
-	serverURL := envOr("MULTICA_SERVER_URL", "")
-	if serverURL == "" {
-		return fmt.Errorf("MULTICA_SERVER_URL not set")
-	}
-	token := os.Getenv("MULTICA_TOKEN")
 	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
 	if err := reportToMultica(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
 		return fmt.Errorf("report submit: %w", err)
