@@ -389,7 +389,13 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 			}
 			return dir, nil
 		}
-		// Stale non-worktree dir in the way: remove and rebuild.
+		// Stale non-worktree dir in the way. The directory may still be
+		// registered as a worktree in <cache>/worktrees/ (e.g. its .git marker
+		// was lost but the metadata administrative file lives on); a plain
+		// RemoveAll leaves that entry, after which 'worktree add' refuses with
+		// '<dir> is a missing but already registered working tree'. Mirror
+		// CreateWorktree's cleanup: unregister first, then drop the dir.
+		_ = runGit("-C", cache, "worktree", "remove", "--force", dir)
 		_ = os.RemoveAll(dir)
 	}
 	// Fresh worktree on a new branch. Collision => timestamp suffix retry.
