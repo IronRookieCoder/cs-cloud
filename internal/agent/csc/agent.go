@@ -174,7 +174,7 @@ func (a *Agent) Kill() error {
 func (a *Agent) gracefulShutdown(timeout time.Duration) {
 	if a.endpoint != "" && a.httpClient != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+"/health", nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+"/global/dispose", nil)
 		if req != nil {
 			resp, err := a.httpClient.Do(req)
 			if err == nil {
