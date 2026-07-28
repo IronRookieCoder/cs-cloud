@@ -124,6 +124,11 @@ func initTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	runGitOrFatal(t, "init", dir)
+	// Pin the default branch to "master" so the many tests that pass "master"
+	// explicitly as baseBranch do not depend on the host's init.defaultBranch
+	// (CI images and modern setups default to "main", which would make
+	// worktree add fail with "invalid reference").
+	runGitOrFatal(t, "-C", dir, "symbolic-ref", "HEAD", "refs/heads/master")
 	runGitOrFatal(t, "-C", dir, "config", "user.email", "test@example.com")
 	runGitOrFatal(t, "-C", dir, "config", "user.name", "Test")
 	path := filepath.Join(dir, "README.md")
