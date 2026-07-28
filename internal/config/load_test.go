@@ -325,6 +325,25 @@ func TestLoad_WorkflowGCDisabled_ValueParsed(t *testing.T) {
 	}
 }
 
+// TestLoad_WorkflowGCDisabled_FalseOverridesFile verifies GC_DISABLED=false is
+// treated as an env-level opt-in that overrides a file-level gc_enabled:false.
+// CodeRabbit PR #27 follow-up: without this, GC_DISABLED=false leaves envGCSet
+// unset, letting the file's false win — contradicting the operator's explicit
+// "don't disable GC" intent.
+func TestLoad_WorkflowGCDisabled_FalseOverridesFile(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=false + file gc_enabled=false: GCEnabled = false, want true (env opt-in overrides file)")
+	}
+}
+
 // TestLoad_WorkflowGCEnabled_MissingKeyKeepsDefault verifies a config file that
 // omits workflow.gc_enabled does NOT disable GC. json.Unmarshal maps a missing
 // key to false, which previously overrode the env/default true via

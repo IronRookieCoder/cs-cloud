@@ -57,12 +57,12 @@ func Load() (*Config, error) {
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ENABLED"); v != "" {
 		cfg.Workflow.GCEnabled = v == "true" || v == "1" || v == "yes"
 		envGCSet = true
-	} else if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_DISABLED"); v != "" && (v == "true" || v == "1" || v == "yes") {
-		// Explicit opt-out for operators who want to keep every workdir. Value-
-		// parsed (not "any non-empty") so GC_DISABLED=false/0 doesn't unexpectedly
-		// disable GC — every other boolean env var in this file is parsed the
-		// same way (CodeRabbit PR #27 comment 9).
-		cfg.Workflow.GCEnabled = false
+	} else if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_DISABLED"); v != "" {
+		// Any explicit value is an env-level override: truthy (true/1/yes) →
+		// disabled, anything else (false/0/no) → enabled. This ensures
+		// GC_DISABLED=false wins over a file-level gc_enabled:false, honoring
+		// the operator's explicit opt-in (CodeRabbit PR #27 follow-up).
+		cfg.Workflow.GCEnabled = !(v == "true" || v == "1" || v == "yes")
 		envGCSet = true
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_TTL"); v != "" {
