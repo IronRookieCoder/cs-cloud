@@ -3,6 +3,7 @@ package localserver
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 )
 
 type repoCheckoutRequest struct {
@@ -13,6 +14,20 @@ type repoCheckoutRequest struct {
 
 type repoCheckoutResponse struct {
 	Path string `json:"path"`
+}
+
+// credRedactor matches scheme://user:pass@host so git stderr / arg echoes never
+// leak the injected GitLab PAT into HTTP responses. Git failure messages
+// routinely echo the full remote URL ('fatal: unable to access
+// https://oauth2:<token>@host/...'); returning that verbatim hands the
+// credential back to the caller.
+var credRedactor = regexp.MustCompile(`(\w+://[^/:@]+:)[^@]+(@)`)
+
+// redactCreds replaces URL-embedded credentials with '***' so error strings
+// derived from git output (which may contain the authed clone URL) are safe to
+// return over HTTP. Mirrors internal/cli/gitea.go urlCredRedactor.
+func redactCreds(s string) string {
+	return credRedactor.ReplaceAllString(s, "${1}***${2}")
 }
 
 // handleRepoCheckout serves an agent's on-demand `cs-cloud repo checkout`:
@@ -42,7 +57,9 @@ func (s *Server) handleRepoCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	path, err := s.workflow.CheckoutRepo(req.TaskID, req.RepoURL, req.BaseBranch)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "CHECKOUT_FAILED", err.Error())
+		// Git error text can echo the authed clone URL verbatim (the PAT was
+		// injected for the mirror clone); scrub credentials before returning.
+		writeErr(w, http.StatusInternalServerError, "CHECKOUT_FAILED", redactCreds(err.Error()))
 		return
 	}
 	writeOK(w, repoCheckoutResponse{Path: path})

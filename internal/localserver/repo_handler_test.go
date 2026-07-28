@@ -112,3 +112,23 @@ func TestHandleRepoCheckout_DriverError(t *testing.T) {
 		t.Fatalf("body = %s, want CHECKOUT_FAILED code", rec.Body.String())
 	}
 }
+
+// TestRedactCreds verifies URL-embedded basic-auth credentials are scrubbed from
+// any string returned to HTTP clients. Git failure messages routinely echo the
+// authed clone URL (oauth2:<PAT>@host); returning that verbatim would leak the
+// GitLab PAT to whoever called /repo/checkout.
+func TestRedactCreds(t *testing.T) {
+	cases := map[string]string{
+		"https://oauth2:glpat-abcdefghijklmnop@gitlab.example.com/group/repo.git": "https://oauth2:***@gitlab.example.com/group/repo.git",
+		"fatal: unable to access 'https://oauth2:secret@gitlab/x.git/': failed":   "fatal: unable to access 'https://oauth2:***@gitlab/x.git/': failed",
+		// No credentials: unchanged.
+		"https://gitlab.example.com/group/repo.git": "https://gitlab.example.com/group/repo.git",
+		// Bare host, no userinfo: unchanged.
+		"checkout failed for gitlab.example.com": "checkout failed for gitlab.example.com",
+	}
+	for in, want := range cases {
+		if got := redactCreds(in); got != want {
+			t.Errorf("redactCreds(%q)\n  = %q\n want %q", in, got, want)
+		}
+	}
+}
