@@ -48,11 +48,22 @@ func Load() (*Config, error) {
 			cfg.Workflow.GCInterval = d
 		}
 	}
+	// envGCSet tracks whether the env explicitly set GC state, so the file
+	// merge below knows whether the file's gc_enabled is allowed to win. With-
+	// out it, json.Unmarshal maps a missing workflow.gc_enabled key to false,
+	// which would silently disable GC for every config file that doesn't write
+	// the key explicitly (CodeRabbit PR #27 comment 10).
+	envGCSet := false
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_ENABLED"); v != "" {
 		cfg.Workflow.GCEnabled = v == "true" || v == "1" || v == "yes"
-	} else if platform.Getenv("CS_CLOUD_WORKFLOW_GC_DISABLED") != "" {
-		// Explicit opt-out for operators who want to keep every workdir.
+		envGCSet = true
+	} else if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_DISABLED"); v != "" && (v == "true" || v == "1" || v == "yes") {
+		// Explicit opt-out for operators who want to keep every workdir. Value-
+		// parsed (not "any non-empty") so GC_DISABLED=false/0 doesn't unexpectedly
+		// disable GC — every other boolean env var in this file is parsed the
+		// same way (CodeRabbit PR #27 comment 9).
 		cfg.Workflow.GCEnabled = false
+		envGCSet = true
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_GC_TTL"); v != "" {
 		if d, ok := parsePositiveDuration(v); ok {
@@ -146,6 +157,24 @@ func Load() (*Config, error) {
 					cfg.IdleBufferSeconds = fileCfg.IdleBufferSeconds
 				}
 				cfg.Workflow = mergeWorkflowConfig(cfg.Workflow, fileCfg.Workflow)
+
+				// GCEnabled file-merge: a config file that explicitly writes
+				// workflow.gc_enabled should override the default true, but
+				// ONLY when the env hasn't already set it (env wins over file).
+				// json.Unmarshal maps a missing key to false, so detect presence
+				// with a *bool probe rather than treating default-false as an
+				// explicit opt-out — otherwise every config file that omits the
+				// key silently disables GC (CodeRabbit PR #27 comment 10).
+				if !envGCSet {
+					var probe struct {
+						Workflow struct {
+							GCEnabled *bool `json:"gc_enabled"`
+						} `json:"workflow"`
+					}
+					if err := json.Unmarshal(b, &probe); err == nil && probe.Workflow.GCEnabled != nil {
+						cfg.Workflow.GCEnabled = *probe.Workflow.GCEnabled
+					}
+				}
 			}
 		}
 	}
@@ -233,10 +262,9 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 		current.GCInterval = file.GCInterval
 	}
 	// GC TTLs: file overrides only when current still equals the default (env
-	// wins over file, mirroring GCInterval). GCEnabled is OR-ed — a file that
-	// explicitly sets it false only takes effect when env hasn't set it (the env
-	// path above leaves the default true when unset, so we cannot distinguish
-	// "default true" from "env true" here; treat file false as authoritative).
+	// wins over file, mirroring GCInterval). GCEnabled is handled in Load()
+	// (see the *bool probe there) — not here, because json.Unmarshal zeroes a
+	// missing key and we need to distinguish absent from explicit-false.
 	if file.GCTTL != 0 && current.GCTTL == defaults.GCTTL {
 		current.GCTTL = file.GCTTL
 	}
@@ -249,9 +277,11 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	if len(file.GCArtifactPatterns) > 0 && stringSlicesEqual(current.GCArtifactPatterns, defaults.GCArtifactPatterns) {
 		current.GCArtifactPatterns = file.GCArtifactPatterns
 	}
-	if !file.GCEnabled {
-		current.GCEnabled = false
-	}
+	// GCEnabled is intentionally NOT handled here: json.Unmarshal maps a
+	// missing workflow.gc_enabled key to false, so merging in this function
+	// (which runs unconditionally) would silently disable GC for any file
+	// that doesn't write the key. The override lives in Load() instead,
+	// where a *bool probe distinguishes explicit-false from absent.
 	if file.HeartbeatInterval != 0 && current.HeartbeatInterval == defaults.HeartbeatInterval {
 		current.HeartbeatInterval = file.HeartbeatInterval
 	}

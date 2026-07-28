@@ -296,3 +296,83 @@ func TestLoad_WorkflowMulticaBaseURLFromConfigFilePreventsDerivation(t *testing.
 		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
 	}
 }
+
+// TestLoad_WorkflowGCDisabled_ValueParsed verifies GC_DISABLED is parsed as a
+// boolean, not "any non-empty value". An operator who sets
+// CS_CLOUD_WORKFLOW_GC_DISABLED=false is explicitly opting back IN — the prior
+// implementation treated that as truthy and unexpectedly disabled GC.
+// CodeRabbit PR #27 comment 9.
+func TestLoad_WorkflowGCDisabled_ValueParsed(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=false: GCEnabled = false, want true (explicit opt-in)")
+	}
+
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "true")
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg2.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=true: GCEnabled = true, want false (explicit opt-out)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_MissingKeyKeepsDefault verifies a config file that
+// omits workflow.gc_enabled does NOT disable GC. json.Unmarshal maps a missing
+// key to false, which previously overrode the env/default true via
+// mergeWorkflowConfig's `if !file.GCEnabled` clause. CodeRabbit PR #27 comment 10.
+func TestLoad_WorkflowGCEnabled_MissingKeyKeepsDefault(t *testing.T) {
+	// File has a workflow object but no gc_enabled key.
+	isolatedConfig(t, `{"workflow":{"sync_interval":"15m"}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("config without workflow.gc_enabled: GCEnabled = false, want true (default preserved)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_ExplicitFileFalseDisables verifies the file still
+// wins when it explicitly writes gc_enabled:false (the legitimate opt-out path
+// the previous behavior was guarding).
+func TestLoad_WorkflowGCEnabled_ExplicitFileFalseDisables(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Workflow.GCEnabled {
+		t.Errorf("config with gc_enabled:false: GCEnabled = true, want false (explicit file opt-out)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_EnvWinsOverFileFalse verifies env explicitly
+// enabling GC overrides a file that disables it.
+func TestLoad_WorkflowGCEnabled_EnvWinsOverFileFalse(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "true")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("env GC_ENABLED=true over file gc_enabled:false: GCEnabled = false, want true (env wins)")
+	}
+}
