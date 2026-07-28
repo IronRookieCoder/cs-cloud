@@ -15,9 +15,13 @@ import (
 	"cs-cloud/internal/workflow"
 )
 
-// providerCSCloud is the runtime provider value the issue-conversation
-// flow searches for; registration must use exactly this string.
-const providerCSCloud = "csc"
+// providerCSCloud is the runtime provider value multica's issue-conversation
+// flow filters runtimes by (server/internal/handler/issue_conversation.go:
+// csCloudRuntimeProvider). This is a cross-repo wire contract — it MUST stay
+// in lockstep with multica's constant, and is NOT the local agent CLI name
+// ("csc"). Registering "csc" here makes multica return 503 "cs-cloud device
+// not online" for every issue conversation.
+const providerCSCloud = "cs-cloud"
 
 // deregisterTimeout bounds the best-effort deregister call on Stop.
 const deregisterTimeout = 10 * time.Second
