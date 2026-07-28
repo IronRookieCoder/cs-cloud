@@ -326,7 +326,6 @@ type cscSession struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
-	Version   int    `json:"version"`
 	Status    string `json:"status"`
 }
 
@@ -388,7 +387,10 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 		return err
 	}
 	var created cscSession
-	if err := json.Unmarshal(response, &created); err != nil || created.Status == "" {
+	if err := json.Unmarshal(response, &created); err != nil {
+		return fmt.Errorf("parse session response: %w", err)
+	}
+	if created.Status == "" {
 		// Older csc servers did not expose lifecycle status. Preserve
 		// compatibility rather than polling an endpoint that cannot prove ready.
 		return nil
@@ -731,24 +733,27 @@ func extractLastAssistantText(body json.RawMessage) (string, error) {
 		return "", fmt.Errorf("parse messages: %w", err)
 	}
 
-	var parts []any
 	for i := len(envelope.Messages) - 1; i >= 0; i-- {
 		msg := envelope.Messages[i]
 		role, _ := msg["role"].(string)
 		if role != "assistant" {
 			continue
 		}
-		p, _ := msg["parts"].([]any)
-		if len(p) == 0 {
-			continue
-		}
-		parts = p
-		break
-	}
-	if parts == nil {
-		return "", nil
-	}
 
+		for _, candidate := range []any{msg["parts"], msg["content"]} {
+			if text := extractTextContent(candidate); strings.TrimSpace(text) != "" {
+				return text, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func extractTextContent(content any) string {
+	if wrapper, ok := content.(map[string]any); ok {
+		content = wrapper["content"]
+	}
+	parts, _ := content.([]any)
 	var b strings.Builder
 	for _, p := range parts {
 		part, ok := p.(map[string]any)
@@ -765,7 +770,7 @@ func extractLastAssistantText(body json.RawMessage) (string, error) {
 			b.WriteString(text)
 		}
 	}
-	return b.String(), nil
+	return b.String()
 }
 
 func (a *Agent) subscribeEvents(ctx context.Context) {
