@@ -2,10 +2,14 @@ package csc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"cs-cloud/internal/agent"
 )
 
 func TestWaitForSessionDoneWaitsForBusyThenIdle(t *testing.T) {
@@ -260,6 +264,85 @@ func TestRunSessionReturnsTerminalErrorFromEventStream(t *testing.T) {
 	}
 	if got, want := err.Error(), "wait for completion: Max turns reached"; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestRunSessionRejectsCompletedSessionWithoutAssistantOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("event: session.status\n"))
+			_, _ = w.Write([]byte("data: {\"status\":{\"type\":\"busy\"}}\n\n"))
+			_, _ = w.Write([]byte("event: session.result\n"))
+			_, _ = w.Write([]byte("data: {\"subtype\":\"success\"}\n\n"))
+			_, _ = w.Write([]byte("event: session.idle\n"))
+			_, _ = w.Write([]byte("data: {}\n\n"))
+		case r.Method == http.MethodPost && r.URL.Path == "/session/session-1/prompt_async":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1/message":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"messages":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cscAgent := &Agent{
+		endpoint:    server.URL,
+		rawEndpoint: server.URL,
+		httpClient:  server.Client(),
+	}
+	_, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	if !errors.Is(err, agent.ErrEmptySessionOutput) {
+		t.Fatalf("RunSession error = %v, want ErrEmptySessionOutput", err)
+	}
+}
+
+func TestCreateSessionFailsWhenWorkerStopsBeforeReady(t *testing.T) {
+	var created bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1":
+			if !created {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"session-1","status":"stopped"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			created = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"session_id":"session-1","status":"starting"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	agent := &Agent{
+		endpoint:    server.URL,
+		rawEndpoint: server.URL,
+		httpClient:  server.Client(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := agent.CreateSession(ctx, "session-1", t.TempDir(), nil)
+	if err == nil || !strings.Contains(err.Error(), "stopped before becoming ready") {
+		t.Fatalf("CreateSession error = %v, want stopped-before-ready error", err)
 	}
 }
 

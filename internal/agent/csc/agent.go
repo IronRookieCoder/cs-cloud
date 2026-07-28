@@ -327,6 +327,7 @@ type cscSession struct {
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
 	Version   int    `json:"version"`
+	Status    string `json:"status"`
 }
 
 func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
@@ -342,9 +343,9 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 }
 
 // CreateSession creates a csc session with the requested ID and working
-// directory. If a session with that ID already exists, it returns without
-// error. This lets workflow tasks expose a stable conversation URL that
-// matches the multica chat_session.id.
+// directory, waiting for a starting worker to become ready and replacing a
+// stopped session. This lets workflow tasks expose a stable conversation URL
+// that matches the multica chat_session.id.
 func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string) error {
 	return a.createSessionWithEnv(ctx, sessionID, cwd, env)
 }
@@ -354,12 +355,15 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 		return fmt.Errorf("session id is required")
 	}
 
-	// Avoid replacing an existing active session.
-	resp, err := a.doRawGet(ctx, "/session/"+sessionID)
-	if err == nil {
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
+	// Avoid replacing an existing active session, but do not mistake a
+	// persisted stopped-session stub for a ready worker.
+	status, found, err := a.getSessionLifecycle(ctx, sessionID)
+	if err == nil && found {
+		switch status {
+		case "", "running":
 			return nil
+		case "starting":
+			return a.waitForSessionReady(ctx, sessionID)
 		}
 	}
 
@@ -379,8 +383,71 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 	}
 	// csc registers POST /session without a trailing slash; Hono matches
 	// strictly, so "/session/" would 404.
-	_, err = a.doPost(ctx, "/session", body)
-	return err
+	response, err := a.doPost(ctx, "/session", body)
+	if err != nil {
+		return err
+	}
+	var created cscSession
+	if err := json.Unmarshal(response, &created); err != nil || created.Status == "" {
+		// Older csc servers did not expose lifecycle status. Preserve
+		// compatibility rather than polling an endpoint that cannot prove ready.
+		return nil
+	}
+	if created.Status == "running" {
+		return nil
+	}
+	if created.Status == "stopping" || created.Status == "stopped" || created.Status == "detached" {
+		return fmt.Errorf("session %s stopped before becoming ready (status=%s)", sessionID, created.Status)
+	}
+	return a.waitForSessionReady(ctx, sessionID)
+}
+
+func (a *Agent) getSessionLifecycle(ctx context.Context, sessionID string) (status string, found bool, err error) {
+	resp, err := a.doRawGet(ctx, "/session/"+sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", false, nil
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		return "", false, fmt.Errorf("get session status: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var session cscSession
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return "", false, fmt.Errorf("parse session status: %w", err)
+	}
+	return session.Status, true, nil
+}
+
+func (a *Agent) waitForSessionReady(ctx context.Context, sessionID string) error {
+	const pollInterval = 100 * time.Millisecond
+
+	for {
+		status, found, err := a.getSessionLifecycle(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if found {
+			switch status {
+			case "", "running":
+				return nil
+			case "stopping", "stopped", "detached":
+				return fmt.Errorf("session %s stopped before becoming ready (status=%s)", sessionID, status)
+			}
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // PromptSession sends a prompt to an existing csc session asynchronously.
@@ -569,6 +636,14 @@ func (a *Agent) abortSession(ctx context.Context, sessionID string) error {
 	return err
 }
 
+// AbortSession asks csc to stop a workflow prompt running in the given session.
+func (a *Agent) AbortSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	return a.abortSession(ctx, sessionID)
+}
+
 // GetSessionMessages fetches the message list for a csc session.
 func (a *Agent) GetSessionMessages(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	if sessionID == "" {
@@ -629,6 +704,9 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, e
 	text, err := extractLastAssistantText(body)
 	if err != nil {
 		return nil, fmt.Errorf("extract output: %w", err)
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
 	}
 	return []byte(text), nil
 }
