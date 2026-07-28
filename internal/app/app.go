@@ -47,8 +47,8 @@ func (a *App) Credentials() (*provider.Credentials, error) {
 
 func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
 	deps := &workflowrunner.Dependencies{
-		MulticaBaseURL: a.cfg.Workflow.MulticaBaseURL,
-		UserBaseURL:    a.cfg.Workflow.MulticaBaseURL,
+		BackendBaseURL: a.cfg.Workflow.BackendBaseURL,
+		UserBaseURL:    a.cfg.Workflow.BackendBaseURL,
 		TokenProvider:  a.Credentials,
 		DeviceID: func() (string, error) {
 			dev, err := a.Device()

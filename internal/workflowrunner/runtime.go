@@ -15,7 +15,7 @@ type runtimeLoop struct {
 	cache    *workflow.Cache
 	syncFunc func() error
 	gcFunc   func() error
-	// maintainFunc keeps multica daemon registrations alive (register +
+	// maintainFunc keeps daemon registrations alive (register +
 	// heartbeat + re-register). Nil disables the maintain loop.
 	maintainFunc func() error
 

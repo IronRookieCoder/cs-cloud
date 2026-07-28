@@ -28,7 +28,7 @@ func TestClientGetWorkspaces(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %q", r.Method)
 		}
-		if r.URL.Path != workflow.MulticaWorkspacesEndpoint {
+		if r.URL.Path != workflow.WorkspacesEndpoint {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer token-123" {
@@ -269,7 +269,7 @@ func TestClientRegisterDaemon(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %q", r.Method)
 		}
-		if r.URL.Path != workflow.MulticaDaemonRegisterEndpoint {
+		if r.URL.Path != workflow.DaemonRegisterEndpoint {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer token-123" {
@@ -316,7 +316,7 @@ func TestClientHeartbeat(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %q", r.Method)
 		}
-		if r.URL.Path != workflow.MulticaDaemonHeartbeatEndpoint {
+		if r.URL.Path != workflow.DaemonHeartbeatEndpoint {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
 		var body map[string]any
@@ -392,7 +392,7 @@ func TestClientPinTaskSession(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %q", r.Method)
 		}
-		wantPath := fmt.Sprintf(workflow.MulticaTaskSessionEndpoint, "task-1")
+		wantPath := fmt.Sprintf(workflow.TaskSessionEndpoint, "task-1")
 		if r.URL.Path != wantPath {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
@@ -418,7 +418,7 @@ func TestClientBindNodeRunSession(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %q", r.Method)
 		}
-		wantPath := fmt.Sprintf(workflow.MulticaNodeRunSessionEndpoint, "nr-1")
+		wantPath := fmt.Sprintf(workflow.NodeRunSessionEndpoint, "nr-1")
 		if r.URL.Path != wantPath {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
@@ -444,7 +444,7 @@ func TestClientGetWorkflowNodeRunGCCheck(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %q", r.Method)
 		}
-		wantPath := fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, "nr-1")
+		wantPath := fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, "nr-1")
 		if r.URL.Path != wantPath {
 			t.Fatalf("path = %q, want %q", r.URL.Path, wantPath)
 		}

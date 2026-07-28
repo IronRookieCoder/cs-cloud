@@ -21,9 +21,9 @@ import (
 
 // deliverableCmd implements `cs-cloud workflow deliverable <subcommand>`. It is the cs-cloud home
 // for the platform-Gitea document-deliverable operations migrated from
-// multica's cs-workflow CLI. Subcommands run inside a workflow-node task
+// the server's cs-workflow CLI. Subcommands run inside a workflow-node task
 // context: they read MULTICA_GITEA_* / MULTICA_TOKEN / MULTICA_SERVER_URL env
-// (pushed by multica in the task payload) and are invoked by the agent (csc)
+// (pushed by the server in the task payload) and are invoked by the agent (csc)
 // during a node run.
 func deliverableCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
@@ -51,7 +51,7 @@ Usage:
     Push a document deliverable to the platform Gitea and open a PR.
     Reads MULTICA_GITEA_* env (set by the task payload), fetches the workspace
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
-    (node->inst), and registers the PR URL back to Multica.`)
+    (node->inst), and registers the PR URL back to the server.`)
 }
 
 // runGiteaSubmit parses flags and runs the submit flow.
@@ -189,7 +189,7 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 }
 
 // submitDeliverable is the testable core. Returns nil only after the PR/MR is
-// registered back to Multica.
+// registered back to the server.
 func submitDeliverable(cfg submitConfig) error {
 	if cfg.mrMode {
 		return submitGitlabMR(cfg)
@@ -299,16 +299,16 @@ func injectTokenIntoURL(cloneURL, token string) string {
 	return u.String()
 }
 
-// sharedHTTPClient has a bounded timeout so a hung Gitea or Multica endpoint
+// sharedHTTPClient has a bounded timeout so a hung Gitea or the server endpoint
 // cannot stall the agent CLI indefinitely.
 var sharedHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // urlCredRedactor matches scheme://user:pass@host so git stderr never leaks PAT.
 var urlCredRedactor = regexp.MustCompile(`(\w+://[^/:@]+:)[^@]+(@)`)
 
-// readGiteaCredential reads the workspace bot PAT + base URL that multica
+// readGiteaCredential reads the workspace bot PAT + base URL that the server
 // pushed in the task payload env (MULTICA_GITEA_*). cs-cloud talks to Gitea
-// directly with these — there is no relay back through multica to fetch
+// directly with these — there is no relay back through the server to fetch
 // credentials, so the agent CLI never depends on MULTICA_TOKEN for Gitea auth.
 func readGiteaCredential() (struct {
 	BaseURL string
@@ -357,8 +357,8 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 	return pr.HTMLURL, nil
 }
 
-// reportToMultica POSTs a pull_request_url to the given multica endpoint.
-func reportToMultica(ctx context.Context, serverURL, token, endpoint, prURL string) error {
+// reportToServer POSTs a pull_request_url to the given server endpoint.
+func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL string) error {
 	body, _ := json.Marshal(map[string]string{"pull_request_url": prURL})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -375,9 +375,9 @@ func reportToMultica(ctx context.Context, serverURL, token, endpoint, prURL stri
 	return nil
 }
 
-// reportDeliverablePR POSTs the PR URL to the multica daemon report-pr endpoint.
+// reportDeliverablePR POSTs the PR URL to the the daemon report-pr endpoint.
 func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL string) error {
-	return reportToMultica(ctx, serverURL, token,
+	return reportToServer(ctx, serverURL, token,
 		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/report-pr", prURL)
 }
 
@@ -398,7 +398,7 @@ func (execGitOps) Commit(dir, message string) error {
 	if err := runGitInDir(dir, "add", "-A"); err != nil {
 		return err
 	}
-	return runGitInDir(dir, "-c", "user.email=bot@multica", "-c", "user.name=Multica Bot", "commit", "-m", message)
+	return runGitInDir(dir, "-c", "user.email=bot@cs-cloud", "-c", "user.name=CS-Cloud Bot", "commit", "-m", message)
 }
 func (execGitOps) Push(dir, authURL, branch string) error {
 	// Force-push: a node branch has a single writer pre-merge; re-submit

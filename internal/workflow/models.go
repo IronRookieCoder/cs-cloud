@@ -65,7 +65,7 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
-// RepoSpec mirrors multica's csCloudRepoSpec.
+// RepoSpec mirrors the server's csCloudRepoSpec.
 type RepoSpec struct {
 	URL        string `json:"url"`
 	Provider   string `json:"provider"`
@@ -75,7 +75,7 @@ type RepoSpec struct {
 	BotToken   string `json:"bot_token,omitempty"`
 }
 
-// DeliverableSpec mirrors multica's csCloudDeliverableSpec.
+// DeliverableSpec mirrors the server's csCloudDeliverableSpec.
 type DeliverableSpec struct {
 	ID        string     `json:"id"`
 	Kind      string     `json:"kind"`
@@ -83,7 +83,7 @@ type DeliverableSpec struct {
 	Report    ReportSpec `json:"report"`
 }
 
-// ReportSpec mirrors multica's csCloudReportSpec.
+// ReportSpec mirrors the server's csCloudReportSpec.
 type ReportSpec struct {
 	Endpoint  string `json:"endpoint"`
 	Method    string `json:"method"`
@@ -110,21 +110,21 @@ type TaskRunPayload struct {
 	Deliverables []DeliverableSpec `json:"deliverables,omitempty"`
 	// PriorSessionID is the csc session id of the last task on the same
 	// (agent, issue), letting this task resume the conversation. Empty on first
-	// round / manual rerun / runtime mismatch. Mirrors multica's payload.
+	// round / manual rerun / runtime mismatch. Mirrors the server's payload.
 	PriorSessionID string `json:"prior_session_id,omitempty"`
 	// PriorWorkDir is the workdir of the last task on the same (agent, issue),
 	// so this task reuses (resets) the same checkout. Empty on first round.
 	PriorWorkDir string `json:"prior_work_dir,omitempty"`
 }
 
-// CreateChatSessionRequest mirrors multica's POST
+// CreateChatSessionRequest mirrors the server's POST
 // /api/workspaces/{id}/api/chat/sessions body.
 type CreateChatSessionRequest struct {
 	AgentID string `json:"agent_id"`
 	Title   string `json:"title"`
 }
 
-// ChatSession mirrors the subset of multica's chat session response that
+// ChatSession mirrors the subset of the server's chat session response that
 // cs-cloud needs to bind a workflow task/node run to a session.
 type ChatSession struct {
 	ID        string  `json:"id"`
@@ -133,14 +133,14 @@ type ChatSession struct {
 	Title     string  `json:"title"`
 }
 
-// PinTaskSessionRequest mirrors multica's POST
+// PinTaskSessionRequest mirrors the server's POST
 // /api/daemon/tasks/{taskId}/session body.
 type PinTaskSessionRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 	WorkDir   string `json:"work_dir,omitempty"`
 }
 
-// BindNodeRunSessionRequest mirrors multica's POST
+// BindNodeRunSessionRequest mirrors the server's POST
 // /api/daemon/node-runs/{nodeRunId}/session body.
 type BindNodeRunSessionRequest struct {
 	RuntimeID string `json:"runtime_id,omitempty"`
@@ -148,7 +148,7 @@ type BindNodeRunSessionRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// TaskMessage mirrors one entry of multica's POST
+// TaskMessage mirrors one entry of the server's POST
 // /api/daemon/tasks/{id}/messages batch body.
 type TaskMessage struct {
 	Seq     int    `json:"seq"`
@@ -157,7 +157,7 @@ type TaskMessage struct {
 }
 
 // DaemonRuntime describes one runtime reported during daemon registration.
-// Type becomes the multica provider field; it must be "cs-cloud" for the
+// Type becomes the server provider field; it must be "cs-cloud" for the
 // issue-conversation flow to discover this device.
 type DaemonRuntime struct {
 	Name    string `json:"name"`
@@ -166,7 +166,7 @@ type DaemonRuntime struct {
 	Status  string `json:"status"`
 }
 
-// DaemonRegisterRequest mirrors multica's POST /api/daemon/register body.
+// DaemonRegisterRequest mirrors the server's POST /api/daemon/register body.
 type DaemonRegisterRequest struct {
 	WorkspaceID string          `json:"workspace_id"`
 	DaemonID    string          `json:"daemon_id"`
@@ -175,7 +175,7 @@ type DaemonRegisterRequest struct {
 	Runtimes    []DaemonRuntime `json:"runtimes"`
 }
 
-// DaemonRuntimeResponse is one registered runtime row returned by multica.
+// DaemonRuntimeResponse is one registered runtime row returned by the server.
 // Only the fields cs-cloud needs are decoded.
 type DaemonRuntimeResponse struct {
 	ID          string `json:"id"`
@@ -184,7 +184,7 @@ type DaemonRuntimeResponse struct {
 	Status      string `json:"status"`
 }
 
-// DaemonRegisterResponse is the envelope returned by multica's POST
+// DaemonRegisterResponse is the envelope returned by the server's POST
 // /api/daemon/register. The runtimes array contains the registered rows.
 type DaemonRegisterResponse struct {
 	Runtimes     []DaemonRuntimeResponse `json:"runtimes"`

@@ -15,7 +15,7 @@ import (
 	"cs-cloud/internal/workflow"
 )
 
-// providerCSCloud is the multica runtime provider value the issue-conversation
+// providerCSCloud is the runtime provider value the issue-conversation
 // flow searches for; registration must use exactly this string.
 const providerCSCloud = "csc"
 
@@ -26,7 +26,7 @@ const deregisterTimeout = 10 * time.Second
 // task is remembered (the abort can race ahead of the pushed run request).
 const abortTombstoneTTL = time.Hour
 
-// maxCallbackOutputBytes caps the output uploaded to multica per task.
+// maxCallbackOutputBytes caps the output uploaded to the server per task.
 const maxCallbackOutputBytes = 256 * 1024
 
 // taskRecord tracks a running task so it can be aborted.
@@ -55,7 +55,7 @@ type Driver struct {
 	// abortedIDs tombstones task IDs aborted before their run request
 	// arrived; reserve rejects them so a cancelled task never executes.
 	abortedIDs map[string]time.Time
-	// registrations maps workspace ID → multica runtime row ID, kept alive
+	// registrations maps workspace ID → runtime row ID, kept alive
 	// by the maintain loop.
 	registrations map[string]string
 	mu            sync.Mutex
@@ -81,9 +81,9 @@ func (d *Driver) Start() error {
 		d.state = driverStateError
 		return fmt.Errorf("workflow driver dependencies not provided")
 	}
-	if d.deps.MulticaBaseURL == "" {
+	if d.deps.BackendBaseURL == "" {
 		d.state = driverStateError
-		return fmt.Errorf("workflow multica base URL is required")
+		return fmt.Errorf("workflow server base URL is required")
 	}
 
 	if d.cfg.MaxConcurrentTasks <= 0 {
@@ -99,9 +99,9 @@ func (d *Driver) Start() error {
 		return err
 	}
 
-	logger.Info("workflow: multica base URL=%s user base URL=%s", d.deps.MulticaBaseURL, d.deps.UserBaseURL)
+	logger.Info("workflow: server base URL=%s user base URL=%s", d.deps.BackendBaseURL, d.deps.UserBaseURL)
 	cache := workflow.NewCache(d.cfg.CacheDir)
-	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
+	d.client = NewClient(d.deps.BackendBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
 	d.runtime.maintainFunc = d.maintainRegistrations
 	if d.cfg.GCEnabled {
@@ -118,10 +118,10 @@ func (d *Driver) Start() error {
 	if d.deps != nil && d.deps.SessionRunner != nil {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)
 	}
-	// Inject multica endpoint + token so in-task CLIs (cs-cloud gitea
+	// Inject server endpoint + token so in-task CLIs (cs-cloud gitea
 	// submit/fetch) get MULTICA_SERVER_URL + MULTICA_TOKEN in their env.
 	if d.deps != nil {
-		d.runner.SetMulticaEndpoint(d.deps.MulticaBaseURL, d.deps.TokenProvider)
+		d.runner.SetServerEndpoint(d.deps.BackendBaseURL, d.deps.TokenProvider)
 	}
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
@@ -133,12 +133,12 @@ func (d *Driver) Start() error {
 		return err
 	}
 
-	// Register with multica right away instead of waiting for the first
-	// heartbeat tick. Async so a slow/unreachable multica doesn't block
+	// Register with the server right away instead of waiting for the first
+	// heartbeat tick. Async so a slow/unreachable server doesn't block
 	// daemon startup; failures are retried by the maintain loop.
 	go func() {
 		if err := d.maintainRegistrations(); err != nil {
-			logger.Warn("workflow: initial multica registration failed: %v", err)
+			logger.Warn("workflow: initial server registration failed: %v", err)
 		}
 	}()
 
@@ -174,9 +174,9 @@ func (d *Driver) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Tell multica these runtimes went away so the runtime page doesn't
+	// Tell the server these runtimes went away so the runtime page doesn't
 	// wait for the sweeper to mark them offline. Best-effort: a
-	// dead multica must not delay daemon shutdown.
+	// dead server must not delay daemon shutdown.
 	ids := make([]string, 0, len(d.registrations))
 	for _, id := range d.registrations {
 		ids = append(ids, id)
@@ -186,7 +186,7 @@ func (d *Driver) Stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 		defer cancel()
 		if err := d.client.DeregisterDaemon(ctx, ids); err != nil {
-			logger.Warn("workflow: multica deregister failed: %v", err)
+			logger.Warn("workflow: server deregister failed: %v", err)
 		}
 	}
 
@@ -308,10 +308,10 @@ func (d *Driver) armCancel(rec *taskRecord, cancel context.CancelFunc) {
 	}
 }
 
-// execute runs the agent and reports the outcome to multica.
+// execute runs the agent and reports the outcome to the server.
 func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, rec *taskRecord) error {
 	if err := d.client.StartTask(ctx, payload.TaskID); err != nil {
-		// multica rejected the start (e.g. the task was cancelled between
+		// the server rejected the start (e.g. the task was cancelled between
 		// dispatch and device accept) — abort locally without reporting a
 		// failure for a task that is already finalized server-side.
 		if rec.cancel != nil {
@@ -352,7 +352,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// finalSessionID tracks the chat session that actually ran the agent. It
 	// defaults to the bound sessionID and is overwritten with freshSessionID
 	// when the resume-failure retry path runs. CompleteTask forwards it to
-	// multica so the task row's session_id is preserved (not NULLed) for the
+	// the server so the task row's session_id is preserved (not NULLed) for the
 	// next round's GetLastTaskSession lookup.
 	finalSessionID := sessionID
 
@@ -362,7 +362,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
 		// Resume failure fallback: if the first RunCSCSession failed and we were
 		// resuming a prior session, retry once with a fresh session (the prior
-		// session may be corrupt on disk). Unlike multica's daemon.go:2662, which
+		// session may be corrupt on disk). Unlike the server's daemon.go:2662, which
 		// checks result.SessionID == "" to retry only on session-establishment
 		// failures, cs-cloud pre-binds the session in bindSession and has no
 		// equivalent signal — so this retries on any runErr. Bounded to one retry.
@@ -436,7 +436,7 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 			return "", fmt.Errorf("create chat session: %w", err)
 		}
 		if session.ID == "" {
-			return "", fmt.Errorf("multica returned empty chat session id")
+			return "", fmt.Errorf("server returned empty chat session id")
 		}
 		sessionID = session.ID
 	}
@@ -453,7 +453,7 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		// Create the csc session with the task env so in-task CLIs (notably
 		// `cs-cloud workflow deliverable submit`, which needs MULTICA_TOKEN +
 		// MULTICA_GITEA_* to push document deliverables to Gitea) inherit the
-		// credentials multica pushed in the task payload. RunSession reuses
+		// credentials the server pushed in the task payload. RunSession reuses
 		// this session, so the env must be present at creation.
 		env := d.runner.buildEnv(payload, worktree)
 		if err := d.deps.ConversationBinder.Bind(ctx, sessionID, worktree, env); err != nil {
@@ -488,14 +488,14 @@ func truncateOutput(s string) string {
 // The repo's role (matched by URL against payload.Repos) drives BOTH the
 // worktree branch name and which env var supplies the clone token; see
 // lookupRepoRole + tokenForRepo. "delivery" → MULTICA_REPO_NODE_BRANCH (the
-// node branch multica pre-created off inst in the Gitea wf repo, e.g.
+// node branch the server pre-created off inst in the Gitea wf repo, e.g.
 // "node/01-<shortHex>") + MULTICA_REPO_TOKEN (Gitea bot PAT); other/missing →
 // agent/<agent>/<shortTaskID> + MULTICA_GITLAB_TOKEN (GitLab PAT used for code
 // repos since M1).
 //
 // cs-cloud does NOT compute the delivery branch: it must use the exact branch
-// name multica sent, otherwise the worktree, the push, and the PR head would
-// diverge from the remote branch multica created.
+// name the server sent, otherwise the worktree, the push, and the PR head would
+// diverge from the remote branch the server created.
 func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
 	d.mu.Lock()
 	rec, ok := d.running[taskID]
@@ -505,7 +505,7 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 	}
 	role := lookupRepoRole(rec.payload.Repos, repoURL)
 	token := tokenForRepo(role, rec.payload.Env)
-	// multica owns the node-branch convention and injects the fully-formed
+	// the server owns the node-branch convention and injects the fully-formed
 	// branch name (e.g. "node/01-<shortHex>") via MULTICA_REPO_NODE_BRANCH.
 	// Thread it through verbatim — do not derive a "node/<short>" here.
 	// Map index on a nil map returns "" (the zero value), so no nil-guard needed.
@@ -519,7 +519,7 @@ func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error
 // lookupRepoRole returns the Role of the first RepoSpec in repos whose URL
 // matches repoURL. Returns "code" when repos is empty or no entry matches
 // (backward-compat: a repo not listed in the payload defaults to the code-repo
-// treatment). Plain equality is sufficient — multica sends the same URL string
+// treatment). Plain equality is sufficient — the server sends the same URL string
 // in payload.Repos[] and the checkout request. A miss on a non-empty repos list
 // is logged so a future URL-shape mismatch (trailing slash, .git, host case)
 // downgrading a delivery repo to the GitLab token is debuggable instead of a
@@ -621,9 +621,9 @@ func (d *Driver) tokenProvider() func() (*provider.Credentials, error) {
 	return d.deps.TokenProvider
 }
 
-// maintainRegistrations keeps the multica runtime rows for every workspace
+// maintainRegistrations keeps the runtime rows for every workspace
 // alive: register the missing ones, heartbeat the rest, and re-register any
-// row multica dropped (heartbeat 404). Called once at startup and then on
+// row the server dropped (heartbeat 404). Called once at startup and then on
 // every heartbeat tick by the runtime loop.
 func (d *Driver) maintainRegistrations() error {
 	if d.deps == nil || d.deps.DeviceID == nil || d.client == nil {
@@ -676,7 +676,7 @@ func (d *Driver) maintainRegistrations() error {
 }
 
 // maintainWorkspace heartbeats an existing registration or registers the
-// workspace if it has none. A 404 from heartbeat means multica deleted the
+// workspace if it has none. A 404 from heartbeat means the server deleted the
 // runtime row (sweeper or restart), so re-register immediately.
 func (d *Driver) maintainWorkspace(ctx context.Context, workspaceID, deviceID string) error {
 	d.mu.Lock()

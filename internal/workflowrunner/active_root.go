@@ -7,7 +7,7 @@ package workflowrunner
 // the prior workdir without bumping updated_at, so the TTL check alone wouldn't
 // notice the resumed activity.
 //
-// cs-cloud does not pre-claim predicted roots (unlike multica's refcount map),
+// cs-cloud does not pre-claim predicted roots (unlike the server's refcount map),
 // so d.running is the exact active set. The iteration holds d.mu, which is the
 // same lock reserve/release/CheckoutRepo use.
 func (d *Driver) isActiveEnvRoot(taskDir string) bool {

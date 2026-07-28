@@ -14,7 +14,7 @@ import (
 	"cs-cloud/internal/workflowrunner/execenv"
 )
 
-// gcAPITimeout bounds each gc-check HTTP call so a slow multica can't stall the
+// gcAPITimeout bounds each gc-check HTTP call so a slow server can't stall the
 // whole GC cycle.
 const gcAPITimeout = 10 * time.Second
 
@@ -22,7 +22,7 @@ const gcAPITimeout = 10 * time.Second
 const gitCmdTimeout = 30 * time.Second
 
 // runGC performs a single GC scan across all workspace directories. It is the
-// gcFunc plugged into runtimeLoop. Ported from multica
+// gcFunc plugged into runtimeLoop. Ported from the server
 // server/internal/daemon/gc.go, adapted to cs-cloud's directory layout
 // (<workspacesRoot>/<wsID>/tasks/<taskID> workdirs, <wsID>/repos/ bare cache).
 func (d *Driver) runGC() error {

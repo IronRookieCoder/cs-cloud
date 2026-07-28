@@ -233,7 +233,7 @@ func writeWorktreeRef(dir, ref string) error {
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
 // sanitizeName lowercases and collapses non-alphanumerics to '-', capping
-// length. Empty/non-ascii input falls back to "agent". Mirrors multica repocache
+// length. Empty/non-ascii input falls back to "agent". Mirrors the server repocache
 // sanitizeName (cache.go:968).
 func sanitizeName(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -252,7 +252,7 @@ func sanitizeName(s string) string {
 }
 
 // shortID returns the first 8 hex chars of a UUID (dashes stripped), mirroring
-// multica repocache shortID (cache.go:983).
+// the server repocache shortID (cache.go:983).
 func shortID(id string) string {
 	r := strings.ReplaceAll(id, "-", "")
 	if len(r) > 8 {
@@ -262,7 +262,7 @@ func shortID(id string) string {
 }
 
 // agentBranch builds the per-task working branch for a code repo:
-// agent/<sanitize(agent)>/<shortTaskID>. Mirrors multica cache.go:449.
+// agent/<sanitize(agent)>/<shortTaskID>. Mirrors the server cache.go:449.
 func agentBranch(agentName, taskID string) string {
 	return fmt.Sprintf("agent/%s/%s", sanitizeName(agentName), shortID(taskID))
 }
@@ -312,7 +312,7 @@ func (wm *WorkspaceManager) ResetWorktree(workDir, branchName, baseRef string) e
 }
 
 // isBranchCollision reports whether err is git's "a branch named ... already
-// exists" collision. Mirrors multica isBranchCollisionError (cache.go:599).
+// exists" collision. Mirrors the server isBranchCollisionError (cache.go:599).
 func isBranchCollision(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "a branch named")
 }
@@ -354,16 +354,16 @@ func (wm *WorkspaceManager) resolveBaseRef(cache, baseBranch string) (string, er
 // passes is cloned (the GitLab PAT is the real permission boundary).
 //
 // The branch name is role-aware:
-//   - role="delivery" → nodeBranch verbatim (the branch multica pre-created off
+//   - role="delivery" → nodeBranch verbatim (the branch the server pre-created off
 //     inst in the Gitea wf repo and advertised via MULTICA_REPO_NODE_BRANCH,
 //     e.g. "node/01-<shortHex>"). cs-cloud does NOT derive a "node/<short>"
-//     name — it must use the exact branch multica sent so the worktree, push,
+//     name — it must use the exact branch the server sent so the worktree, push,
 //     and PR head all agree with the remote.
 //   - role="code" or any other value (including "", the default) →
 //     agent/<sanitize(agent)>/<shortTaskID> (the existing code-repo convention).
 //
 // Defensive fallback: role="delivery" but nodeBranch="" (env missing — should
-// never happen for real document tasks since multica always sends it) falls
+// never happen for real document tasks since the server always sends it) falls
 // back to the agent branch and logs a warning, rather than producing an
 // unusable "node/"-prefixed partial name.
 func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentName, taskID, baseBranch, accessToken, role, nodeBranch string) (string, error) {
@@ -422,7 +422,7 @@ func (wm *WorkspaceManager) CheckoutRepo(workspaceID, taskRoot, repoURL, agentNa
 
 // deliveryBranch picks the worktree branch for a repo checkout based on its
 // role. A "delivery" role with a populated nodeBranch returns that branch
-// verbatim (multica owns the node-branch convention and pre-creates the branch
+// verbatim (the server owns the node-branch convention and pre-creates the branch
 // in the Gitea wf repo); everything else — including the defensive
 // role="delivery" but empty-nodeBranch case — falls back to the code-repo
 // agent branch.

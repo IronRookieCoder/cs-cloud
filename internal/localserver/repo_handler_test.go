@@ -16,7 +16,7 @@ import (
 
 // newStartedTestDriver returns a started workflow driver whose Health() passes,
 // for handler tests that need to get past the Health() gate. Points at a dummy
-// multica URL; CheckoutRepo does not need a real multica connection.
+// server URL; CheckoutRepo does not need a real server connection.
 func newStartedTestDriver(t *testing.T) *workflowrunner.Driver {
 	t.Helper()
 	cfg := workflow.Config{
@@ -26,7 +26,7 @@ func newStartedTestDriver(t *testing.T) *workflowrunner.Driver {
 		GCInterval:     time.Hour,
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: "http://localhost:1",
+		BackendBaseURL: "http://localhost:1",
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -96,7 +96,7 @@ func TestHandleRepoCheckout_MissingFields(t *testing.T) {
 // TestHandleRepoCheckout_DriverError verifies that a CheckoutRepo failure
 // surfaces as a 500 CHECKOUT_FAILED. The driver is started so the Health() gate
 // passes; CheckoutRepo looks up a running task and returns an error when none
-// exists, without needing git or a multica connection.
+// exists, without needing git or a server connection.
 func TestHandleRepoCheckout_DriverError(t *testing.T) {
 	d := newStartedTestDriver(t)
 	s := New(WithWorkflow(d))

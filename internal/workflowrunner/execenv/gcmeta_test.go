@@ -38,7 +38,7 @@ func TestWriteReadGCMeta_RoundTrip(t *testing.T) {
 
 func TestReadGCMeta_LegacyNoKindDefaultsIssue(t *testing.T) {
 	dir := t.TempDir()
-	// Hand-write a pre-kind meta file (only issue_id, like a legacy multica file).
+	// Hand-write a pre-kind meta file (only issue_id, like a legacy server file).
 	if err := os.WriteFile(filepath.Join(dir, gcMetaFile), []byte(`{"issue_id":"iiii"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}

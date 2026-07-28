@@ -29,8 +29,8 @@ func Load() (*Config, error) {
 	}
 
 	// Workflow config from environment variables.
-	if v := platform.Getenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL"); v != "" {
-		cfg.Workflow.MulticaBaseURL = v
+	if v := platform.Getenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL"); v != "" {
+		cfg.Workflow.BackendBaseURL = v
 	}
 	if v := platform.Getenv("CS_CLOUD_WORKFLOW_WORKSPACES_ROOT"); v != "" {
 		cfg.Workflow.WorkspacesRoot = v
@@ -219,14 +219,14 @@ func Load() (*Config, error) {
 		cfg.IdleBufferSeconds = 30
 	}
 
-	// If the workflow multica base URL is not explicitly configured and we
+	// If the workflow server base URL is not explicitly configured and we
 	// have a CoStrict base URL, derive the test/enterprise workflow backend
 	// URL from it. Explicit env/file config always wins. The URL is not
 	// required at config load time so that commands like stop/restart work
 	// without a network configuration; workflow components validate it when
 	// they start.
-	if cfg.Workflow.MulticaBaseURL == "" && cfg.BaseURL != "" {
-		cfg.Workflow.MulticaBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
+	if cfg.Workflow.BackendBaseURL == "" && cfg.BaseURL != "" {
+		cfg.Workflow.BackendBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
 	}
 
 	return cfg, nil
@@ -246,8 +246,8 @@ func parsePositiveDuration(v string) (time.Duration, bool) {
 
 func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	defaults := workflow.DefaultConfig()
-	if file.MulticaBaseURL != "" && current.MulticaBaseURL == "" {
-		current.MulticaBaseURL = file.MulticaBaseURL
+	if file.BackendBaseURL != "" && current.BackendBaseURL == "" {
+		current.BackendBaseURL = file.BackendBaseURL
 	}
 	if file.WorkspacesRoot != "" && current.WorkspacesRoot == defaults.WorkspacesRoot {
 		current.WorkspacesRoot = file.WorkspacesRoot

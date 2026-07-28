@@ -15,7 +15,7 @@ import (
 )
 
 // submitGitlabMR handles the --mr (GitLab code MR) path: pushes the current
-// worktree branch, opens a GitLab MR, and reports to multica's submit endpoint.
+// worktree branch, opens a GitLab MR, and reports to the server's submit endpoint.
 // The agent already wrote + committed its code in the code-repo worktree (the
 // --mr flow does NOT pass --file); this function only pushes + opens the MR.
 func submitGitlabMR(cfg submitConfig) error {
@@ -65,14 +65,14 @@ func submitGitlabMR(cfg submitConfig) error {
 	}
 
 	targetBranch := envOr("MULTICA_GITLAB_TARGET_BRANCH", "main")
-	title := "multica deliverable " + cfg.deliverableID
+	title := "deliverable " + cfg.deliverableID
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
 	if err != nil {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
 	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
-	if err := reportToMultica(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
+	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
 		return fmt.Errorf("report submit: %w", err)
 	}
 

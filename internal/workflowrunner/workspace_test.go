@@ -293,9 +293,9 @@ func TestCheckoutRepo_CreatesBranchWorktree(t *testing.T) {
 }
 
 // TestCheckoutRepo_DeliveryRoleUsesNodeBranch verifies a role="delivery" repo
-// checks out onto the branch multica pre-created and advertised via
+// checks out onto the branch the server pre-created and advertised via
 // MULTICA_REPO_NODE_BRANCH (e.g. "node/01-abcdef12"), NOT a cs-cloud-computed
-// "node/<shortNodeRunID>". multica owns the node-branch convention and creates
+// "node/<shortNodeRunID>". the server owns the node-branch convention and creates
 // the branch in the Gitea wf repo at run-start; cs-cloud must use that exact
 // branch name so the worktree, the push, and the PR head all agree.
 func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
@@ -306,7 +306,7 @@ func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
 	taskRoot := filepath.Join(root, "ws-1", "tasks", "task-1")
 	_ = os.MkdirAll(taskRoot, 0o755)
 
-	// The branch name multica sent in the task env (multica creates this branch
+	// The branch name the server sent in the task env (the server creates this branch
 	// off inst in the Gitea wf repo at run-start). cs-cloud must use it verbatim.
 	nodeBranch := "node/01-abcdef12"
 	dir, err := wm.CheckoutRepo(
@@ -325,7 +325,7 @@ func TestCheckoutRepo_DeliveryRoleUsesNodeBranch(t *testing.T) {
 }
 
 // TestCheckoutRepo_DeliveryRoleMissingNodeBranchFallsBack verifies that when
-// role="delivery" but no env-provided node branch is threaded (multica should
+// role="delivery" but no env-provided node branch is threaded (the server should
 // always send one, but defensive code must not produce a "node/"-prefixed
 // partial name), CheckoutRepo falls back to the code-repo agent branch and
 // logs a warning instead of producing an unusable branch name.

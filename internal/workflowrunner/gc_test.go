@@ -15,7 +15,7 @@ import (
 	"cs-cloud/internal/workflowrunner/execenv"
 )
 
-// newGCDriver builds a minimal *Driver whose client points at a mock multica
+// newGCDriver builds a minimal *Driver whose client points at a mock backend
 // server. Task dirs are created under <root>/<wsID>/tasks/<name>.
 func newGCDriver(t *testing.T, handler http.Handler) *Driver {
 	t.Helper()
@@ -55,7 +55,7 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 func TestShouldCleanTaskDir_DoneIssueOverTTL(t *testing.T) {
 	issueID := "11111111-1111-1111-1111-111111111111"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "done", "updated_at": time.Now().Add(-10 * 24 * time.Hour)})
 	})
 	d := newGCDriver(t, mux)
@@ -71,7 +71,7 @@ func TestShouldCleanTaskDir_DoneIssueOverTTL(t *testing.T) {
 func TestShouldCleanTaskDir_OpenIssueSkipped(t *testing.T) {
 	issueID := "22222222-2222-2222-2222-222222222222"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "in_progress", "updated_at": time.Now().Add(-30 * 24 * time.Hour)})
 	})
 	d := newGCDriver(t, mux)
@@ -104,7 +104,7 @@ func TestShouldCleanTaskDir_NoMetaRecentSkipped(t *testing.T) {
 func TestShouldCleanTaskDir_Issue404OldOrphan(t *testing.T) {
 	issueID := "33333333-3333-3333-3333-333333333333"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 	d := newGCDriver(t, mux)
@@ -121,7 +121,7 @@ func TestShouldCleanTaskDir_Issue404OldOrphan(t *testing.T) {
 func TestShouldCleanTaskDir_APIErrorSkipped(t *testing.T) {
 	issueID := "44444444-4444-4444-4444-444444444444"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	d := newGCDriver(t, mux)
@@ -136,7 +136,7 @@ func TestShouldCleanTaskDir_APIErrorSkipped(t *testing.T) {
 func TestShouldCleanTaskDir_ActiveEnvRootSkips(t *testing.T) {
 	issueID := "55555555-5555-5555-5555-555555555555"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "done", "updated_at": time.Now().Add(-30 * 24 * time.Hour)})
 	})
 	d := newGCDriver(t, mux)
@@ -156,7 +156,7 @@ func TestShouldCleanTaskDir_ActiveEnvRootSkips(t *testing.T) {
 func TestShouldCleanTaskDir_OpenIssueArtifactCleanup(t *testing.T) {
 	issueID := "66666666-6666-6666-6666-666666666666"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "in_progress", "updated_at": time.Now()})
 	})
 	d := newGCDriver(t, mux)
@@ -172,7 +172,7 @@ func TestShouldCleanTaskDir_OpenIssueArtifactCleanup(t *testing.T) {
 func TestShouldCleanTaskDir_ArtifactTTLDisabled(t *testing.T) {
 	issueID := "77777777-7777-7777-7777-777777777777"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "in_progress", "updated_at": time.Now()})
 	})
 	d := newGCDriver(t, mux)
@@ -201,7 +201,7 @@ func TestCleanTaskDir_RemovesDirectory(t *testing.T) {
 func TestGcWorkspace_CleansEmptyTasksDir(t *testing.T) {
 	issueID := "88888888-8888-8888-8888-888888888888"
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueID), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "done", "updated_at": time.Now().Add(-10 * 24 * time.Hour)})
 	})
 	d := newGCDriver(t, mux)
@@ -359,58 +359,58 @@ func TestShouldCleanTaskDir_KindDispatch(t *testing.T) {
 	}{
 		// chat
 		{name: "chat active session — never reclaimed",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaChatSessionGCCheckEndpoint, chatID), body: map[string]any{"status": "active", "updated_at": overTTL}}},
-			want: gcActionSkip},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.ChatSessionGCCheckEndpoint, chatID), body: map[string]any{"status": "active", "updated_at": overTTL}}},
+			want:    gcActionSkip},
 		{name: "chat archived over TTL — clean",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaChatSessionGCCheckEndpoint, chatID), body: map[string]any{"status": "archived", "updated_at": overTTL}}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.ChatSessionGCCheckEndpoint, chatID), body: map[string]any{"status": "archived", "updated_at": overTTL}}},
+			want:    gcActionClean},
 		{name: "chat 404 — hard-deleted, clean immediately",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaChatSessionGCCheckEndpoint, chatID), status: http.StatusNotFound}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindChat, ChatSessionID: chatID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.ChatSessionGCCheckEndpoint, chatID), status: http.StatusNotFound}},
+			want:    gcActionClean},
 
 		// autopilot
 		{name: "autopilot completed over TTL — clean",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindAutopilotRun, AutopilotRunID: runID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaAutopilotRunGCCheckEndpoint, runID), body: map[string]any{"status": "completed", "completed_at": overTTL}}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindAutopilotRun, AutopilotRunID: runID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.AutopilotRunGCCheckEndpoint, runID), body: map[string]any{"status": "completed", "completed_at": overTTL}}},
+			want:    gcActionClean},
 		{name: "autopilot running — skip",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindAutopilotRun, AutopilotRunID: runID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaAutopilotRunGCCheckEndpoint, runID), body: map[string]any{"status": "running"}}},
-			want: gcActionSkip},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindAutopilotRun, AutopilotRunID: runID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.AutopilotRunGCCheckEndpoint, runID), body: map[string]any{"status": "running"}}},
+			want:    gcActionSkip},
 
 		// quick-create
 		{name: "quick_create completed — clean immediately",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindQuickCreate, TaskID: quickTask, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaTaskGCCheckEndpoint, quickTask), body: map[string]any{"status": "completed", "completed_at": withinTTL}}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindQuickCreate, TaskID: quickTask, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.TaskGCCheckEndpoint, quickTask), body: map[string]any{"status": "completed", "completed_at": withinTTL}}},
+			want:    gcActionClean},
 		{name: "quick_create running — skip",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindQuickCreate, TaskID: quickTask, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaTaskGCCheckEndpoint, quickTask), body: map[string]any{"status": "running"}}},
-			want: gcActionSkip},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindQuickCreate, TaskID: quickTask, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.TaskGCCheckEndpoint, quickTask), body: map[string]any{"status": "running"}}},
+			want:    gcActionSkip},
 
 		// workflow node-run (cs-cloud)
 		{name: "node_run completed over TTL — clean",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, nodeRunID), body: map[string]any{"status": "completed", "completed_at": overTTL}}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, nodeRunID), body: map[string]any{"status": "completed", "completed_at": overTTL}}},
+			want:    gcActionClean},
 		{name: "node_run working — skip",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, nodeRunID), body: map[string]any{"status": "working"}}},
-			want: gcActionSkip},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, nodeRunID), body: map[string]any{"status": "working"}}},
+			want:    gcActionSkip},
 		{name: "node_run 404 old orphan — orphanByMTime",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaWorkflowNodeRunGCCheckEndpoint, nodeRunID), status: http.StatusNotFound}},
-			want: gcActionOrphan},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindWorkflowNodeRun, NodeRunID: nodeRunID, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, nodeRunID), status: http.StatusNotFound}},
+			want:    gcActionOrphan},
 
 		// issue path (legacy no-kind normalization is covered by the execenv
 		// package's ReadGCMeta test; here we just exercise the issue decision).
 		{name: "issue done over TTL — clean",
-			meta: &execenv.GCMeta{Kind: execenv.GCKindIssue, IssueID: legacyMeta, WorkspaceID: "ws"},
-			servers: []serverResp{{path: fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, legacyMeta), body: map[string]any{"status": "done", "updated_at": overTTL}}},
-			want: gcActionClean},
+			meta:    &execenv.GCMeta{Kind: execenv.GCKindIssue, IssueID: legacyMeta, WorkspaceID: "ws"},
+			servers: []serverResp{{path: fmt.Sprintf(workflow.IssueGCCheckEndpoint, legacyMeta), body: map[string]any{"status": "done", "updated_at": overTTL}}},
+			want:    gcActionClean},
 	}
 
 	for _, tc := range cases {
@@ -475,7 +475,7 @@ func makeBareRepo(t *testing.T, dir string) {
 }
 
 // TestRunGC_EndToEnd exercises the full top-level GC pipeline against a mock
-// multica backend on the real filesystem: root scan → per-workspace tasks/
+// backend on the real filesystem: root scan → per-workspace tasks/
 // scan → shouldCleanTaskDir → real HTTP gc-check → real file deletion → bare
 // repo worktree prune. It also closes the loop between the execute() meta-write
 // hook (writeGCMetaForTask) and the GC read path.
@@ -484,10 +484,10 @@ func TestRunGC_EndToEnd(t *testing.T) {
 	issueOpen := "e2e2e2e2-e2e2-e2e2-e2e2-e2e2e2e2e2e2" // in_progress → preserve
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueDone), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueDone), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "done", "updated_at": time.Now().Add(-10 * 24 * time.Hour)})
 	})
-	mux.HandleFunc(fmt.Sprintf(workflow.MulticaIssueGCCheckEndpoint, issueOpen), func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(fmt.Sprintf(workflow.IssueGCCheckEndpoint, issueOpen), func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "in_progress", "updated_at": time.Now()})
 	})
 

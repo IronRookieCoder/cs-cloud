@@ -68,7 +68,7 @@ func workflowProjectList(a *app.App) error {
 	if wsID == "" {
 		return fmt.Errorf("MULTICA_WORKSPACE_ID not set")
 	}
-	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.BackendBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -28,7 +28,7 @@ var _ workflowrunner.ConversationBinder = (*agentManagerSessionBinder)(nil)
 var _ workflowrunner.SessionRunner = (*agentManagerSessionBinder)(nil)
 
 // BindWorkflowSessionBinder wires the workflow driver to the default csc
-// agent so it can create local conversation sessions that match the multica
+// agent so it can create local conversation sessions that match the server
 // chat session IDs. Call this after the default agent has been initialized.
 func (s *Server) BindWorkflowSessionBinder() {
 	if s.workflow == nil || s.manager == nil {
@@ -60,7 +60,7 @@ func (s *Server) handleWorkflowHealth(w http.ResponseWriter, r *http.Request) {
 // handleWorkflowTaskRun accepts a task payload and dispatches it to the
 // workflow driver, responding as soon as the task is reserved — the agent
 // run itself can take minutes and the gateway proxy caps requests at ~30s.
-// The driver reports status to multica asynchronously.
+// The driver reports status to the server asynchronously.
 func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 	if s.workflow == nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")

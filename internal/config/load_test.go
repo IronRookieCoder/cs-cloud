@@ -26,7 +26,7 @@ func isolatedConfig(t *testing.T, content string) {
 		}
 	}
 	// Provide a default CoStrict base URL so Load() does not fail on the
-	// required workflow multica URL. Tests that need to control this can
+	// required workflow server URL. Tests that need to control this can
 	// override the env var explicitly.
 	t.Setenv("COSTRICT_BASE_URL", "https://example.costrict.local")
 }
@@ -185,7 +185,7 @@ func TestLoadWorkflowConfigFromEnv(t *testing.T) {
 	t.Setenv("CS_CLOUD_WORKFLOW_MAX_CONCURRENT_TASKS", "42")
 
 	// Clear other workflow env vars so defaults don't interfere with assertions.
-	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL", "")
 	t.Setenv("CS_CLOUD_WORKFLOW_CACHE_DIR", "")
 	t.Setenv("CS_CLOUD_WORKFLOW_GC_INTERVAL", "")
 	t.Setenv("CS_CLOUD_WORKFLOW_AGENT_TIMEOUT", "")
@@ -237,63 +237,63 @@ func TestLoad_WorkflowAllowedAgentsEnvOverridesConfigFileWithSameLengthAsDefault
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLDerivedFromBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLDerivedFromBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	want := "https://zgsmtest.cn:30443/workflow-backend"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLFromEnvOverridesBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLFromEnvOverridesBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "https://explicit.example.com/multica")
+	t.Setenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL", "https://explicit.example.com/backend")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	want := "https://explicit.example.com/multica"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	want := "https://explicit.example.com/backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLDefaultWhenNoBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLDefaultWhenNoBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	// Ensure neither explicit env nor derivation source is present.
 	t.Setenv("COSTRICT_BASE_URL", "")
-	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.Workflow.MulticaBaseURL != "" {
-		t.Fatalf("MulticaBaseURL = %q, want empty", cfg.Workflow.MulticaBaseURL)
+	if cfg.Workflow.BackendBaseURL != "" {
+		t.Fatalf("BackendBaseURL = %q, want empty", cfg.Workflow.BackendBaseURL)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLFromConfigFilePreventsDerivation(t *testing.T) {
-	isolatedConfig(t, `{"workflow":{"multica_base_url":"https://file.example.com"}}`)
+func TestLoad_WorkflowBackendBaseURLFromConfigFilePreventsDerivation(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"backend_base_url":"https://file.example.com"}}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_CLOUD_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	want := "https://file.example.com"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 

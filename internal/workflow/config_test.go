@@ -9,8 +9,8 @@ import (
 
 func TestDefaultWorkflowConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.MulticaBaseURL != "" {
-		t.Fatalf("MulticaBaseURL = %q, want empty", cfg.MulticaBaseURL)
+	if cfg.BackendBaseURL != "" {
+		t.Fatalf("BackendBaseURL = %q, want empty", cfg.BackendBaseURL)
 	}
 	if !filepath.IsAbs(cfg.WorkspacesRoot) {
 		t.Fatalf("WorkspacesRoot is not absolute: %q", cfg.WorkspacesRoot)
@@ -42,7 +42,7 @@ func TestDefaultWorkflowConfig(t *testing.T) {
 }
 
 // TestDefaultConfigGC locks the GC field defaults that the gcLoop reads. They
-// mirror multica's daemon defaults so cs-cloud reclaims at the same cadence.
+// mirror the server's daemon defaults so cs-cloud reclaims at the same cadence.
 func TestDefaultConfigGC(t *testing.T) {
 	c := DefaultConfig()
 

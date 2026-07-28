@@ -54,7 +54,7 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 }
 
 // TestSubmitDeliverable_HappyPath wires a fake git + httptest Gitea + httptest
-// Multica and asserts the worktree-based document submit flow: the agent has
+// the server and asserts the worktree-based document submit flow: the agent has
 // already run `cs-cloud repo checkout` (creating a delivery worktree under the
 // task root), so submit reads CS_CLOUD_WORKTREE (the task root), resolves the
 // per-repo worktree subdir, reads the current branch from that worktree, writes
@@ -63,7 +63,7 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 // PR URL. NO clone / MkdirTemp / PrepareBranch — those are tmp-clone leftovers.
 func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	var reportedURL string
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/gitea/credential":
 			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
@@ -78,7 +78,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
@@ -95,7 +95,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	taskRoot := t.TempDir()
 	t.Setenv("CS_CLOUD_WORKTREE", taskRoot)
 	t.Setenv("MULTICA_TOKEN", "tok")
-	t.Setenv("MULTICA_SERVER_URL", multica.URL)
+	t.Setenv("MULTICA_SERVER_URL", backend.URL)
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
 	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
 	t.Setenv("MULTICA_GITEA_BASE_URL", "https://gitea.test")
@@ -104,7 +104,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("MULTICA_GITEA_REPO", "wf-bbb")
 	// MULTICA_GITEA_CLONE_URL is what the document path feeds into
 	// RepoWorktreeDir to resolve the worktree subdir. Must match the
-	// <owner>/<repo>.git shape multica emits so repoName(cloneURL) = "wf-bbb".
+	// <owner>/<repo>.git shape backend emits so repoName(cloneURL) = "wf-bbb".
 	t.Setenv("MULTICA_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
 	t.Setenv("MULTICA_GITEA_INST_BRANCH", "inst-cc")
 	t.Setenv("MULTICA_GITEA_NODE_BRANCH", "node/dd")
@@ -208,9 +208,9 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	}))
 	defer gitlabSrv.Close()
 
-	// Fake multica: POST /api/node-runs/<nr>/deliverables/<did>/submit
+	// Fake backend: POST /api/node-runs/<nr>/deliverables/<did>/submit
 	var submittedURL string
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			PullRequestURL string `json:"pull_request_url"`
 		}
@@ -218,11 +218,11 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 		submittedURL = body.PullRequestURL
 		jsonResponse(w, 200, map[string]any{"id": "sub-1"})
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	t.Setenv("MULTICA_GITLAB_TOKEN", "gl-pat")
 	t.Setenv("MULTICA_GITLAB_BASE_URL", gitlabSrv.URL)
-	t.Setenv("MULTICA_SERVER_URL", multica.URL)
+	t.Setenv("MULTICA_SERVER_URL", backend.URL)
 	t.Setenv("MULTICA_TOKEN", "tok")
 	t.Setenv("MULTICA_NODE_RUN_ID", "nr-1")
 	// CS_CLOUD_WORKTREE is the TASK ROOT; the code-repo worktree is a subdir
@@ -275,7 +275,7 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 		t.Errorf("target_branch = %v, want main", gitlabReqBody["target_branch"])
 	}
 
-	// Assert multica submit received the MR URL
+	// Assert backend submit received the MR URL
 	if submittedURL != "https://gitlab.test/group/repo/-/merge_requests/42" {
 		t.Errorf("submit received %q, want GitLab MR web_url", submittedURL)
 	}

@@ -344,7 +344,7 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 // CreateSession creates a csc session with the requested ID and working
 // directory. If a session with that ID already exists, it returns without
 // error. This lets workflow tasks expose a stable conversation URL that
-// matches the multica chat_session.id.
+// matches the server chat_session.id.
 func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string) error {
 	return a.createSessionWithEnv(ctx, sessionID, cwd, env)
 }

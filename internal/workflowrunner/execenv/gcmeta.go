@@ -1,5 +1,5 @@
 // Package execenv persists per-task GC metadata (.gc_meta.json) so the cs-cloud
-// GC loop can decide whether a workdir is reclaimable. Ported from multica
+// GC loop can decide whether a workdir is reclaimable. Ported from the server
 // server/internal/daemon/execenv/execenv.go (GCMeta/Read/Write), with an added
 // GCKindWorkflowNodeRun for cs-cloud's workflow node-run tasks.
 package execenv
@@ -27,7 +27,7 @@ const (
 // GCMeta is persisted to .gc_meta.json inside the task root. It is a
 // discriminated union keyed on Kind: only the ID field matching Kind is
 // meaningful. Pre-kind files normalize to GCKindIssue on read for backward
-// compatibility (mirrors multica).
+// compatibility (mirrors the server).
 type GCMeta struct {
 	Kind           GCMetaKind `json:"kind,omitempty"`
 	IssueID        string     `json:"issue_id,omitempty"`

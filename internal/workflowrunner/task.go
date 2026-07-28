@@ -22,13 +22,13 @@ const (
 	CscOutputFormatText = "text"
 
 	// Environment variables injected into every agent process.
-	EnvMulticaWorkspaceID = "MULTICA_WORKSPACE_ID"
-	EnvMulticaTaskID      = "MULTICA_TASK_ID"
-	EnvMulticaPrompt      = "MULTICA_PROMPT"
-	EnvCSCloudWorktree    = "CS_CLOUD_WORKTREE"
-	// For in-task CLIs (cs-cloud gitea submit) that call multica.
-	EnvMulticaServerURL = "MULTICA_SERVER_URL"
-	EnvMulticaToken     = "MULTICA_TOKEN"
+	EnvWorkspaceID     = "MULTICA_WORKSPACE_ID"
+	EnvTaskID          = "MULTICA_TASK_ID"
+	EnvPrompt          = "MULTICA_PROMPT"
+	EnvCSCloudWorktree = "CS_CLOUD_WORKTREE"
+	// For in-task CLIs (cs-cloud gitea submit) that call the server.
+	EnvServerURL = "MULTICA_SERVER_URL"
+	EnvToken     = "MULTICA_TOKEN"
 	// EnvCSCloudServerURL lets in-task `cs-cloud repo checkout` reach the
 	// daemon's localserver RPC. Threaded in by the daemon via SetLocalServerURL.
 	EnvCSCloudServerURL = "CS_CLOUD_SERVER_URL"
@@ -41,11 +41,11 @@ type TaskRunner struct {
 	agentTimeout     time.Duration
 	allowedAgents    []string
 	sessionRunner    SessionRunner
-	// multicaBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
+	// serverBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
 	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
-	// can call multica's daemon-auth API. Set via SetMulticaEndpoint.
-	multicaBaseURL string
-	tokenProvider  func() (*provider.Credentials, error)
+	// can call the server's daemon-auth API. Set via SetServerEndpoint.
+	serverBaseURL string
+	tokenProvider func() (*provider.Credentials, error)
 	// localServerURL is the daemon's localserver listen URL, injected into
 	// task env as CS_CLOUD_SERVER_URL so in-task `cs-cloud repo checkout`
 	// can reach the localserver RPC. Set via SetLocalServerURL.
@@ -61,10 +61,10 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 	}
 }
 
-// SetMulticaEndpoint injects the multica base URL + token provider so the task
+// SetServerEndpoint injects the server base URL + token provider so the task
 // env can carry MULTICA_SERVER_URL + MULTICA_TOKEN for in-task CLIs.
-func (tr *TaskRunner) SetMulticaEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
-	tr.multicaBaseURL = baseURL
+func (tr *TaskRunner) SetServerEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
+	tr.serverBaseURL = baseURL
 	tr.tokenProvider = tp
 }
 
@@ -109,7 +109,7 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 
 // Run prepares the worktree and runs the agent. It returns the combined
 // stdout/stderr and any execution error. The caller is responsible for
-// reporting task status to multica.
+// reporting task status to the server.
 func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) ([]byte, error) {
 	worktree, agentPath, err := tr.Prepare(ctx, payload)
 	if err != nil {
@@ -213,9 +213,9 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	for k, v := range payload.Env {
 		env = setEnv(env, k, v)
 	}
-	env = setEnv(env, EnvMulticaWorkspaceID, payload.WorkspaceID)
-	env = setEnv(env, EnvMulticaTaskID, payload.TaskID)
-	env = setEnv(env, EnvMulticaPrompt, payload.Prompt)
+	env = setEnv(env, EnvWorkspaceID, payload.WorkspaceID)
+	env = setEnv(env, EnvTaskID, payload.TaskID)
+	env = setEnv(env, EnvPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
 	// CS_CLOUD_SERVER_URL lets in-task `cs-cloud repo checkout` reach the
 	// daemon's localserver RPC. Threaded in by the daemon after it binds.
@@ -223,14 +223,14 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 		env = setEnv(env, EnvCSCloudServerURL, tr.localServerURL)
 	}
 	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
-	// submit) can authenticate to multica's daemon API. These are the
-	// daemon's own endpoint + credentials — cs-cloud owns this auth, not multica.
-	if tr.multicaBaseURL != "" {
-		env = setEnv(env, EnvMulticaServerURL, tr.multicaBaseURL)
+	// submit) can authenticate to the server's daemon API. These are the
+	// daemon's own endpoint + credentials — cs-cloud owns this auth, not the server.
+	if tr.serverBaseURL != "" {
+		env = setEnv(env, EnvServerURL, tr.serverBaseURL)
 	}
 	if tr.tokenProvider != nil {
 		if creds, err := tr.tokenProvider(); err == nil && creds != nil && creds.AccessToken != "" {
-			env = setEnv(env, EnvMulticaToken, creds.AccessToken)
+			env = setEnv(env, EnvToken, creds.AccessToken)
 		}
 	}
 	return env

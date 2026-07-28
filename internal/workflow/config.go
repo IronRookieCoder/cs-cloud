@@ -8,15 +8,15 @@ import (
 )
 
 type Config struct {
-	MulticaBaseURL     string        `json:"multica_base_url"`
-	WorkspacesRoot     string        `json:"workspaces_root"`
-	CacheDir           string        `json:"cache_dir"`
-	SyncInterval       time.Duration `json:"sync_interval"`
-	GCInterval         time.Duration `json:"gc_interval"`
-	HeartbeatInterval  time.Duration `json:"heartbeat_interval"`
+	BackendBaseURL    string        `json:"backend_base_url"`
+	WorkspacesRoot    string        `json:"workspaces_root"`
+	CacheDir          string        `json:"cache_dir"`
+	SyncInterval      time.Duration `json:"sync_interval"`
+	GCInterval        time.Duration `json:"gc_interval"`
+	HeartbeatInterval time.Duration `json:"heartbeat_interval"`
 
 	// GC reclaims task workdirs whose parent record is terminal+stale. Defaults
-	// mirror multica's daemon so cs-cloud reclaims at the same cadence. All
+	// mirror the server's daemon so cs-cloud reclaims at the same cadence. All
 	// overridable via CS_CLOUD_WORKFLOW_GC_* env.
 	GCEnabled          bool          `json:"gc_enabled"`
 	GCTTL              time.Duration `json:"gc_ttl"`          // terminal issue/node-run → clean whole dir after this
@@ -31,7 +31,7 @@ type Config struct {
 func DefaultConfig() Config {
 	appDir := platform.AppDir()
 	return Config{
-		MulticaBaseURL:     "",
+		BackendBaseURL:     "",
 		WorkspacesRoot:     filepath.Join(appDir, "workflow", "workspaces"),
 		CacheDir:           filepath.Join(appDir, "workflow", "cache"),
 		SyncInterval:       5 * time.Minute,
