@@ -122,8 +122,8 @@ type submitConfig struct {
 	filePath          string
 	gitOps            gitOps
 	giteaBaseOverride string // test-only: override the Gitea base URL (else from credential)
-	mrMode            bool   // --mr: GitLab code MR mode
-	repoURL           string // GitLab mode: code repository URL (agent worktree already checked out)
+	mrMode            bool   // --mr: code MR mode
+	repoURL           string // --mr mode: code repository URL (agent worktree already checked out)
 }
 
 // gitOps abstracts the git operations so the submit flow is unit-testable.
@@ -188,72 +188,6 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 	return "", fmt.Errorf("deliverable %q not in MULTICA_GITEA_DELIVERABLES", id)
 }
 
-// submitGitlabMR handles the --mr (GitLab code MR) path: pushes the current
-// worktree branch, opens a GitLab MR, and reports to multica's submit endpoint.
-// The agent already wrote + committed its code in the code-repo worktree (the
-// --mr flow does NOT pass --file); this function only pushes + opens the MR.
-func submitGitlabMR(cfg submitConfig) error {
-	ctx := context.Background()
-
-	cred, err := readGitlabCredential()
-	if err != nil {
-		return fmt.Errorf("gitlab credential: %w", err)
-	}
-
-	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
-	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
-	// first, which created the code-repo worktree at <taskRoot>/<repoName>/.
-	// Resolve that subdir via RepoWorktreeDir — the same helper CheckoutRepo
-	// uses — so submit pushes from the exact worktree checkout created, not the
-	// bare task root (which has no .git and would fail at git rev-parse).
-	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
-	if taskRoot == "" {
-		return fmt.Errorf("CS_CLOUD_WORKTREE not set")
-	}
-	worktree := workflowrunner.RepoWorktreeDir(taskRoot, cfg.repoURL)
-
-	nodeRunID := os.Getenv("MULTICA_NODE_RUN_ID")
-	if nodeRunID == "" {
-		return fmt.Errorf("MULTICA_NODE_RUN_ID not set")
-	}
-
-	// Validate the report-back URL BEFORE pushing/opening the MR: otherwise a
-	// missing MULTICA_SERVER_URL leaves an orphaned MR on GitLab that no retry
-	// can recover (the second push would hit "merge request already exists").
-	serverURL := envOr("MULTICA_SERVER_URL", "")
-	if serverURL == "" {
-		return fmt.Errorf("MULTICA_SERVER_URL not set")
-	}
-	token := os.Getenv("MULTICA_TOKEN")
-
-	// Determine current branch in the worktree.
-	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
-	if err != nil {
-		return fmt.Errorf("current branch: %w", err)
-	}
-
-	// Push current branch to the repo.
-	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
-	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
-		return fmt.Errorf("push: %w", err)
-	}
-
-	targetBranch := envOr("MULTICA_GITLAB_TARGET_BRANCH", "main")
-	title := "multica deliverable " + cfg.deliverableID
-	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
-	if err != nil {
-		return fmt.Errorf("open MR: %w", err)
-	}
-
-	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
-	if err := reportToMultica(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
-		return fmt.Errorf("report submit: %w", err)
-	}
-
-	fmt.Println(mrURL)
-	return nil
-}
-
 // submitDeliverable is the testable core. Returns nil only after the PR/MR is
 // registered back to Multica.
 func submitDeliverable(cfg submitConfig) error {
@@ -267,7 +201,7 @@ func submitDeliverable(cfg submitConfig) error {
 	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
 	// first, which created the delivery repo worktree at <taskRoot>/<repoName>/.
 	// Resolve that subdir via the shared RepoWorktreeDir helper — the same
-	// helper CheckoutRepo and submitGitlabMR use — so all three paths
+	// helper CheckoutRepo and the MR submit path use — so all three paths
 	// (checkout, document submit, code --mr submit) derive the worktree identically.
 	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
 	if taskRoot == "" {
@@ -365,9 +299,9 @@ func injectTokenIntoURL(cloneURL, token string) string {
 	return u.String()
 }
 
-// giteaHTTPClient has a bounded timeout so a hung Gitea or Multica endpoint
+// sharedHTTPClient has a bounded timeout so a hung Gitea or Multica endpoint
 // cannot stall the agent CLI indefinitely.
-var giteaHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var sharedHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // urlCredRedactor matches scheme://user:pass@host so git stderr never leaks PAT.
 var urlCredRedactor = regexp.MustCompile(`(\w+://[^/:@]+:)[^@]+(@)`)
@@ -393,64 +327,6 @@ func readGiteaCredential() (struct {
 	}{BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITEA_BASE_URL")), Token: token}, nil
 }
 
-// gitlabCredential holds the GitLab PAT and base URL.
-type gitlabCredential struct {
-	BaseURL string
-	Token   string
-}
-
-// readGitlabCredential reads MULTICA_GITLAB_TOKEN and MULTICA_GITLAB_BASE_URL.
-func readGitlabCredential() (*gitlabCredential, error) {
-	token := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_TOKEN"))
-	if token == "" {
-		return nil, fmt.Errorf("MULTICA_GITLAB_TOKEN not set (the task payload must provide the GitLab PAT)")
-	}
-	return &gitlabCredential{
-		BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITLAB_BASE_URL")),
-		Token:   token,
-	}, nil
-}
-
-// openGitlabMR POSTs /api/v4/projects/<urlencoded>/merge_requests and returns web_url.
-func openGitlabMR(ctx context.Context, base, token, repoURL, sourceBranch, targetBranch, title string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(repoURL))
-	if err != nil {
-		return "", fmt.Errorf("parse repo URL %q: %w", repoURL, err)
-	}
-	// Extract project path (e.g. "group/repo" from "/group/repo.git").
-	project := strings.Trim(u.Path, "/")
-	project = strings.TrimSuffix(project, ".git")
-	if project == "" {
-		return "", fmt.Errorf("cannot extract project from repo URL %q", repoURL)
-	}
-
-	body, _ := json.Marshal(map[string]string{
-		"source_branch": sourceBranch,
-		"target_branch": targetBranch,
-		"title":         title,
-	})
-	endpoint := strings.TrimRight(base, "/") + "/api/v4/projects/" + url.PathEscape(project) + "/merge_requests"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	req.Header.Set("PRIVATE-TOKEN", token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := giteaHTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("create MR request: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("gitlab create MR: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	var mr struct {
-		WebURL string `json:"web_url"`
-	}
-	if err := json.Unmarshal(respBody, &mr); err != nil {
-		return "", fmt.Errorf("parse MR response: %w", err)
-	}
-	return mr.WebURL, nil
-}
-
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.
 func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch, deliverableID string) (string, error) {
 	body, _ := json.Marshal(map[string]string{
@@ -462,7 +338,7 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 		strings.TrimRight(base, "/")+"/api/v1/repos/"+owner+"/"+repo+"/pulls", bytes.NewReader(body))
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := giteaHTTPClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("create PR request: %w", err)
 	}
@@ -487,7 +363,7 @@ func reportToMultica(ctx context.Context, serverURL, token, endpoint, prURL stri
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := giteaHTTPClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("report request: %w", err)
 	}
