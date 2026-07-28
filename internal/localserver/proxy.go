@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -108,6 +109,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	isConversationCreate := r.Method == http.MethodPost && cleanPath == "/conversations"
 
+	// Auto-create the working directory for conversation creation requests.
+	// csc's sessionManager rejects non-existent cwd with "Working directory
+	// does not exist"; mkdir -p here so callers can pass a fresh path per
+	// session without pre-provisioning it.
+	if isConversationCreate {
+		ensureConversationWorkdir(r)
+	}
+
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		stripCORSHeaders(resp.Header)
 
@@ -146,6 +155,61 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy.ServeHTTP(w, r)
+}
+
+// ensureConversationWorkdir makes sure the conversation's working directory
+// exists before the request is forwarded to csc. csc's sessionManager rejects
+// non-existent cwd with "Working directory does not exist", so mkdir -p here
+// lets callers pass a fresh path per session without pre-provisioning it.
+//
+// Resolution order:
+//  1. `X-Workspace-Directory` header (canonical mechanism, URL-decoded)
+//  2. body `cwd` JSON field (fallback for callers that use it)
+//
+// Errors are logged only — mkdir failure still lets csc surface its own
+// validation error. The request body is always restored verbatim.
+func ensureConversationWorkdir(r *http.Request) {
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			logger.Warn("auto-mkdir: read body failed: %v", err)
+			return
+		}
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	cwd := getWorkspaceDir(r)
+	if cwd == "" && len(body) > 0 {
+		var payload struct {
+			Cwd string `json:"cwd"`
+		}
+		if err := json.Unmarshal(body, &payload); err == nil {
+			cwd = payload.Cwd
+		}
+	}
+	if cwd == "" {
+		return
+	}
+
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		logger.Warn("auto-mkdir: resolve %q failed: %v", cwd, err)
+		return
+	}
+	if info, err := os.Stat(abs); err == nil {
+		if !info.IsDir() {
+			logger.Warn("auto-mkdir: %s exists and is not a directory", abs)
+		}
+		return
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		logger.Warn("auto-mkdir: create %s failed: %v", abs, err)
+		return
+	}
+	logger.Info("auto-mkdir: created %s", abs)
 }
 
 func extractPathValues(r *http.Request) map[string]string {
