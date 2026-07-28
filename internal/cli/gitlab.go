@@ -87,13 +87,22 @@ type gitlabCredential struct {
 }
 
 // readGitlabCredential reads MULTICA_GITLAB_TOKEN and MULTICA_GITLAB_BASE_URL.
+// The base URL is validated as an absolute HTTP(S) URL up front so a missing/
+// malformed value fails BEFORE the worktree branch is pushed — otherwise the
+// branch is orphaned on GitLab and no retry can recover (the second attempt
+// hits "merge request already exists"). CodeRabbit PR #27 (Critical).
 func readGitlabCredential() (*gitlabCredential, error) {
 	token := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_TOKEN"))
 	if token == "" {
 		return nil, fmt.Errorf("MULTICA_GITLAB_TOKEN not set (the task payload must provide the GitLab PAT)")
 	}
+	baseURL := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_BASE_URL"))
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("MULTICA_GITLAB_BASE_URL must be an absolute HTTP(S) URL, got %q", baseURL)
+	}
 	return &gitlabCredential{
-		BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITLAB_BASE_URL")),
+		BaseURL: baseURL,
 		Token:   token,
 	}, nil
 }
@@ -117,7 +126,12 @@ func openGitlabMR(ctx context.Context, base, token, repoURL, sourceBranch, targe
 		"title":         title,
 	})
 	endpoint := strings.TrimRight(base, "/") + "/api/v4/projects/" + url.PathEscape(project) + "/merge_requests"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		// A nil request (malformed endpoint) would panic on the Header.Set
+		// below. Return the construction error instead. CodeRabbit PR #27.
+		return "", fmt.Errorf("build create MR request: %w", err)
+	}
 	req.Header.Set("PRIVATE-TOKEN", token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := sharedHTTPClient.Do(req)
@@ -126,6 +140,13 @@ func openGitlabMR(ctx context.Context, base, token, repoURL, sourceBranch, targe
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
+	// 409 Conflict: an open MR already exists for these branches. This happens
+	// when a prior run created the MR but reportToServer failed and the CLI is
+	// retrying — resolve the existing MR's URL so the flow is idempotent instead
+	// of failing and orphaning the report. CodeRabbit PR #27 (Major).
+	if resp.StatusCode == http.StatusConflict {
+		return findExistingGitlabMR(ctx, base, token, project, sourceBranch, targetBranch)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("gitlab create MR: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -135,5 +156,47 @@ func openGitlabMR(ctx context.Context, base, token, repoURL, sourceBranch, targe
 	if err := json.Unmarshal(respBody, &mr); err != nil {
 		return "", fmt.Errorf("parse MR response: %w", err)
 	}
+	// Reject a 2xx response that omits web_url — reporting an empty URL upstream
+	// leaves the deliverable unresolvable. CodeRabbit PR #27 (Minor).
+	if strings.TrimSpace(mr.WebURL) == "" {
+		return "", fmt.Errorf("gitlab create MR: response missing web_url: %s", strings.TrimSpace(string(respBody)))
+	}
 	return mr.WebURL, nil
+}
+
+// findExistingGitlabMR lists open MRs filtered by source/target branch and
+// returns the first match's web_url. Used when create-MR returns 409 (the MR
+// already exists) so a retry recovers the existing URL instead of failing —
+// the create+report flow must be idempotent across retries. CodeRabbit PR #27.
+func findExistingGitlabMR(ctx context.Context, base, token, project, sourceBranch, targetBranch string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?source_branch=%s&target_branch=%s&state=opened",
+		strings.TrimRight(base, "/"), url.PathEscape(project),
+		url.QueryEscape(sourceBranch), url.QueryEscape(targetBranch))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build list MR request: %w", err)
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("list MR request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("gitlab list MR: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	var mrs []struct {
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(respBody, &mrs); err != nil {
+		return "", fmt.Errorf("parse MR list response: %w", err)
+	}
+	if len(mrs) == 0 {
+		return "", fmt.Errorf("gitlab create MR returned 409 but no open MR for %s..%s", sourceBranch, targetBranch)
+	}
+	if strings.TrimSpace(mrs[0].WebURL) == "" {
+		return "", fmt.Errorf("gitlab existing MR missing web_url")
+	}
+	return mrs[0].WebURL, nil
 }
