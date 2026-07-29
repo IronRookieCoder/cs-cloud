@@ -443,7 +443,7 @@ func TestCreateSessionFailsWhenWorkerStopsBeforeReady(t *testing.T) {
 			created = true
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"session_id":"session-1","status":"starting","version":1}`))
+			_, _ = w.Write([]byte(`{"session_id":"session-1","status":"starting","version":"1.0.0"}`))
 		default:
 			http.NotFound(w, r)
 		}
