@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/version"
@@ -21,6 +22,14 @@ const providerCSCloud = "cs-cloud"
 
 // deregisterTimeout bounds the best-effort deregister call on Stop.
 const deregisterTimeout = 10 * time.Second
+
+// taskCallbackTimeout bounds terminal status callbacks independently from the
+// execution context. The execution context is normally already cancelled when
+// reporting a timeout, so reusing it would prevent FailTask from being sent.
+const taskCallbackTimeout = 30 * time.Second
+
+// sessionAbortTimeout bounds best-effort cleanup of a timed-out CSC session.
+const sessionAbortTimeout = 5 * time.Second
 
 // abortTombstoneTTL is how long an abort tombstone for a not-yet-started
 // task is remembered (the abort can race ahead of the pushed run request).
@@ -309,33 +318,40 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// produces output, otherwise "进入会话" would point at nothing.
 	worktree, agentPath, err := d.runner.Prepare(ctx, payload)
 	if err != nil {
-		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
-		return err
+		return d.failTask(payload.TaskID, err, "")
 	}
 
 	sessionID, err := d.bindSession(ctx, payload, worktree)
 	if err != nil {
-		_ = d.client.FailTask(ctx, payload.TaskID, err.Error(), "")
-		return err
+		return d.failTask(payload.TaskID, err, "")
 	}
 
-	var out []byte
-	var runErr error
-	if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
-		out, runErr = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
-	} else {
-		out, runErr = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
-	}
+	out, runErr := d.runAgent(ctx, payload, worktree, agentPath, sessionID)
 	output := truncateOutput(string(out))
-	_ = d.client.PostTaskMessages(ctx, payload.TaskID, output)
 	if runErr != nil {
+		var taskErr error
 		if d.aborted(payload.TaskID) {
-			_ = d.client.FailTask(ctx, payload.TaskID, "aborted", "cancelled")
+			taskErr = d.failTask(payload.TaskID, fmt.Errorf("aborted: %w", runErr), "cancelled")
+		} else if errors.Is(runErr, context.DeadlineExceeded) {
+			taskErr = d.failTask(payload.TaskID, runErr, "agent_timeout")
+		} else if errors.Is(runErr, agent.ErrEmptySessionOutput) {
+			taskErr = d.failTask(payload.TaskID, runErr, "agent_empty_output")
 		} else {
-			_ = d.client.FailTask(ctx, payload.TaskID, runErr.Error(), "")
+			taskErr = d.failTask(payload.TaskID, runErr, "agent_error")
 		}
-		return runErr
+		// Terminal status is more important than supplemental output. Upload any
+		// partial output only after FailTask so a slow messages endpoint cannot
+		// leave the task visibly running.
+		if output != "" {
+			d.postTaskMessages(payload.TaskID, output)
+		}
+		return taskErr
 	}
+	if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
+		emptyErr := fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
+		return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
+	}
+	d.postTaskMessages(payload.TaskID, output)
 
 	// Code-repo task: commit the agent's changes, push a source branch, open a
 	// GitLab MR, and fold the MR URL into the output. multica's worker-output
@@ -353,7 +369,94 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		}
 	}
 
-	return d.client.CompleteTask(ctx, payload.TaskID, output)
+	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
+		return d.client.CompleteTask(callbackCtx, payload.TaskID, output)
+	})
+}
+
+type agentRunResult struct {
+	output []byte
+	err    error
+}
+
+// runAgent supervises the agent boundary instead of trusting every SessionRunner
+// implementation to return when its context is cancelled. The worker only
+// produces a buffered result; execute remains the single owner of task status
+// callbacks, so a late worker cannot complete a task that already timed out.
+func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, worktree, agentPath, sessionID string) ([]byte, error) {
+	resultCh := make(chan agentRunResult, 1)
+	go func() {
+		var result agentRunResult
+		if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
+			result.output, result.err = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
+		} else {
+			result.output, result.err = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
+		}
+		resultCh <- result
+	}()
+
+	select {
+	case result := <-resultCh:
+		if err := ctx.Err(); err != nil {
+			d.abortSession(sessionID)
+			return nil, err
+		}
+		return result.output, result.err
+	case <-ctx.Done():
+		d.abortSession(sessionID)
+		return nil, ctx.Err()
+	}
+}
+
+func (d *Driver) abortSession(sessionID string) {
+	if sessionID == "" || d.deps == nil || d.deps.SessionRunner == nil {
+		return
+	}
+	aborter, ok := d.deps.SessionRunner.(SessionAborter)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), sessionAbortTimeout)
+	defer cancel()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- aborter.AbortSession(ctx, sessionID)
+	}()
+
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			logger.Warn("workflow: abort session %s failed: %v", sessionID, err)
+		}
+	case <-ctx.Done():
+		logger.Warn("workflow: abort session %s timed out: %v", sessionID, ctx.Err())
+	}
+}
+
+func (d *Driver) withTaskCallbackContext(callback func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), taskCallbackTimeout)
+	defer cancel()
+	return callback(ctx)
+}
+
+func (d *Driver) postTaskMessages(taskID, output string) {
+	if err := d.withTaskCallbackContext(func(ctx context.Context) error {
+		return d.client.PostTaskMessages(ctx, taskID, output)
+	}); err != nil {
+		logger.Warn("workflow: task %s message callback failed: %v", taskID, err)
+	}
+}
+
+func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
+	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
+		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
+	})
+	if callbackErr != nil {
+		return errors.Join(taskErr, fmt.Errorf("fail task callback: %w", callbackErr))
+	}
+	return taskErr
 }
 
 // bindSession creates a chat session for the task and binds it to both the
@@ -392,13 +495,6 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		return "", fmt.Errorf("multica returned empty chat session id")
 	}
 
-	if err := d.client.PinTaskSession(ctx, payload.TaskID, session.ID, ""); err != nil {
-		return "", fmt.Errorf("pin task session: %w", err)
-	}
-	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
-		return "", fmt.Errorf("bind node run session: %w", err)
-	}
-
 	if d.deps.ConversationBinder != nil {
 		// Create the csc session with the task env so in-task CLIs (notably
 		// `cs-cloud workflow deliverable submit`, which needs MULTICA_TOKEN +
@@ -407,8 +503,15 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		// this session, so the env must be present at creation.
 		env := d.runner.buildEnv(payload, worktree)
 		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree, env); err != nil {
-			logger.Warn("workflow: failed to bind local conversation session %s: %v", session.ID, err)
+			return "", fmt.Errorf("bind local conversation session: %w", err)
 		}
+	}
+
+	if err := d.client.PinTaskSession(ctx, payload.TaskID, session.ID, ""); err != nil {
+		return "", fmt.Errorf("pin task session: %w", err)
+	}
+	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
+		return "", fmt.Errorf("bind node run session: %w", err)
 	}
 
 	logger.Info("workflow: bound session %s to task %s node_run %s", session.ID, payload.TaskID, payload.NodeRunID)

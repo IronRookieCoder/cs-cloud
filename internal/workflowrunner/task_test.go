@@ -131,11 +131,12 @@ func TestTaskRunnerCscAddsOutputFormatText(t *testing.T) {
 
 type fakeSessionRunner struct {
 	env []string
+	err error
 }
 
 func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string) ([]byte, error) {
 	r.env = env
-	return []byte("session runner used"), nil
+	return []byte("session runner used"), r.err
 }
 
 func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {

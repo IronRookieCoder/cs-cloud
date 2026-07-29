@@ -334,6 +334,22 @@ func (m *AgentManager) RunWorkflowSession(ctx context.Context, sessionID, cwd, p
 	return r.RunSession(ctx, sessionID, cwd, prompt, env)
 }
 
+// AbortWorkflowSession stops a workflow prompt in the default csc session.
+func (m *AgentManager) AbortWorkflowSession(ctx context.Context, sessionID string) error {
+	a, ok := m.GetAgent("default")
+	if !ok {
+		return fmt.Errorf("no default agent available")
+	}
+	type sessionAborter interface {
+		AbortSession(ctx context.Context, sessionID string) error
+	}
+	aborter, ok := a.(sessionAborter)
+	if !ok {
+		return fmt.Errorf("default agent %q does not support session abort", a.Backend())
+	}
+	return aborter.AbortSession(ctx, sessionID)
+}
+
 // RestartDefaultAgent kills all running agents and re-initializes the default agent.
 // The onProgress callback receives phased progress updates during the operation.
 func (m *AgentManager) RestartDefaultAgent(ctx context.Context, agentType, agentCommand, agentVersionCommand, agentWorkspace string, agentEnv map[string]string, onProgress ProgressFunc) error {

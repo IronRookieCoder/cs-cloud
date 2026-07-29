@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
@@ -87,10 +89,13 @@ type fakeMultica struct {
 	deregistered  []string
 	pinSessions   []pinSessionCall
 	bindSessions  []bindSessionCall
+	taskCalls     []string
+	taskBodies    map[string][]byte
 	sessions      []workflow.ChatSession
 	nextRuntimeID int
 	nextSessionID int
 	runtimeAlive  map[string]bool
+	messageDelay  time.Duration
 }
 
 type pinSessionCall struct {
@@ -111,6 +116,7 @@ func newFakeMultica(workspaces ...workflow.Workspace) *fakeMultica {
 		nextRuntimeID: 1,
 		nextSessionID: 1,
 		runtimeAlive:  make(map[string]bool),
+		taskBodies:    make(map[string][]byte),
 	}
 }
 
@@ -194,6 +200,7 @@ func (f *fakeMultica) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(session)
 	})
 	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/session") {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) < 4 {
@@ -202,13 +209,23 @@ func (f *fakeMultica) handler() http.Handler {
 			}
 			taskID := parts[len(parts)-2]
 			var req workflow.PinTaskSessionRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.Unmarshal(body, &req)
 			f.mu.Lock()
 			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID})
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		f.mu.Lock()
+		messageDelay := f.messageDelay
+		f.mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/messages") && messageDelay > 0 {
+			time.Sleep(messageDelay)
+		}
+		f.mu.Lock()
+		f.taskCalls = append(f.taskCalls, r.URL.Path)
+		f.taskBodies[r.URL.Path] = body
+		f.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/api/daemon/node-runs/", func(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +274,35 @@ func (f *fakeMultica) sessionCalls() (pins []pinSessionCall, binds []bindSession
 	defer f.mu.Unlock()
 	return append([]pinSessionCall{}, f.pinSessions...),
 		append([]bindSessionCall{}, f.bindSessions...)
+}
+
+func (f *fakeMultica) taskCallback(suffix string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, path := range f.taskCalls {
+		if strings.HasSuffix(path, suffix) {
+			return append([]byte{}, f.taskBodies[path]...), true
+		}
+	}
+	return nil, false
+}
+
+func (f *fakeMultica) taskCallbackCount(suffix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, path := range f.taskCalls {
+		if strings.HasSuffix(path, suffix) {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *fakeMultica) setMessageDelay(delay time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messageDelay = delay
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -729,5 +775,438 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 	}
 	if len(binds) != 1 || binds[0].NodeRunID != "nr-1" || binds[0].DeviceID != "dev-1" || binds[0].RuntimeID == "" || binds[0].SessionID != pins[0].SessionID {
 		t.Fatalf("unexpected bind calls: %+v", binds)
+	}
+}
+
+func TestDriverCSCSessionFailureReportsAgentError(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	sessionRunner := &fakeSessionRunner{err: errors.New("Max turns reached")}
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"csc"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		MulticaBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  sessionRunner,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		regs, _, _ := fm.snapshot()
+		return len(regs) >= 1
+	})
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-fail",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if err == nil || err.Error() != "Max turns reached" {
+		t.Fatalf("RunTask error = %v, want Max turns reached", err)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("terminal CSC error called complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("terminal CSC error did not call fail callback")
+	}
+	var failure struct {
+		Error         string `json:"error"`
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.Error != "Max turns reached" {
+		t.Fatalf("failure error = %q, want Max turns reached", failure.Error)
+	}
+	if failure.FailureReason != "agent_error" {
+		t.Fatalf("failure reason = %q, want agent_error", failure.FailureReason)
+	}
+}
+
+func newCSCSessionTestDriver(
+	t *testing.T,
+	timeout time.Duration,
+	runner SessionRunner,
+	binder ConversationBinder,
+) (*Driver, *fakeMultica) {
+	t.Helper()
+	installFakeAgent(t, "csc")
+
+	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	t.Cleanup(ts.Close)
+
+	d := NewDriver(workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   timeout,
+		AllowedAgents:  []string{"csc"},
+	}, &Dependencies{
+		MulticaBaseURL:     ts.URL,
+		UserBaseURL:        ts.URL,
+		TokenProvider:      func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:           func() (string, error) { return "dev-1", nil },
+		ConversationBinder: binder,
+		SessionRunner:      runner,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+
+	waitFor(t, "registration", func() bool {
+		regs, _, _ := fm.snapshot()
+		return len(regs) >= 1
+	})
+	return d, fm
+}
+
+type nonCooperativeSessionRunner struct {
+	started   chan struct{}
+	unblock   chan struct{}
+	finished  chan struct{}
+	closeOnce sync.Once
+}
+
+func (r *nonCooperativeSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+	close(r.started)
+	<-r.unblock
+	close(r.finished)
+	return []byte("late result"), nil
+}
+
+func TestDriverTimesOutNonCooperativeCSCSession(t *testing.T) {
+	sessionRunner := &nonCooperativeSessionRunner{
+		started:  make(chan struct{}),
+		unblock:  make(chan struct{}),
+		finished: make(chan struct{}),
+	}
+	unblock := func() {
+		sessionRunner.closeOnce.Do(func() { close(sessionRunner.unblock) })
+	}
+	t.Cleanup(unblock)
+	d, fm := newCSCSessionTestDriver(t, 100*time.Millisecond, sessionRunner, nil)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-timeout",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-sessionRunner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	waitFor(t, "timeout fail callback", func() bool {
+		_, ok := fm.taskCallback("/fail")
+		return ok
+	})
+	waitFor(t, "timed-out task release", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.running["task-timeout"]
+		return !ok
+	})
+
+	unblock()
+	select {
+	case <-sessionRunner.finished:
+	case <-time.After(time.Second):
+		t.Fatal("late session runner did not return")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := fm.taskCallbackCount("/fail"); got != 1 {
+		t.Fatalf("fail callback count = %d, want 1", got)
+	}
+	if got := fm.taskCallbackCount("/complete"); got != 0 {
+		t.Fatalf("complete callback count = %d, want 0", got)
+	}
+}
+
+type contextAwareTimeoutRunner struct{}
+
+func (*contextAwareTimeoutRunner) RunSession(ctx context.Context, _ string, _ string, _ string, _ []string) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type partialOutputFailureRunner struct{}
+
+func (*partialOutputFailureRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+	return []byte("partial output"), errors.New("agent failed")
+}
+
+func TestDriverReportsAgentTimeoutReason(t *testing.T) {
+	d, fm := newCSCSessionTestDriver(t, 100*time.Millisecond, &contextAwareTimeoutRunner{}, nil)
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-timeout-reason",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunTask error = %v, want context deadline exceeded", err)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("timed-out task called complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("timed-out task did not call fail callback")
+	}
+	var failure struct {
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.FailureReason != "agent_timeout" {
+		t.Fatalf("failure reason = %q, want agent_timeout", failure.FailureReason)
+	}
+}
+
+type emptyOutputSessionRunner struct{}
+
+func (*emptyOutputSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+	return nil, agent.ErrEmptySessionOutput
+}
+
+func TestDriverReportsEmptySessionOutputAsFailure(t *testing.T) {
+	d, fm := newCSCSessionTestDriver(t, time.Minute, &emptyOutputSessionRunner{}, nil)
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-empty-output",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if !errors.Is(err, agent.ErrEmptySessionOutput) {
+		t.Fatalf("RunTask error = %v, want ErrEmptySessionOutput", err)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("empty session output called complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("empty session output did not call fail callback")
+	}
+	var failure struct {
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.FailureReason != "agent_empty_output" {
+		t.Fatalf("failure reason = %q, want agent_empty_output", failure.FailureReason)
+	}
+}
+
+type silentlyEmptySessionRunner struct{}
+
+func (*silentlyEmptySessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+	return nil, nil
+}
+
+// This exercises the workflow subsystem through its public RunTask boundary,
+// including workspace preparation, Multica session binding, and terminal HTTP
+// callbacks. Only the external CSC execution boundary is substituted.
+func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
+	d, fm := newCSCSessionTestDriver(t, time.Minute, &silentlyEmptySessionRunner{}, nil)
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-silently-empty",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if !errors.Is(err, agent.ErrEmptySessionOutput) {
+		t.Fatalf("RunTask error = %v, want ErrEmptySessionOutput", err)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("silently empty session called complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("silently empty session did not call fail callback")
+	}
+	var failure struct {
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.FailureReason != "agent_empty_output" {
+		t.Fatalf("failure reason = %q, want agent_empty_output", failure.FailureReason)
+	}
+}
+
+func TestDriverReportsFailureBeforeSlowMessageCallback(t *testing.T) {
+	d, fm := newCSCSessionTestDriver(t, time.Minute, &partialOutputFailureRunner{}, nil)
+	fm.setMessageDelay(500 * time.Millisecond)
+
+	start := time.Now()
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-prompt-failure",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	reported := false
+	deadline := time.Now().Add(350 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := fm.taskCallback("/fail"); ok {
+			reported = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !reported {
+		t.Fatalf("fail callback was delayed for %v by task messages", time.Since(start))
+	}
+	waitFor(t, "partial task messages", func() bool {
+		return fm.taskCallbackCount("/messages") == 1
+	})
+}
+
+type abortableSessionRunner struct {
+	started     chan struct{}
+	abortCalled chan struct{}
+	unblock     chan struct{}
+	closeOnce   sync.Once
+}
+
+func (r *abortableSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+	close(r.started)
+	<-r.unblock
+	return nil, context.Canceled
+}
+
+func (r *abortableSessionRunner) AbortSession(context.Context, string) error {
+	close(r.abortCalled)
+	r.closeOnce.Do(func() { close(r.unblock) })
+	return nil
+}
+
+func TestDriverAbortsCSCSessionOnTimeout(t *testing.T) {
+	sessionRunner := &abortableSessionRunner{
+		started:     make(chan struct{}),
+		abortCalled: make(chan struct{}),
+		unblock:     make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		sessionRunner.closeOnce.Do(func() { close(sessionRunner.unblock) })
+	})
+	d, fm := newCSCSessionTestDriver(t, 100*time.Millisecond, sessionRunner, nil)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-abort-timeout",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-sessionRunner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+	select {
+	case <-sessionRunner.abortCalled:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out CSC session was not aborted")
+	}
+	waitFor(t, "timeout fail callback", func() bool {
+		_, ok := fm.taskCallback("/fail")
+		return ok
+	})
+}
+
+type failingConversationBinder struct {
+	err error
+}
+
+func (b *failingConversationBinder) Bind(context.Context, string, string, []string) error {
+	return b.err
+}
+
+func TestDriverFailsBeforeRemoteBindingWhenLocalSessionBindFails(t *testing.T) {
+	sessionRunner := &fakeSessionRunner{}
+	d, fm := newCSCSessionTestDriver(
+		t,
+		time.Minute,
+		sessionRunner,
+		&failingConversationBinder{err: errors.New("local csc session failed to start")},
+	)
+
+	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-bind-failure",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	})
+	if err == nil || !strings.Contains(err.Error(), "local csc session failed to start") {
+		t.Fatalf("RunTask error = %v, want local bind failure", err)
+	}
+	if sessionRunner.env != nil {
+		t.Fatal("session runner was called after local bind failure")
+	}
+	pins, binds := fm.sessionCalls()
+	if len(pins) != 0 || len(binds) != 0 {
+		t.Fatalf("remote session was bound after local bind failure: pins=%v binds=%v", pins, binds)
+	}
+	if _, ok := fm.taskCallback("/fail"); !ok {
+		t.Fatal("local bind failure did not call fail callback")
 	}
 }
