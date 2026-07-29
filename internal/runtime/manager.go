@@ -141,12 +141,27 @@ func (m *AgentManager) KillAgent(convID string) {
 
 func (m *AgentManager) KillAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	agents := m.agents
+	m.agents = make(map[string]agent.Agent)
+	m.mu.Unlock()
 
-	for id, a := range m.agents {
-		_ = a.Kill()
-		delete(m.agents, id)
+	if len(agents) == 0 {
+		return
 	}
+
+	// Kill in parallel: each Kill can block up to 5s on graceful shutdown,
+	// so serial kills blow past the daemon's 5s Shutdown budget when there
+	// are multiple agents (e.g. several active conversations).
+	var wg sync.WaitGroup
+	for id, a := range agents {
+		wg.Add(1)
+		go func(a agent.Agent) {
+			defer wg.Done()
+			_ = a.Kill()
+		}(a)
+		delete(agents, id)
+	}
+	wg.Wait()
 }
 
 func (m *AgentManager) AgentPID() int {
@@ -317,6 +332,22 @@ func (m *AgentManager) RunWorkflowSession(ctx context.Context, sessionID, cwd, p
 		return nil, fmt.Errorf("default agent %q does not support session execution", a.Backend())
 	}
 	return r.RunSession(ctx, sessionID, cwd, prompt, env)
+}
+
+// AbortWorkflowSession stops a workflow prompt in the default csc session.
+func (m *AgentManager) AbortWorkflowSession(ctx context.Context, sessionID string) error {
+	a, ok := m.GetAgent("default")
+	if !ok {
+		return fmt.Errorf("no default agent available")
+	}
+	type sessionAborter interface {
+		AbortSession(ctx context.Context, sessionID string) error
+	}
+	aborter, ok := a.(sessionAborter)
+	if !ok {
+		return fmt.Errorf("default agent %q does not support session abort", a.Backend())
+	}
+	return aborter.AbortSession(ctx, sessionID)
 }
 
 // RestartDefaultAgent kills all running agents and re-initializes the default agent.

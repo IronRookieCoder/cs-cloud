@@ -102,9 +102,13 @@ func (s *Server) handleInstanceDispose(w http.ResponseWriter, r *http.Request) {
 	s.manager.KillAll()
 
 	ctx := r.Context()
-	if err := s.manager.InitDefaultAgent(ctx, s.cfg.DefaultAgent, "", s.cfg.AgentVersionCommand, s.cfg.AgentWorkspace, nil); err != nil {
+	if err := s.manager.InitDefaultAgent(ctx, s.cfg.DefaultAgent, s.cfg.AgentCommand, s.cfg.AgentVersionCommand, s.cfg.AgentWorkspace, s.cfg.AgentEnv); err != nil {
 		logger.Error("failed to restart agent: %v", err)
+		s.persistAgentPID()
+		writeOK(w, map[string]any{"disposed": false, "error": err.Error()})
+		return
 	}
+	s.persistAgentPID()
 
 	writeOK(w, map[string]any{"disposed": true})
 }

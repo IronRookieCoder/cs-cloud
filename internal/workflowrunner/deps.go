@@ -21,6 +21,13 @@ type SessionRunner interface {
 	RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error)
 }
 
+// SessionAborter stops a prompt running in an already-bound conversation
+// session. Implementations should treat repeated aborts as best-effort and
+// idempotent because both the runner and its supervisor can observe cancellation.
+type SessionAborter interface {
+	AbortSession(ctx context.Context, sessionID string) error
+}
+
 // Dependencies holds the external dependencies required by the workflow driver.
 type Dependencies struct {
 	BackendBaseURL string

@@ -24,8 +24,13 @@ func (b *agentManagerSessionBinder) RunSession(ctx context.Context, sessionID, c
 	return b.manager.RunWorkflowSession(ctx, sessionID, cwd, prompt, env)
 }
 
+func (b *agentManagerSessionBinder) AbortSession(ctx context.Context, sessionID string) error {
+	return b.manager.AbortWorkflowSession(ctx, sessionID)
+}
+
 var _ workflowrunner.ConversationBinder = (*agentManagerSessionBinder)(nil)
 var _ workflowrunner.SessionRunner = (*agentManagerSessionBinder)(nil)
+var _ workflowrunner.SessionAborter = (*agentManagerSessionBinder)(nil)
 
 // BindWorkflowSessionBinder wires the workflow driver to the default csc
 // agent so it can create local conversation sessions that match the server
