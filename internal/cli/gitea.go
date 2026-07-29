@@ -16,13 +16,12 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
-	"cs-cloud/internal/workflowrunner"
 )
 
 // deliverableCmd implements `cs-cloud workflow deliverable <subcommand>`. It is the cs-cloud home
 // for the platform-Gitea document-deliverable operations migrated from
 // the server's cs-workflow CLI. Subcommands run inside a workflow-node task
-// context: they read MULTICA_GITEA_* / MULTICA_TOKEN / MULTICA_SERVER_URL env
+// context: they read CS_CLOUD_GITEA_* / CS_CLOUD_TOKEN / CS_CLOUD_BACKEND_URL env
 // (pushed by the server in the task payload) and are invoked by the agent (csc)
 // during a node run.
 func deliverableCmd(a *app.App, args []string) error {
@@ -49,7 +48,7 @@ func printDeliverableUsage() {
 Usage:
   cs-cloud workflow deliverable submit --deliverable <id> --file <path>
     Push a document deliverable to the platform Gitea and open a PR.
-    Reads MULTICA_GITEA_* env (set by the task payload), fetches the workspace
+    Reads CS_CLOUD_GITEA_* env (set by the task payload), fetches the workspace
     Gitea PAT, pushes the document to the node branch, opens a Gitea PR
     (node->inst), and registers the PR URL back to the server.`)
 }
@@ -154,27 +153,27 @@ type giteaDeliverableRef struct {
 
 func readGiteaContext() (*giteaContext, error) {
 	c := &giteaContext{
-		nodeRunID:  os.Getenv("MULTICA_NODE_RUN_ID"),
-		owner:      os.Getenv("MULTICA_GITEA_OWNER"),
-		repo:       os.Getenv("MULTICA_GITEA_REPO"),
-		cloneURL:   os.Getenv("MULTICA_GITEA_CLONE_URL"),
-		instBranch: os.Getenv("MULTICA_GITEA_INST_BRANCH"),
-		nodeBranch: os.Getenv("MULTICA_GITEA_NODE_BRANCH"),
+		nodeRunID:  os.Getenv("CS_CLOUD_NODE_RUN_ID"),
+		owner:      os.Getenv("CS_CLOUD_GITEA_OWNER"),
+		repo:       os.Getenv("CS_CLOUD_GITEA_REPO"),
+		cloneURL:   os.Getenv("CS_CLOUD_GITEA_CLONE_URL"),
+		instBranch: os.Getenv("CS_CLOUD_GITEA_INST_BRANCH"),
+		nodeBranch: os.Getenv("CS_CLOUD_GITEA_NODE_BRANCH"),
 	}
 	if c.nodeRunID == "" {
-		return nil, fmt.Errorf("MULTICA_NODE_RUN_ID not set; this command must run inside a workflow-node task")
+		return nil, fmt.Errorf("CS_CLOUD_NODE_RUN_ID not set; this command must run inside a workflow-node task")
 	}
 	for _, f := range []string{c.owner, c.repo, c.instBranch, c.nodeBranch} {
 		if f == "" {
-			return nil, fmt.Errorf("MULTICA_GITEA_* env incomplete (owner/repo/inst/node-branch required)")
+			return nil, fmt.Errorf("CS_CLOUD_GITEA_* env incomplete (owner/repo/inst/node-branch required)")
 		}
 	}
-	raw := os.Getenv("MULTICA_GITEA_DELIVERABLES")
+	raw := os.Getenv("CS_CLOUD_GITEA_DELIVERABLES")
 	if raw == "" {
-		return nil, fmt.Errorf("MULTICA_GITEA_DELIVERABLES not set")
+		return nil, fmt.Errorf("CS_CLOUD_GITEA_DELIVERABLES not set")
 	}
 	if err := json.Unmarshal([]byte(raw), &c.deliverables); err != nil {
-		return nil, fmt.Errorf("parse MULTICA_GITEA_DELIVERABLES: %w", err)
+		return nil, fmt.Errorf("parse CS_CLOUD_GITEA_DELIVERABLES: %w", err)
 	}
 	return c, nil
 }
@@ -185,7 +184,7 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 			return d.Path, nil
 		}
 	}
-	return "", fmt.Errorf("deliverable %q not in MULTICA_GITEA_DELIVERABLES", id)
+	return "", fmt.Errorf("deliverable %q not in CS_CLOUD_GITEA_DELIVERABLES", id)
 }
 
 // submitDeliverable is the testable core. Returns nil only after the PR/MR is
@@ -197,22 +196,17 @@ func submitDeliverable(cfg submitConfig) error {
 
 	ctx := context.Background()
 
-	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
-	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
-	// first, which created the delivery repo worktree at <taskRoot>/<repoName>/.
-	// Resolve that subdir via the shared RepoWorktreeDir helper — the same
-	// helper CheckoutRepo and the MR submit path use — so all three paths
-	// (checkout, document submit, code --mr submit) derive the worktree identically.
-	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
-	if taskRoot == "" {
-		return fmt.Errorf("CS_CLOUD_WORKTREE not set (document submit must run after `cs-cloud repo checkout` inside a cs-cloud task)")
-	}
-
+	// The agent cloned the delivery repo itself (git clone) and runs this
+	// command from inside it, so the repo dir is the current working directory.
+	// cs-cloud no longer manages checkout paths.
 	gctx, err := readGiteaContext()
 	if err != nil {
 		return err
 	}
-	worktree := workflowrunner.RepoWorktreeDir(taskRoot, gctx.cloneURL)
+	worktree, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve cwd: %w", err)
+	}
 
 	docPath, err := gctx.deliverablePath(cfg.deliverableID)
 	if err != nil {
@@ -263,7 +257,7 @@ func submitDeliverable(cfg submitConfig) error {
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
 	}
-	if err := reportDeliverablePR(ctx, envOr("MULTICA_SERVER_URL", ""), os.Getenv("MULTICA_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL); err != nil {
+	if err := reportDeliverablePR(ctx, envOr("CS_CLOUD_BACKEND_URL", ""), os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}
 	fmt.Println(prURL)
@@ -307,24 +301,24 @@ var sharedHTTPClient = &http.Client{Timeout: 30 * time.Second}
 var urlCredRedactor = regexp.MustCompile(`(\w+://[^/:@]+:)[^@]+(@)`)
 
 // readGiteaCredential reads the workspace bot PAT + base URL that the server
-// pushed in the task payload env (MULTICA_GITEA_*). cs-cloud talks to Gitea
+// pushed in the task payload env (CS_CLOUD_GITEA_*). cs-cloud talks to Gitea
 // directly with these — there is no relay back through the server to fetch
-// credentials, so the agent CLI never depends on MULTICA_TOKEN for Gitea auth.
+// credentials, so the agent CLI never depends on CS_CLOUD_TOKEN for Gitea auth.
 func readGiteaCredential() (struct {
 	BaseURL string
 	Token   string
 }, error) {
-	token := strings.TrimSpace(os.Getenv("MULTICA_GITEA_TOKEN"))
+	token := strings.TrimSpace(os.Getenv("CS_CLOUD_GITEA_TOKEN"))
 	if token == "" {
 		return struct {
 			BaseURL string
 			Token   string
-		}{}, fmt.Errorf("MULTICA_GITEA_TOKEN not set (the task payload must provide the workspace bot PAT)")
+		}{}, fmt.Errorf("CS_CLOUD_GITEA_TOKEN not set (the task payload must provide the workspace bot PAT)")
 	}
 	return struct {
 		BaseURL string
 		Token   string
-	}{BaseURL: strings.TrimSpace(os.Getenv("MULTICA_GITEA_BASE_URL")), Token: token}, nil
+	}{BaseURL: strings.TrimSpace(os.Getenv("CS_CLOUD_GITEA_BASE_URL")), Token: token}, nil
 }
 
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.

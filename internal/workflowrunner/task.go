@@ -22,16 +22,13 @@ const (
 	CscOutputFormatText = "text"
 
 	// Environment variables injected into every agent process.
-	EnvWorkspaceID     = "MULTICA_WORKSPACE_ID"
-	EnvTaskID          = "MULTICA_TASK_ID"
-	EnvPrompt          = "MULTICA_PROMPT"
+	EnvWorkspaceID     = "CS_CLOUD_WORKSPACE_ID"
+	EnvTaskID          = "CS_CLOUD_TASK_ID"
+	EnvPrompt          = "CS_CLOUD_PROMPT"
 	EnvCSCloudWorktree = "CS_CLOUD_WORKTREE"
 	// For in-task CLIs (cs-cloud gitea submit) that call the server.
-	EnvServerURL = "MULTICA_SERVER_URL"
-	EnvToken     = "MULTICA_TOKEN"
-	// EnvCSCloudServerURL lets in-task `cs-cloud repo checkout` reach the
-	// daemon's localserver RPC. Threaded in by the daemon via SetLocalServerURL.
-	EnvCSCloudServerURL = "CS_CLOUD_SERVER_URL"
+	EnvServerURL = "CS_CLOUD_BACKEND_URL"
+	EnvToken     = "CS_CLOUD_TOKEN"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -41,15 +38,11 @@ type TaskRunner struct {
 	agentTimeout     time.Duration
 	allowedAgents    []string
 	sessionRunner    SessionRunner
-	// serverBaseURL + tokenProvider let buildEnv inject MULTICA_SERVER_URL +
-	// MULTICA_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
+	// serverBaseURL + tokenProvider let buildEnv inject CS_CLOUD_BACKEND_URL +
+	// CS_CLOUD_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
 	// can call the server's daemon-auth API. Set via SetServerEndpoint.
 	serverBaseURL string
 	tokenProvider func() (*provider.Credentials, error)
-	// localServerURL is the daemon's localserver listen URL, injected into
-	// task env as CS_CLOUD_SERVER_URL so in-task `cs-cloud repo checkout`
-	// can reach the localserver RPC. Set via SetLocalServerURL.
-	localServerURL string
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -62,16 +55,10 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 }
 
 // SetServerEndpoint injects the server base URL + token provider so the task
-// env can carry MULTICA_SERVER_URL + MULTICA_TOKEN for in-task CLIs.
+// env can carry CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN for in-task CLIs.
 func (tr *TaskRunner) SetServerEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
 	tr.serverBaseURL = baseURL
 	tr.tokenProvider = tp
-}
-
-// SetLocalServerURL lets the daemon thread its localserver listen URL into the
-// task env so in-task `cs-cloud repo checkout` can reach the RPC.
-func (tr *TaskRunner) SetLocalServerURL(url string) {
-	tr.localServerURL = url
 }
 
 // SetSessionRunner injects a runner that executes prompts inside an already
@@ -119,10 +106,9 @@ func (tr *TaskRunner) Run(ctx context.Context, payload workflow.TaskRunPayload) 
 }
 
 // Prepare determines the task root (reusing the prior workdir when resuming,
-// else a fresh per-task dir), ensures it exists, and pre-warms the mirror
-// caches for the task's Repos[] in the background so the agent's on-demand
-// `cs-cloud repo checkout` is fast. It returns the task root (the agent's cwd);
-// per-repo worktrees are created lazily by checkout, not here.
+// else a fresh per-task dir) and ensures it exists. It returns the task root
+// (the agent's cwd); the agent clones any repos it needs into this dir itself
+// (guided by the task prompt + env vars).
 func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPayload) (worktree string, agentPath string, err error) {
 	if err := tr.validateAgent(payload.Agent); err != nil {
 		return "", "", err
@@ -143,22 +129,6 @@ func (tr *TaskRunner) Prepare(ctx context.Context, payload workflow.TaskRunPaylo
 	if err := os.MkdirAll(taskRoot, 0o755); err != nil {
 		return "", "", fmt.Errorf("prepare task root: %w", err)
 	}
-
-	// Pre-warm mirror caches for all advertised repos (best-effort, background).
-	// The agent's checkout re-ensures (serialized per cache), so a missed warm-up
-	// just means a cold clone at checkout time. Token is per-role: a delivery
-	// repo (Gitea) must clone with MULTICA_REPO_TOKEN, not the GitLab PAT, or the
-	// pre-warm 401s silently — sharing tokenForRepo with Driver.CheckoutRepo
-	// keeps the two paths consistent.
-	go func() {
-		for _, r := range payload.Repos {
-			if r.URL == "" {
-				continue
-			}
-			role := lookupRepoRole(payload.Repos, r.URL)
-			_, _ = tr.workspaceManager.EnsureRepoReady(payload.WorkspaceID, r.URL, tokenForRepo(role, payload.Env))
-		}
-	}()
 
 	return taskRoot, agentPath, nil
 }
@@ -217,12 +187,7 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	env = setEnv(env, EnvTaskID, payload.TaskID)
 	env = setEnv(env, EnvPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
-	// CS_CLOUD_SERVER_URL lets in-task `cs-cloud repo checkout` reach the
-	// daemon's localserver RPC. Threaded in by the daemon after it binds.
-	if tr.localServerURL != "" {
-		env = setEnv(env, EnvCSCloudServerURL, tr.localServerURL)
-	}
-	// MULTICA_SERVER_URL + MULTICA_TOKEN so in-task CLIs (cs-cloud gitea
+	// CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN so in-task CLIs (cs-cloud gitea
 	// submit) can authenticate to the server's daemon API. These are the
 	// daemon's own endpoint + credentials — cs-cloud owns this auth, not the server.
 	if tr.serverBaseURL != "" {

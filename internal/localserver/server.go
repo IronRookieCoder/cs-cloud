@@ -223,8 +223,6 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
 
-	api.HandleFunc("POST /repo/checkout", s.handleRepoCheckout)
-
 	s.http = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -305,13 +303,6 @@ func (s *Server) Start(addr string) error {
 			logger.Warn("workflow driver disabled: %v", err)
 			s.workflowErr = err
 		}
-	}
-
-	// Thread the localserver URL into the task env (CS_CLOUD_SERVER_URL) before
-	// the serve goroutine starts, so the `go` statement provides happens-before
-	// to task goroutines that read it in buildEnv (mirrors SetServerEndpoint).
-	if s.workflow != nil {
-		s.workflow.SetLocalServerURL(s.url)
 	}
 
 	// Start the ring buffer drain goroutine (subscribes to EventBus).

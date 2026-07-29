@@ -132,7 +132,7 @@ func (d *Driver) Start() error {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)
 	}
 	// Inject server endpoint + token so in-task CLIs (cs-cloud gitea
-	// submit/fetch) get MULTICA_SERVER_URL + MULTICA_TOKEN in their env.
+	// submit/fetch) get CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN in their env.
 	if d.deps != nil {
 		d.runner.SetServerEndpoint(d.deps.BackendBaseURL, d.deps.TokenProvider)
 	}
@@ -552,8 +552,8 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 
 	if d.deps.ConversationBinder != nil {
 		// Create the csc session with the task env so in-task CLIs (notably
-		// `cs-cloud workflow deliverable submit`, which needs MULTICA_TOKEN +
-		// MULTICA_GITEA_* to push document deliverables to Gitea) inherit the
+		// `cs-cloud workflow deliverable submit`, which needs CS_CLOUD_TOKEN +
+		// CS_CLOUD_GITEA_* to push document deliverables to Gitea) inherit the
 		// credentials the server pushed in the task payload. RunSession reuses
 		// this session, so the env must be present at creation. Bind is fatal:
 		// a failed local session must not proceed to remote pin/bind, which
@@ -590,96 +590,6 @@ func truncateOutput(s string) string {
 		return s
 	}
 	return strings.ToValidUTF8(s[:maxCallbackOutputBytes], "") + "\n... (output truncated)"
-}
-
-// CheckoutRepo serves an agent's on-demand `cs-cloud repo checkout` for a
-// running task: looks up the task's payload + taskRoot, then creates (or resets)
-// a per-repo branch worktree. baseBranch "" resolves the remote default.
-//
-// The repo's role (matched by URL against payload.Repos) drives BOTH the
-// worktree branch name and which env var supplies the clone token; see
-// lookupRepoRole + tokenForRepo. "delivery" → MULTICA_REPO_NODE_BRANCH (the
-// node branch the server pre-created off inst in the Gitea wf repo, e.g.
-// "node/01-<shortHex>") + MULTICA_REPO_TOKEN (Gitea bot PAT); other/missing →
-// agent/<agent>/<shortTaskID> + MULTICA_GITLAB_TOKEN (GitLab PAT used for code
-// repos since M1).
-//
-// cs-cloud does NOT compute the delivery branch: it must use the exact branch
-// name the server sent, otherwise the worktree, the push, and the PR head would
-// diverge from the remote branch the server created.
-func (d *Driver) CheckoutRepo(taskID, repoURL, baseBranch string) (string, error) {
-	d.mu.Lock()
-	rec, ok := d.running[taskID]
-	d.mu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("task %s is not running", taskID)
-	}
-	role := lookupRepoRole(rec.payload.Repos, repoURL)
-	token := tokenForRepo(role, rec.payload.Env)
-	// the server owns the node-branch convention and injects the fully-formed
-	// branch name (e.g. "node/01-<shortHex>") via MULTICA_REPO_NODE_BRANCH.
-	// Thread it through verbatim — do not derive a "node/<short>" here.
-	// Map index on a nil map returns "" (the zero value), so no nil-guard needed.
-	nodeBranch := rec.payload.Env["MULTICA_REPO_NODE_BRANCH"]
-	return d.workspaceManager.CheckoutRepo(
-		rec.payload.WorkspaceID, rec.taskRoot, repoURL,
-		rec.payload.Agent, taskID, baseBranch, token, role, nodeBranch,
-	)
-}
-
-// lookupRepoRole returns the Role of the first RepoSpec in repos whose URL
-// matches repoURL. Returns "code" when repos is empty or no entry matches
-// (backward-compat: a repo not listed in the payload defaults to the code-repo
-// treatment). Plain equality is sufficient — the server sends the same URL string
-// in payload.Repos[] and the checkout request. A miss on a non-empty repos list
-// is logged so a future URL-shape mismatch (trailing slash, .git, host case)
-// downgrading a delivery repo to the GitLab token is debuggable instead of a
-// silent 401.
-func lookupRepoRole(repos []workflow.RepoSpec, repoURL string) string {
-	for _, r := range repos {
-		if r.URL == repoURL {
-			if r.Role != "" {
-				return r.Role
-			}
-			return "code"
-		}
-	}
-	if len(repos) > 0 {
-		known := make([]string, 0, len(repos))
-		for _, r := range repos {
-			if r.URL != "" {
-				known = append(known, r.URL)
-			}
-		}
-		logger.Warn("workflow: repo %q matched no entry in payload.Repos; defaulting role to \"code\" (known: %v)", repoURL, known)
-	}
-	return "code"
-}
-
-// tokenForRepo selects the clone token for a repo by role. Delivery repos are
-// Gitea and authenticate with the bot PAT (MULTICA_REPO_TOKEN); code repos use
-// the GitLab PAT (MULTICA_GITLAB_TOKEN). Empty env → empty token (EnsureRepoReady
-// / injectToken treat empty as "clone without auth", e.g. for file:// test
-// upstreams). Shared between Driver.CheckoutRepo (agent-triggered checkout) and
-// TaskRunner.Prepare's pre-warm loop so both paths pick the same token.
-func tokenForRepo(role string, env map[string]string) string {
-	if role == "delivery" {
-		return env["MULTICA_REPO_TOKEN"]
-	}
-	return env["MULTICA_GITLAB_TOKEN"]
-}
-
-// SetLocalServerURL threads the daemon's localserver listen URL to the task
-// runner so it can be injected into the agent env (CS_CLOUD_SERVER_URL),
-// letting in-task `cs-cloud repo checkout` reach the localserver RPC. The
-// nil-guard on d.runner is defensive — runner is set in Start(), and the
-// daemon calls this after Start() has succeeded.
-func (d *Driver) SetLocalServerURL(url string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.runner != nil {
-		d.runner.SetLocalServerURL(url)
-	}
 }
 
 // AbortTask cancels a running task. When the task is not (yet) running, the

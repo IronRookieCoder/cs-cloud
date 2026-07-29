@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,9 +46,6 @@ func (d *Driver) runGC() error {
 		wsDir := filepath.Join(root, wsEntry.Name())
 		d.gcWorkspace(wsDir, stats)
 	}
-
-	// Prune stale worktree references from all bare repo caches.
-	d.pruneRepoWorktrees(root)
 
 	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 {
 		logger.Info("gc: cycle complete: cleaned=%d orphaned=%d skipped=%d artifact_dirs=%d artifact_removed=%d bytes_reclaimed=%d by_pattern=%v",
@@ -475,51 +471,3 @@ func dirSize(root string) int64 {
 	return total
 }
 
-// pruneRepoWorktrees runs `git worktree prune` on all bare repos in the cache.
-// cs-cloud's bare cache lives at <workspacesRoot>/<wsID>/repos/<repoName>.
-func (d *Driver) pruneRepoWorktrees(workspacesRoot string) {
-	wsEntries, err := os.ReadDir(workspacesRoot)
-	if err != nil {
-		return
-	}
-	for _, wsEntry := range wsEntries {
-		if !wsEntry.IsDir() {
-			continue
-		}
-		reposDir := filepath.Join(workspacesRoot, wsEntry.Name(), "repos")
-		repoEntries, err := os.ReadDir(reposDir)
-		if err != nil {
-			continue
-		}
-		for _, repoEntry := range repoEntries {
-			if !repoEntry.IsDir() {
-				continue
-			}
-			barePath := filepath.Join(reposDir, repoEntry.Name())
-			if !isBareRepo(barePath) {
-				continue
-			}
-			d.pruneWorktree(barePath)
-		}
-	}
-}
-
-func (d *Driver) pruneWorktree(barePath string) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", barePath, "worktree", "prune")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		logger.Warn("gc: worktree prune failed: repo=%s output=%s err=%v", barePath, strings.TrimSpace(string(out)), err)
-	}
-}
-
-// isBareRepo checks if a path looks like a bare git repository.
-func isBareRepo(path string) bool {
-	if _, err := os.Stat(filepath.Join(path, "HEAD")); err != nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(path, "objects")); err != nil {
-		return false
-	}
-	return true
-}

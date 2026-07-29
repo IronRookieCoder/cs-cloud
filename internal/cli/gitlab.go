@@ -10,8 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-
-	"cs-cloud/internal/workflowrunner"
 )
 
 // submitGitlabMR handles the --mr (GitLab code MR) path: pushes the current
@@ -26,31 +24,26 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("gitlab credential: %w", err)
 	}
 
-	// CS_CLOUD_WORKTREE is the TASK ROOT (task.go buildEnv sets it to the
-	// taskRoot, NOT a per-repo worktree). The agent ran `cs-cloud repo checkout`
-	// first, which created the code-repo worktree at <taskRoot>/<repoName>/.
-	// Resolve that subdir via RepoWorktreeDir — the same helper CheckoutRepo
-	// uses — so submit pushes from the exact worktree checkout created, not the
-	// bare task root (which has no .git and would fail at git rev-parse).
-	taskRoot := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKTREE"))
-	if taskRoot == "" {
-		return fmt.Errorf("CS_CLOUD_WORKTREE not set")
+	// The agent cloned the code repo itself (git clone) and runs this command
+	// from inside it, so the repo dir is the current working directory.
+	worktree, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	worktree := workflowrunner.RepoWorktreeDir(taskRoot, cfg.repoURL)
 
-	nodeRunID := os.Getenv("MULTICA_NODE_RUN_ID")
+	nodeRunID := os.Getenv("CS_CLOUD_NODE_RUN_ID")
 	if nodeRunID == "" {
-		return fmt.Errorf("MULTICA_NODE_RUN_ID not set")
+		return fmt.Errorf("CS_CLOUD_NODE_RUN_ID not set")
 	}
 
 	// Validate the report-back URL BEFORE pushing/opening the MR: otherwise a
-	// missing MULTICA_SERVER_URL leaves an orphaned MR on GitLab that no retry
+	// missing CS_CLOUD_BACKEND_URL leaves an orphaned MR on GitLab that no retry
 	// can recover (the second push would hit "merge request already exists").
-	serverURL := envOr("MULTICA_SERVER_URL", "")
+	serverURL := envOr("CS_CLOUD_BACKEND_URL", "")
 	if serverURL == "" {
-		return fmt.Errorf("MULTICA_SERVER_URL not set")
+		return fmt.Errorf("CS_CLOUD_BACKEND_URL not set")
 	}
-	token := os.Getenv("MULTICA_TOKEN")
+	token := os.Getenv("CS_CLOUD_TOKEN")
 
 	// Determine current branch in the worktree.
 	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
@@ -64,7 +57,7 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	targetBranch := envOr("MULTICA_GITLAB_TARGET_BRANCH", "main")
+	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "main")
 	title := "deliverable " + cfg.deliverableID
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
 	if err != nil {
@@ -86,20 +79,20 @@ type gitlabCredential struct {
 	Token   string
 }
 
-// readGitlabCredential reads MULTICA_GITLAB_TOKEN and MULTICA_GITLAB_BASE_URL.
+// readGitlabCredential reads CS_CLOUD_GITLAB_TOKEN and CS_CLOUD_GITLAB_BASE_URL.
 // The base URL is validated as an absolute HTTP(S) URL up front so a missing/
 // malformed value fails BEFORE the worktree branch is pushed — otherwise the
 // branch is orphaned on GitLab and no retry can recover (the second attempt
 // hits "merge request already exists"). CodeRabbit PR #27 (Critical).
 func readGitlabCredential() (*gitlabCredential, error) {
-	token := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_TOKEN"))
+	token := strings.TrimSpace(os.Getenv("CS_CLOUD_GITLAB_TOKEN"))
 	if token == "" {
-		return nil, fmt.Errorf("MULTICA_GITLAB_TOKEN not set (the task payload must provide the GitLab PAT)")
+		return nil, fmt.Errorf("CS_CLOUD_GITLAB_TOKEN not set (the task payload must provide the GitLab PAT)")
 	}
-	baseURL := strings.TrimSpace(os.Getenv("MULTICA_GITLAB_BASE_URL"))
+	baseURL := strings.TrimSpace(os.Getenv("CS_CLOUD_GITLAB_BASE_URL"))
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, fmt.Errorf("MULTICA_GITLAB_BASE_URL must be an absolute HTTP(S) URL, got %q", baseURL)
+		return nil, fmt.Errorf("CS_CLOUD_GITLAB_BASE_URL must be an absolute HTTP(S) URL, got %q", baseURL)
 	}
 	return &gitlabCredential{
 		BaseURL: baseURL,

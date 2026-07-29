@@ -11,8 +11,8 @@ import (
 
 // TestReadGitlabCredential_Valid confirms the happy path returns both fields.
 func TestReadGitlabCredential_Valid(t *testing.T) {
-	t.Setenv("MULTICA_GITLAB_TOKEN", "gl-pat")
-	t.Setenv("MULTICA_GITLAB_BASE_URL", "https://gitlab.test")
+	t.Setenv("CS_CLOUD_GITLAB_TOKEN", "gl-pat")
+	t.Setenv("CS_CLOUD_GITLAB_BASE_URL", "https://gitlab.test")
 
 	cred, err := readGitlabCredential()
 	if err != nil {
@@ -28,11 +28,11 @@ func TestReadGitlabCredential_Valid(t *testing.T) {
 
 // TestReadGitlabCredential_MissingToken requires the PAT up front.
 func TestReadGitlabCredential_MissingToken(t *testing.T) {
-	t.Setenv("MULTICA_GITLAB_TOKEN", "")
-	t.Setenv("MULTICA_GITLAB_BASE_URL", "https://gitlab.test")
+	t.Setenv("CS_CLOUD_GITLAB_TOKEN", "")
+	t.Setenv("CS_CLOUD_GITLAB_BASE_URL", "https://gitlab.test")
 
 	if _, err := readGitlabCredential(); err == nil {
-		t.Fatal("expected error when MULTICA_GITLAB_TOKEN is empty")
+		t.Fatal("expected error when CS_CLOUD_GITLAB_TOKEN is empty")
 	}
 }
 
@@ -41,7 +41,7 @@ func TestReadGitlabCredential_MissingToken(t *testing.T) {
 // missing/malformed value fails after the push, orphaning the branch. CodeRabbit
 // PR #27 (Critical).
 func TestReadGitlabCredential_InvalidBaseURL(t *testing.T) {
-	t.Setenv("MULTICA_GITLAB_TOKEN", "gl-pat")
+	t.Setenv("CS_CLOUD_GITLAB_TOKEN", "gl-pat")
 	cases := []string{
 		"",                 // missing
 		"   ",              // whitespace only
@@ -50,7 +50,7 @@ func TestReadGitlabCredential_InvalidBaseURL(t *testing.T) {
 		"/local/path",      // path, not absolute URL
 	}
 	for _, baseURL := range cases {
-		t.Setenv("MULTICA_GITLAB_BASE_URL", baseURL)
+		t.Setenv("CS_CLOUD_GITLAB_BASE_URL", baseURL)
 		if _, err := readGitlabCredential(); err == nil {
 			t.Errorf("base URL %q: expected error, got nil", baseURL)
 		}

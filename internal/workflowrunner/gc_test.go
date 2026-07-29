@@ -306,30 +306,6 @@ func TestCleanTaskArtifacts_DoesNotFollowSymlinks(t *testing.T) {
 	}
 }
 
-func TestIsBareRepo(t *testing.T) {
-	t.Run("valid bare repo", func(t *testing.T) {
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main"), 0o644)
-		os.MkdirAll(filepath.Join(dir, "objects"), 0o755)
-		if !isBareRepo(dir) {
-			t.Fatal("expected isBareRepo=true for dir with HEAD + objects/")
-		}
-	})
-	t.Run("HEAD only", func(t *testing.T) {
-		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main"), 0o644)
-		if isBareRepo(dir) {
-			t.Fatal("expected isBareRepo=false for dir with only HEAD")
-		}
-	})
-	t.Run("empty dir", func(t *testing.T) {
-		dir := t.TempDir()
-		if isBareRepo(dir) {
-			t.Fatal("expected isBareRepo=false for empty dir")
-		}
-	})
-}
-
 // TestShouldCleanTaskDir_KindDispatch covers the GCMeta kinds (including the
 // cs-cloud workflow_node_run) across terminal / non-terminal / 404 axes.
 func TestShouldCleanTaskDir_KindDispatch(t *testing.T) {

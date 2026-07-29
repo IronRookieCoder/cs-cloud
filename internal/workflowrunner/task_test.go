@@ -13,7 +13,7 @@ import (
 
 func TestTaskRunnerBuildEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
-	t.Setenv("MULTICA_TASK_ID", "parent-task")
+	t.Setenv("CS_CLOUD_TASK_ID", "parent-task")
 	tr := &TaskRunner{}
 	env := tr.buildEnv(workflow.TaskRunPayload{
 		WorkspaceID: "ws-1",
@@ -21,7 +21,7 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 		Agent:       "claude",
 		Env: map[string]string{
 			"CUSTOM_VAR":      "custom-value",
-			"MULTICA_TASK_ID": "override-task",
+			"CS_CLOUD_TASK_ID": "override-task",
 		},
 	}, "/tmp/ws")
 
@@ -32,11 +32,11 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 		}
 	}
 
-	if got["MULTICA_WORKSPACE_ID"] != "ws-1" {
-		t.Fatalf("MULTICA_WORKSPACE_ID = %q", got["MULTICA_WORKSPACE_ID"])
+	if got["CS_CLOUD_WORKSPACE_ID"] != "ws-1" {
+		t.Fatalf("CS_CLOUD_WORKSPACE_ID = %q", got["CS_CLOUD_WORKSPACE_ID"])
 	}
-	if got["MULTICA_TASK_ID"] != "task-1" {
-		t.Fatalf("MULTICA_TASK_ID = %q, want task-1 (override failed)", got["MULTICA_TASK_ID"])
+	if got["CS_CLOUD_TASK_ID"] != "task-1" {
+		t.Fatalf("CS_CLOUD_TASK_ID = %q, want task-1 (override failed)", got["CS_CLOUD_TASK_ID"])
 	}
 	if got["CS_CLOUD_WORKTREE"] != "/tmp/ws" {
 		t.Fatalf("CS_CLOUD_WORKTREE = %q", got["CS_CLOUD_WORKTREE"])
@@ -153,8 +153,8 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 		Agent:       "csc",
 		Prompt:      "do thing",
 		Env: map[string]string{
-			"FAKE_AGENT_PRINT_ENV": "MULTICA_NODE_RUN_ID",
-			"MULTICA_NODE_RUN_ID":  "nr-env",
+			"FAKE_AGENT_PRINT_ENV": "CS_CLOUD_NODE_RUN_ID",
+			"CS_CLOUD_NODE_RUN_ID":  "nr-env",
 		},
 	}, t.TempDir(), "session-1")
 	if err != nil {
@@ -170,33 +170,8 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 			env[k] = v
 		}
 	}
-	if env["MULTICA_NODE_RUN_ID"] != "nr-env" {
-		t.Fatalf("MULTICA_NODE_RUN_ID = %q, want nr-env", env["MULTICA_NODE_RUN_ID"])
-	}
-}
-
-func TestBuildEnv_LocalServerURL(t *testing.T) {
-	wm := NewWorkspaceManager(t.TempDir())
-	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
-	tr.SetLocalServerURL("http://127.0.0.1:9999")
-	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1", Agent: AgentCsc}, "/work")
-	for _, e := range env {
-		if e == "CS_CLOUD_SERVER_URL=http://127.0.0.1:9999" {
-			return // found
-		}
-	}
-	t.Error("buildEnv missing CS_CLOUD_SERVER_URL=http://127.0.0.1:9999")
-}
-
-func TestBuildEnv_LocalServerURLAbsentByDefault(t *testing.T) {
-	wm := NewWorkspaceManager(t.TempDir())
-	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
-	// NOTE: SetLocalServerURL NOT called.
-	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1", Agent: AgentCsc}, "/work")
-	for _, e := range env {
-		if strings.HasPrefix(e, "CS_CLOUD_SERVER_URL=") {
-			t.Errorf("CS_CLOUD_SERVER_URL should be absent without SetLocalServerURL; got %q", e)
-		}
+	if env["CS_CLOUD_NODE_RUN_ID"] != "nr-env" {
+		t.Fatalf("CS_CLOUD_NODE_RUN_ID = %q, want nr-env", env["CS_CLOUD_NODE_RUN_ID"])
 	}
 }
 
