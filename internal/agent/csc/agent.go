@@ -326,8 +326,9 @@ type cscSession struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
-	Version   int    `json:"version"`
-	Status    string `json:"status"`
+	// csc (opencode-compatible) returns version as a string, e.g. "1.0.0".
+	Version string `json:"version"`
+	Status  string `json:"status"`
 }
 
 func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
