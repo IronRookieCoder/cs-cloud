@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,6 +308,71 @@ func TestRunSessionRejectsCompletedSessionWithoutAssistantOutput(t *testing.T) {
 	_, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
 	if !errors.Is(err, agent.ErrEmptySessionOutput) {
 		t.Fatalf("RunSession error = %v, want ErrEmptySessionOutput", err)
+	}
+}
+
+func TestRunSessionWaitsThroughToolUseIdle(t *testing.T) {
+	var finalMessageReady atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/event":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = w.Write([]byte("event: session.status\n"))
+			_, _ = w.Write([]byte("data: {\"status\":{\"type\":\"busy\"}}\n\n"))
+			_, _ = w.Write([]byte("event: session.result\n"))
+			_, _ = w.Write([]byte("data: {\"subtype\":\"success\",\"stopReason\":\"tool_use\"}\n\n"))
+			_, _ = w.Write([]byte("event: session.idle\n"))
+			_, _ = w.Write([]byte("data: {}\n\n"))
+			flusher.Flush()
+
+			time.Sleep(50 * time.Millisecond)
+
+			_, _ = w.Write([]byte("event: session.status\n"))
+			_, _ = w.Write([]byte("data: {\"status\":{\"type\":\"busy\"}}\n\n"))
+			_, _ = w.Write([]byte("event: session.result\n"))
+			_, _ = w.Write([]byte("data: {\"subtype\":\"success\",\"stopReason\":\"end_turn\"}\n\n"))
+			_, _ = w.Write([]byte("event: session.idle\n"))
+			_, _ = w.Write([]byte("data: {}\n\n"))
+			finalMessageReady.Store(true)
+			flusher.Flush()
+		case r.Method == http.MethodPost && r.URL.Path == "/session/session-1/prompt_async":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/session/session-1/message":
+			w.Header().Set("Content-Type", "application/json")
+			if !finalMessageReady.Load() {
+				_, _ = w.Write([]byte(`{"messages":[]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"messages":[
+				{"role":"assistant","content":[{
+					"type":"text","text":"task finished"
+				}]}
+			]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cscAgent := &Agent{
+		endpoint:    server.URL,
+		rawEndpoint: server.URL,
+		httpClient:  server.Client(),
+	}
+	out, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	if err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if got, want := string(out), "task finished"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 

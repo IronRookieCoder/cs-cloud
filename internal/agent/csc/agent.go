@@ -535,9 +535,23 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 // emitted before our prompt starts cannot end the wait early.
 func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 	busy := false
+	awaitingContinuation := false
 	terminalFailure := false
 	terminalSubtype := ""
 	terminalMessage := ""
+	finishIdle := func() (bool, error) {
+		if !busy {
+			return false, nil
+		}
+		if awaitingContinuation && !terminalFailure {
+			// CSC emits an idle boundary after a model turn that ended in a
+			// tool call (or token-limit continuation). The same prompt will
+			// become busy again once tool execution/continuation resumes.
+			busy = false
+			return false, nil
+		}
+		return true, sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -552,12 +566,15 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 					if t, _ := status["type"].(string); t == "busy" {
 						if !busy {
 							busy = true
+							awaitingContinuation = false
 							terminalFailure = false
 							terminalSubtype = ""
 							terminalMessage = ""
 						}
 					} else if t == "idle" && busy {
-						return sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
+						if done, err := finishIdle(); done {
+							return err
+						}
 					}
 				}
 			case "session.result":
@@ -570,6 +587,11 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 					isError = true
 				}
 				terminalFailure = isError || (terminalSubtype != "" && terminalSubtype != "success")
+				stopReason, _ := ev.data["stopReason"].(string)
+				if stopReason == "" {
+					stopReason, _ = ev.data["stop_reason"].(string)
+				}
+				awaitingContinuation = stopReason == "tool_use" || stopReason == "max_tokens"
 				if message := sessionResultErrorMessage(ev.data); message != "" {
 					terminalMessage = message
 				}
@@ -584,8 +606,8 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 					}
 				}
 			case "session.idle":
-				if busy {
-					return sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
+				if done, err := finishIdle(); done {
+					return err
 				}
 			}
 		}
