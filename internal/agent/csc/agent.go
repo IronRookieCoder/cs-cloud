@@ -326,6 +326,7 @@ type cscSession struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
+	Version   int    `json:"version"`
 	Status    string `json:"status"`
 }
 
