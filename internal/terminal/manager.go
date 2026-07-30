@@ -13,6 +13,7 @@ import (
 
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/platform"
 )
 
 const defaultMaxSlots = 20
@@ -257,7 +258,7 @@ func discoverUnixShells(cfg *config.Config) (string, []string) {
 	if cfg != nil && cfg.DefaultShell != "" {
 		candidates = append(candidates, cfg.DefaultShell)
 	}
-	if sh := os.Getenv("CS_CLOUD_SHELL"); sh != "" {
+	if sh := platform.GetenvCompat("CS_BRIDGE_SHELL", "CS_CLOUD_SHELL"); sh != "" {
 		candidates = append(candidates, sh)
 	}
 	candidates = append(candidates, os.Getenv("SHELL"), "/bin/zsh", "/bin/bash", "/bin/sh")

@@ -95,8 +95,14 @@ RUN chmod +x /usr/local/bin/cs-cloud
 RUN mkdir -p /root/.costrict/share /root/.costrict/cs-cloud /workspace
 
 # Default env: bare localserver, no cloud, no auto-upgrade, fixed port.
+# CS_BRIDGE_* is the preferred prefix; CS_CLOUD_* aliases are kept for
+# backwards compatibility with existing deployments/documentation.
 ENV PATH="/usr/local/bin:${PATH}" \
     COSTRICT_SHARE_DIR=/root/.costrict/share \
+    CS_BRIDGE_AGENT_PATH=/usr/local/bin/csc \
+    CS_BRIDGE_AUTO_UPGRADE=false \
+    CS_BRIDGE_PORT=8080 \
+    CS_BRIDGE_HOST=0.0.0.0 \
     CS_CLOUD_AGENT_PATH=/usr/local/bin/csc \
     CS_CLOUD_AUTO_UPGRADE=false \
     CS_CLOUD_PORT=8080 \

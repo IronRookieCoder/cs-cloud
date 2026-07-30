@@ -22,8 +22,10 @@ const readyTimeout = 30 * time.Second
 
 func start(a *app.App) error {
 	// 如果是更新后的重启，跳过更新检查
-	if os.Getenv("CS_CLOUD_SKIP_UPDATE_CHECK") == "true" {
-		os.Unsetenv("CS_CLOUD_SKIP_UPDATE_CHECK") // 清除标记
+	if platform.GetenvCompat("CS_BRIDGE_SKIP_UPDATE_CHECK", "CS_CLOUD_SKIP_UPDATE_CHECK") == "true" {
+		// 清除标记（新旧名都清，确保兼容）
+		os.Unsetenv("CS_BRIDGE_SKIP_UPDATE_CHECK")
+		os.Unsetenv("CS_CLOUD_SKIP_UPDATE_CHECK")
 	} else if !platform.NoAutoUpgrade() {
 		// 检查并应用更新（如果有），除非用户指定了 --no-auto-upgrade
 		if err := checkAndApplyUpdates(a); err != nil {
@@ -278,7 +280,7 @@ func checkAndApplyUpdates(a *app.App) error {
 			return fmt.Errorf("swap staged binary: %w", swapErr)
 		}
 		printSuccess("Update applied successfully. Restarting to use new version...")
-		os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
+		setSkipUpdateCheck()
 		restartWithNewBinary(exe)
 		return nil
 	}
@@ -321,9 +323,17 @@ func checkAndApplyUpdates(a *app.App) error {
 	}
 
 	printSuccess("Update applied successfully. Restarting to use new version...")
-	os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
+	setSkipUpdateCheck()
 	restartWithNewBinary(exe)
 	return nil
+}
+
+// setSkipUpdateCheck marks the next process re-entry to bypass the update
+// check. Writes both the new name and the legacy alias so older/newer
+// binaries on the same machine agree on the flag.
+func setSkipUpdateCheck() {
+	os.Setenv("CS_BRIDGE_SKIP_UPDATE_CHECK", "true")
+	os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
 }
 
 func restartWithNewBinary(exe string) {

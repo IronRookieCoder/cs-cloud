@@ -83,7 +83,7 @@ func upgradeCmd(a *app.App) error {
 		return nil
 	}
 
-	os.Setenv("CS_CLOUD_SKIP_UPDATE_CHECK", "true")
+	setSkipUpdateCheck()
 	printInfo("Restarting daemon...")
 	if err := restart(a); err != nil {
 		printError("Restart failed: %v", err)

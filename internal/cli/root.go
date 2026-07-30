@@ -37,14 +37,22 @@ func parseGlobalFlags() {
 		case len(args[i]) > 11 && args[i][:11] == "--data-dir=":
 			platform.SetDataDir(args[i][11:])
 		case args[i] == "--agent-path" && i+1 < len(args):
-			os.Setenv("CS_CLOUD_AGENT_PATH", args[i+1])
+			setAgentPathEnv(args[i+1])
 			i++
 		case len(args[i]) > 13 && args[i][:13] == "--agent-path=":
-			os.Setenv("CS_CLOUD_AGENT_PATH", args[i][13:])
+			setAgentPathEnv(args[i][13:])
 		case args[i] == "--no-auto-upgrade":
 			platform.SetNoAutoUpgrade(true)
 		}
 	}
+}
+
+// setAgentPathEnv propagates --agent-path into the env so config.Load() picks
+// it up. Writes both the new CS_BRIDGE_AGENT_PATH name and the legacy
+// CS_CLOUD_AGENT_PATH alias for cross-version compatibility.
+func setAgentPathEnv(v string) {
+	os.Setenv("CS_BRIDGE_AGENT_PATH", v)
+	os.Setenv("CS_CLOUD_AGENT_PATH", v)
 }
 
 func commandArgs() []string {

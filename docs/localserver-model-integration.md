@@ -30,7 +30,7 @@ cs-cloud 自己不关心模型服务在哪、用什么 key，它只负责把客�
 | 层 | 变量 | 谁读 | 作用 |
 |----|------|------|------|
 | L1：入口别名 | `MODEL_PROVIDER` / `MODEL_BASE_URL` / `MODEL_API_KEY` | **entrypoint 脚本** (`scripts/docker-localserver-entrypoint.sh`) | 用户友好的统一入口，脚本翻译成 L2 |
-| L2：cs-cloud 通道 | `CS_CLOUD_AGENT_ENV` | **cs-cloud**（Go daemon, `internal/config/load.go:70-75`） | 一个 JSON map，cs-cloud 把它逐项写入 csc 子进程环境 |
+| L2：cs-cloud 通道 | `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`） | **cs-cloud**（Go daemon, `internal/config/load.go:70-75`） | 一个 JSON map，cs-cloud 把它逐项写入 csc 子进程环境 |
 | L3：csc 实际读取 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` / ... | **csc** (`src/services/api/client.ts`, `src/utils/model/model.ts`) | 构造实际 HTTP 请求 |
 
 **默认流程是 L1 → L2 → L3**：用户只设 L1，entrypoint 翻译成 L3 的 JSON 装进 L2，cs-cloud 透传给 csc。
@@ -128,7 +128,7 @@ csc 内部按 Anthropic 的 tier 划分（haiku / sonnet / opus）选模型，**
 
 来源：`csc/src/utils/model/model.ts:40, 149, 179, 207`。
 
-> 💡 这几个变量 entrypoint **不会**自动翻译（命名因部署而异，没有合理默认）。它们必须随 `CS_CLOUD_AGENT_ENV` 一起下发——下面 §6 解释两种下发方式。
+> 💡 这几个变量 entrypoint **不会**自动翻译（命名因部署而异，没有合理默认）。它们必须随 `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`）一起下发——下面 §6 解释两种下发方式。
 
 ---
 
@@ -140,24 +140,26 @@ csc 还支持以下 provider：
 - **Google Vertex AI**：`CLAUDE_CODE_USE_VERTEX=1` + `CLOUD_ML_REGION` + `ANTHROPIC_VERTEX_PROJECT_ID` + GCP 凭证
 - **Azure Foundry**：对应 Azure 的 endpoint/key 配置
 
-这些 entrypoint 的 `MODEL_PROVIDER` switch **不认识**（会打 warning 跳过注入），必须用 §6 的方式直接给 `CS_CLOUD_AGENT_ENV` 整包。
+这些 entrypoint 的 `MODEL_PROVIDER` switch **不认识**（会打 warning 跳过注入），必须用 §6 的方式直接给 `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`）整包。
 
 ---
 
-## 6. 高级用法：直接覆盖 `CS_CLOUD_AGENT_ENV`
+## 6. 高级用法：直接覆盖 `CS_BRIDGE_AGENT_ENV`
+
+> 历史变量名 `CS_CLOUD_AGENT_ENV` 仍作为别名生效；新部署建议用 `CS_BRIDGE_AGENT_ENV`。两者同时设置时 `CS_BRIDGE_AGENT_ENV` 优先。
 
 当：
 - 想用第三方 provider（bedrock / vertex / ...）
 - 想用 `ANTHROPIC_API_KEY` 而不是 `ANTHROPIC_AUTH_TOKEN`
 - 想一次性塞模型名映射 + 密钥 + base_url
 
-直接给容器设 `CS_CLOUD_AGENT_ENV`，**entrypoint 检测到它已设就原样透传，不再用 L1 的 `MODEL_*` 翻译**。
+直接给容器设 `CS_BRIDGE_AGENT_ENV`，**entrypoint 检测到它已设就原样透传，不再用 L1 的 `MODEL_*` 翻译**。
 
 ### 6.1 OpenAI 流 + 完整模型映射（推荐写法）
 
 ```bash
 docker run -d -p 8080:8080 \
-  -e 'CS_CLOUD_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o","OPENAI_DEFAULT_HAIKU_MODEL":"gpt-4o-mini","OPENAI_DEFAULT_OPUS_MODEL":"o1"}' \
+  -e 'CS_BRIDGE_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o","OPENAI_DEFAULT_HAIKU_MODEL":"gpt-4o-mini","OPENAI_DEFAULT_OPUS_MODEL":"o1"}' \
   -v "$PWD/workspace:/workspace" \
   cs-cloud-localserver:amd64
 ```
@@ -166,7 +168,7 @@ docker run -d -p 8080:8080 \
 
 ```bash
 docker run -d -p 8080:8080 \
-  -e 'CS_CLOUD_AGENT_ENV={"ANTHROPIC_BASE_URL":"https://api.anthropic.com","ANTHROPIC_API_KEY":"sk-ant-xxx"}' \
+  -e 'CS_BRIDGE_AGENT_ENV={"ANTHROPIC_BASE_URL":"https://api.anthropic.com","ANTHROPIC_API_KEY":"sk-ant-xxx"}' \
   -v "$PWD/workspace:/workspace" \
   cs-cloud-localserver:amd64
 ```
@@ -175,7 +177,7 @@ docker run -d -p 8080:8080 \
 
 ```bash
 docker run -d -p 8080:8080 \
-  -e 'CS_CLOUD_AGENT_ENV={"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1","AWS_ACCESS_KEY_ID":"AKIA...","AWS_SECRET_ACCESS_KEY":"...","ANTHROPIC_MODEL":"us.anthropic.claude-sonnet-4-20250514-v1:0"}' \
+  -e 'CS_BRIDGE_AGENT_ENV={"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1","AWS_ACCESS_KEY_ID":"AKIA...","AWS_SECRET_ACCESS_KEY":"...","ANTHROPIC_MODEL":"us.anthropic.claude-sonnet-4-20250514-v1:0"}' \
   -v "$PWD/workspace:/workspace" \
   cs-cloud-localserver:amd64
 ```
@@ -186,7 +188,7 @@ JSON 写在 `-e` 里很容易被 shell 转义出错。推荐用 `--env-file`：
 
 ```bash
 # model.env
-CS_CLOUD_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o","OPENAI_DEFAULT_HAIKU_MODEL":"gpt-4o-mini"}
+CS_BRIDGE_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o","OPENAI_DEFAULT_HAIKU_MODEL":"gpt-4o-mini"}
 
 docker run -d -p 8080:8080 --env-file ./model.env \
   -v "$PWD/workspace:/workspace" \
@@ -270,7 +272,7 @@ docker exec <container> tail -100 /root/.costrict/cs-cloud/app.log | grep -iE 'e
 
 ### 8.3 entrypoint 日志显示 `agent-env: {...}` 但里面变量名不对
 
-→ 你的 `MODEL_PROVIDER` 没匹配上 anthropic/openai，或者你设了 `CS_CLOUD_AGENT_ENV` 同时设了 `MODEL_*`（后者会被前者覆盖，前者优先）。检查 `docker logs <container>` 的 `[entrypoint]` 行。
+→ 你的 `MODEL_PROVIDER` 没匹配上 anthropic/openai，或者你设了 `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`）同时设了 `MODEL_*`（后者会被前者覆盖，前者优先）。检查 `docker logs <container>` 的 `[entrypoint]` 行。
 
 ### 8.4 csc 报 `x-api-key` 相关错误
 
@@ -296,7 +298,7 @@ docker exec <container> tail -100 /root/.costrict/cs-cloud/app.log | grep -iE 'e
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `CS_CLOUD_AGENT_ENV` | 由 entrypoint 根据 L1 翻译生成 | JSON map；已设则 entrypoint 不覆盖 |
+| `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`） | 由 entrypoint 根据 L1 翻译生成 | JSON map；已设则 entrypoint 不覆盖 |
 
 ### L3：csc 实际读取（部分常用）
 
@@ -321,11 +323,11 @@ docker exec <container> tail -100 /root/.costrict/cs-cloud/app.log | grep -iE 'e
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `CS_CLOUD_PORT` | `8080` | localserver 监听端口 |
-| `CS_CLOUD_HOST` | `0.0.0.0` | 监听地址 |
-| `CS_CLOUD_DATA_DIR` | `/root/.costrict` | daemon 数据目录（mode/pid/log 等） |
-| `CS_CLOUD_AGENT_PATH` | `/usr/local/bin/csc` | csc 二进制路径 |
-| `CS_CLOUD_AUTO_UPGRADE` | `false` | 容器内不应自动升级 |
+| `CS_BRIDGE_PORT`（旧名 `CS_CLOUD_PORT`） | `8080` | localserver 监听端口 |
+| `CS_BRIDGE_HOST`（旧名 `CS_CLOUD_HOST`） | `0.0.0.0` | 监听地址 |
+| `CS_BRIDGE_DATA_DIR`（旧名 `CS_CLOUD_DATA_DIR`） | `/root/.costrict` | daemon 数据目录（mode/pid/log 等） |
+| `CS_BRIDGE_AGENT_PATH`（旧名 `CS_CLOUD_AGENT_PATH`） | `/usr/local/bin/csc` | csc 二进制路径 |
+| `CS_BRIDGE_AUTO_UPGRADE`（旧名 `CS_CLOUD_AUTO_UPGRADE`） | `false` | 容器内不应自动升级 |
 | `COSTRICT_SHARE_DIR` | `/root/.costrict/share` | 凭证目录（裸 localserver 模式下不用） |
 
 ---
@@ -335,7 +337,7 @@ docker exec <container> tail -100 /root/.costrict/cs-cloud/app.log | grep -iE 'e
 | 文件 | 作用 |
 |------|------|
 | `scripts/docker-localserver-entrypoint.sh` | L1 → L2 翻译逻辑（`build_agent_env` 函数） |
-| `internal/config/load.go:70-75` | cs-cloud 读 `CS_CLOUD_AGENT_ENV` JSON 到 `cfg.AgentEnv` |
+| `internal/config/load.go:70-75` | cs-cloud 读 `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`）JSON 到 `cfg.AgentEnv` |
 | `internal/runtime/manager.go`（InitDefaultAgent） | cs-cloud 启动 csc 子进程时注入 `cfg.AgentEnv` |
 | `Dockerfile.localserver` | 镜像构建逻辑（csc 安装、env 默认值、entrypoint） |
 | csc: `src/services/api/client.ts:330` | csc 读 `ANTHROPIC_AUTH_TOKEN` |

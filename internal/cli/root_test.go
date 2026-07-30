@@ -18,7 +18,9 @@ func saveEnv(t *testing.T, key string) {
 }
 
 func TestParseGlobalFlags_AgentPathSeparateArg(t *testing.T) {
+	saveEnv(t, "CS_BRIDGE_AGENT_PATH")
 	saveEnv(t, "CS_CLOUD_AGENT_PATH")
+	os.Unsetenv("CS_BRIDGE_AGENT_PATH")
 	os.Unsetenv("CS_CLOUD_AGENT_PATH")
 
 	oldArgs := os.Args
@@ -27,13 +29,18 @@ func TestParseGlobalFlags_AgentPathSeparateArg(t *testing.T) {
 
 	parseGlobalFlags()
 
+	if got := os.Getenv("CS_BRIDGE_AGENT_PATH"); got != "/opt/csc/bin" {
+		t.Errorf("CS_BRIDGE_AGENT_PATH = %q, want %q", got, "/opt/csc/bin")
+	}
 	if got := os.Getenv("CS_CLOUD_AGENT_PATH"); got != "/opt/csc/bin" {
-		t.Errorf("CS_CLOUD_AGENT_PATH = %q, want %q", got, "/opt/csc/bin")
+		t.Errorf("legacy CS_CLOUD_AGENT_PATH = %q, want %q", got, "/opt/csc/bin")
 	}
 }
 
 func TestParseGlobalFlags_AgentPathEqualsArg(t *testing.T) {
+	saveEnv(t, "CS_BRIDGE_AGENT_PATH")
 	saveEnv(t, "CS_CLOUD_AGENT_PATH")
+	os.Unsetenv("CS_BRIDGE_AGENT_PATH")
 	os.Unsetenv("CS_CLOUD_AGENT_PATH")
 
 	oldArgs := os.Args
@@ -42,14 +49,19 @@ func TestParseGlobalFlags_AgentPathEqualsArg(t *testing.T) {
 
 	parseGlobalFlags()
 
+	if got := os.Getenv("CS_BRIDGE_AGENT_PATH"); got != "/usr/local/bin/csc" {
+		t.Errorf("CS_BRIDGE_AGENT_PATH = %q, want %q", got, "/usr/local/bin/csc")
+	}
 	if got := os.Getenv("CS_CLOUD_AGENT_PATH"); got != "/usr/local/bin/csc" {
-		t.Errorf("CS_CLOUD_AGENT_PATH = %q, want %q", got, "/usr/local/bin/csc")
+		t.Errorf("legacy CS_CLOUD_AGENT_PATH = %q, want %q", got, "/usr/local/bin/csc")
 	}
 }
 
 func TestParseGlobalFlags_AgentPathLastArgWithoutValue(t *testing.T) {
 	// --agent-path as the last arg with no following value should not panic
+	saveEnv(t, "CS_BRIDGE_AGENT_PATH")
 	saveEnv(t, "CS_CLOUD_AGENT_PATH")
+	os.Unsetenv("CS_BRIDGE_AGENT_PATH")
 	os.Unsetenv("CS_CLOUD_AGENT_PATH")
 
 	oldArgs := os.Args

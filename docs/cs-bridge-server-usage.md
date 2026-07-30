@@ -4,7 +4,7 @@
 
 - 镜像架构：`linux/arm64`、`linux/amd64`
 - 内含组件：`cs-cloud` (Go)、`csc` (Bun + 内置 dist)、`tini` 作 PID 1
-- 监听端口：`8080/tcp`（`CS_CLOUD_PORT` 可改）
+- 监听端口：`8080/tcp`（`CS_BRIDGE_PORT` 可改，旧名 `CS_CLOUD_PORT` 仍生效）
 - 工作目录沙箱：默认 `/workspace`（`CS_WORKSPACE_ROOT` 可改）
 
 ---
@@ -73,14 +73,16 @@ docker logs cs-bridge
 | `MODEL_PROVIDER` | `anthropic` | 模型协议流：`anthropic` 或 `openai`。决定下方 BASE_URL/API_KEY 的翻译目标 |
 | `MODEL_BASE_URL` | — | 模型服务地址。Anthropic 流会翻译成 `ANTHROPIC_BASE_URL`；OpenAI 流翻译成 `OPENAI_BASE_URL` |
 | `MODEL_API_KEY` | — | 模型 API Key。Anthropic 流 → `ANTHROPIC_AUTH_TOKEN`；OpenAI 流 → `OPENAI_API_KEY` |
-| `MODEL_NAME` | — | 主模型名。`anthropic` 流 → `ANTHROPIC_MODEL`；`openai` 流 → 同时填满 `OPENAI_DEFAULT_HAIKU_MODEL` / `OPENAI_DEFAULT_SONNET_MODEL` / `OPENAI_DEFAULT_OPUS_MODEL` 三个档位槽位（多数场景一个模型够用，想分档配置请直接覆盖 `CS_CLOUD_AGENT_ENV`） |
+| `MODEL_NAME` | — | 主模型名。`anthropic` 流 → `ANTHROPIC_MODEL`；`openai` 流 → 同时填满 `OPENAI_DEFAULT_HAIKU_MODEL` / `OPENAI_DEFAULT_SONNET_MODEL` / `OPENAI_DEFAULT_OPUS_MODEL` 三个档位槽位（多数场景一个模型够用，想分档配置请直接覆盖 `CS_BRIDGE_AGENT_ENV`） |
 | `BYPASS_PERMISSIONS` | `1` | `1`=自动跳过 csc 所有 permission prompt（无人值守推荐）；`0`=恢复交互式询问 |
-| `CS_CLOUD_PORT` | `8080` | HTTP 监听端口 |
-| `CS_CLOUD_HOST` | `0.0.0.0` | HTTP 监听地址 |
-| `CS_CLOUD_DATA_DIR` | `/root/.costrict` | cs-cloud 状态目录（mode 文件、agent.pid 等） |
+| `CS_BRIDGE_PORT` | `8080` | HTTP 监听端口 |
+| `CS_BRIDGE_HOST` | `0.0.0.0` | HTTP 监听地址 |
+| `CS_BRIDGE_DATA_DIR` | `/root/.costrict` | cs-cloud 状态目录（mode 文件、agent.pid 等） |
 | `CS_WORKSPACE_ROOT` | `/workspace` | workspace 清理接口的沙箱根；清理接口只允许删此目录下的子目录 |
-| `COSTRICT_CONFIG_DIR` | 同 `CS_CLOUD_DATA_DIR` | csc 用户配置目录（settings.json 落点） |
-| `CS_CLOUD_AGENT_ENV` | 自动生成 | 完全覆盖 entrypoint 的翻译结果，直接以 JSON 形式给 csc 子进程注入任意环境变量。一旦设置，`MODEL_*` 不再生效 |
+| `COSTRICT_CONFIG_DIR` | 同 `CS_BRIDGE_DATA_DIR` | csc 用户配置目录（settings.json 落点） |
+| `CS_BRIDGE_AGENT_ENV` | 自动生成 | 完全覆盖 entrypoint 的翻译结果，直接以 JSON 形式给 csc 子进程注入任意环境变量。一旦设置，`MODEL_*` 不再生效 |
+
+> ℹ️ **环境变量改名说明**：所有 `CS_BRIDGE_*` 配置变量同时保留 `CS_CLOUD_*` 作为旧别名（如 `CS_BRIDGE_PORT` ⇄ `CS_CLOUD_PORT`、`CS_BRIDGE_AGENT_ENV` ⇄ `CS_CLOUD_AGENT_ENV`）。新名优先；老部署无需改动可继续工作。
 
 模型对接细节（OpenAI / Bedrock / Vertex / 自建网关）见 [localserver-model-integration.md](./localserver-model-integration.md)。
 
@@ -201,10 +203,10 @@ curl --request DELETE \
 
 | 现象 | 排查方向 |
 |------|----------|
-| 启动后 `docker logs` 里 provider/model/perms 与预期不符 | entrypoint 只在 `CS_CLOUD_AGENT_ENV` 未设置时才翻译 `MODEL_*`；如果之前测试 set 过 `CS_CLOUD_AGENT_ENV`，先清掉 |
+| 启动后 `docker logs` 里 provider/model/perms 与预期不符 | entrypoint 只在 `CS_BRIDGE_AGENT_ENV`（旧名 `CS_CLOUD_AGENT_ENV`）未设置时才翻译 `MODEL_*`；如果之前测试 set 过 `CS_BRIDGE_AGENT_ENV`，先清掉 |
 | 创建会话报 `Working directory does not exist` | 不应再出现；当前版本会自动 mkdir。如仍报错说明镜像版本旧，需更新到 `v1.2.34-beat.1` 及以上 |
 | 模型调用时出现 `permission.asked` 事件 | 默认 `BYPASS_PERMISSIONS=1` 应跳过；如调过 `BYPASS_PERMISSIONS=0` 或挂了自己的 `settings.json`，请确认配置 |
-| 启动报 `Address already in use` | 宿主机 8080 端口被占；改 `CS_CLOUD_PORT` 并相应改 `-p` 映射 |
+| 启动报 `Address already in use` | 宿主机 8080 端口被占；改 `CS_BRIDGE_PORT`（旧名 `CS_CLOUD_PORT`）并相应改 `-p` 映射 |
 | `crane pull` / `docker pull` 401 | 镜像仓库需登录：`docker login registry-c.cmft.com -u <user>` |
 
 模型对接的更细节排障（Anthropic / OpenAI / 兼容网关）见 [localserver-model-integration.md](./localserver-model-integration.md) 第 7 节。

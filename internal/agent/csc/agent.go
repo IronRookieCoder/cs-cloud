@@ -370,7 +370,7 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 
 	// Default to "default" mode (read-only tools auto-allow, others ask via
 	// permission.asked/question.asked SSE). When ACP_PERMISSION_MODE=bypassPermissions
-	// is set in CS_CLOUD_AGENT_ENV (typical for unattended deployments), forward
+	// is set in CS_BRIDGE_AGENT_ENV (legacy: CS_CLOUD_AGENT_ENV; typical for unattended deployments), forward
 	// it so csc starts the session in bypass mode. csc's HTTP /session handler
 	// treats body.permission_mode as authoritative and would otherwise override
 	// whatever the user settings file declares.
