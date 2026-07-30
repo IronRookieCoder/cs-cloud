@@ -24,3 +24,16 @@ cs-cloud
 
 # cs-cloud local e2e/runtime artifacts (logs, worktrees, state)
 .e2e-runtime/
+
+# Bare localserver image build artifacts (consumed by Dockerfile.localserver)
+# cs-binaries/   — prebuilt csc tarballs (legacy fetcher path)
+# csc-dist/      — bun-built csc dist/ staged into the image
+# bun-linux-*    — staged bun binary (one per target arch: x64/amd64, arm64)
+cs-binaries/
+csc-dist/
+bun-linux-x64
+bun-linux-amd64
+bun-linux-arm64
+
+# Local workspace mount for scripts/test-localserver.sh (runtime container state)
+workspace/
