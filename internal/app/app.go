@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"strings"
 
 	"cs-cloud/internal/cloud"
 	"cs-cloud/internal/config"
@@ -49,7 +50,7 @@ func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
 	deps := &workflowrunner.Dependencies{
 		BackendBaseURL: a.cfg.Workflow.BackendBaseURL,
 		UserBaseURL:    a.cfg.Workflow.BackendBaseURL,
-		TokenProvider:  a.Credentials,
+		TokenProvider:  a.workflowTokenProvider(),
 		DeviceID: func() (string, error) {
 			dev, err := a.Device()
 			if err != nil {
@@ -62,6 +63,23 @@ func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
 		},
 	}
 	return workflowrunner.NewDriver(a.cfg.Workflow, deps)
+}
+
+// workflowTokenProvider returns the credentials the workflow runner uses to
+// register with (and run in-task CLIs against) the workflow backend. By default
+// it shares the cloud auth.json token (Credentials). When
+// CS_CLOUD_WORKFLOW_BACKEND_TOKEN is set, it overrides with that token — letting
+// the workflow backend point at a DIFFERENT deployment than the cloud gateway
+// (e.g. cloud tunnel → zgsmtest while workflow backend → a local multica with
+// its own PAT). The override is provider.Credentials-shaped so the workflow
+// Client's Bearer auth works unchanged.
+func (a *App) workflowTokenProvider() func() (*provider.Credentials, error) {
+	if tok := strings.TrimSpace(os.Getenv("CS_CLOUD_WORKFLOW_BACKEND_TOKEN")); tok != "" {
+		return func() (*provider.Credentials, error) {
+			return &provider.Credentials{AccessToken: tok}, nil
+		}
+	}
+	return a.Credentials
 }
 
 func (a *App) Device() (*device.DeviceInfo, error) {
