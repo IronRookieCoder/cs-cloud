@@ -356,6 +356,23 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// completion hook below rewrites it with the real finish time.
 	writeGCMetaForTask(worktree, payload, time.Time{})
 
+	logger.Info("workflow: task %s dispatched: agent=%s kind=%s node_run=%s workdir=%s repos=%s deliverables=%s env_keys=%s plugin=%s cloud_skills=%d resume=%v",
+		payload.TaskID, payload.Agent, payload.Kind, payload.NodeRunID, worktree,
+		repoSummary(payload.Repos, payload.RepoURL),
+		deliverableSummary(payload.Deliverables),
+		envKeySummary(payload.Env),
+		pluginName(payload.Plugin), len(payload.CloudSkills), payload.PriorSessionID != "")
+
+	// Install the agent's configured plugin and cloud skills into the task
+	// workdir before the csc session runs. csc resolves plugins (-s local) and
+	// skills (--scope project) by cwd, and the bound session's cwd is this
+	// workdir, so installed addons become visible to the run. Fail-closed: a
+	// configured addon that cannot install means the task cannot run
+	// meaningfully (mirrors multica's execenv.Prepare).
+	if err := installCSCAddons(ctx, agentPath, worktree, payload); err != nil {
+		return d.failTask(payload.TaskID, err, "addon_install_failed")
+	}
+
 	sessionID, err := d.bindSession(ctx, payload, worktree)
 	if err != nil {
 		return d.failTask(payload.TaskID, err, "")
@@ -417,6 +434,8 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
 	}
 	d.postTaskMessages(payload.TaskID, output)
+
+	logger.Info("workflow: task %s completed: session=%s output_bytes=%d", payload.TaskID, finalSessionID, len(output))
 
 	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
 		return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree)

@@ -90,6 +90,47 @@ type ReportSpec struct {
 	BodyField string `json:"body_field"`
 }
 
+// PluginSpec mirrors the server's csCloudAgentPlugin: the plugin bound to an
+// agent that cs-cloud installs into the task working directory before the csc
+// session runs. Nil/empty means no plugin configured.
+type PluginSpec struct {
+	ID      string             `json:"id"`
+	Name    string             `json:"name"`
+	Install *PluginInstallSpec `json:"install,omitempty"`
+}
+
+// PluginInstallSpec describes how to install a plugin from a marketplace.
+// Mirrors multica's execenv.PluginInstall / handler.PluginInstall.
+type PluginInstallSpec struct {
+	Method              string `json:"method"`                // e.g. "plugin_marketplace"
+	Marketplace         string `json:"marketplace"`           // e.g. "anthropics/claude-plugins-official"
+	PluginName          string `json:"plugin_name"`           // e.g. "superpowers"
+	MarketplaceName     string `json:"marketplace_name"`      // e.g. "claude-plugins-official"
+	MarketplaceRepo     string `json:"marketplace_repo"`      // e.g. "anthropics/claude-plugins-official"
+	MarketplaceVerified bool   `json:"marketplace_verified"`
+}
+
+// CloudSkillInstall mirrors the server's csCloudCloudSkillInstall: a cloud
+// catalog skill binding the agent installs via `csc skill install`.
+type CloudSkillInstall struct {
+	ID          string                   `json:"id"`
+	Slug        string                   `json:"slug,omitempty"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	Install     *CloudSkillInstallSpec   `json:"install"`
+	Position    int32                    `json:"position"`
+}
+
+// CloudSkillInstallSpec is the executable subset of cloud skill install metadata.
+// Mirrors multica's execenv.CloudSkillInstallSpec.
+type CloudSkillInstallSpec struct {
+	Method    string `json:"method,omitempty"`
+	Spec      string `json:"spec,omitempty"`
+	SkillID   string `json:"skill_id,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
+	Verified  bool   `json:"verified,omitempty"`
+}
+
 type TaskRunPayload struct {
 	TaskID      string            `json:"task_id"`
 	WorkspaceID string            `json:"workspace_id"`
@@ -108,6 +149,12 @@ type TaskRunPayload struct {
 	Kind         string            `json:"kind,omitempty"`
 	Repos        []RepoSpec        `json:"repos,omitempty"`
 	Deliverables []DeliverableSpec `json:"deliverables,omitempty"`
+	// Plugin is the agent's bound plugin to install into the task workdir via
+	// `csc plugin install` before the session runs. Nil = no plugin.
+	Plugin *PluginSpec `json:"plugin,omitempty"`
+	// CloudSkills are the agent's cloud catalog skill bindings to install via
+	// `csc skill install` before the session runs. Empty = none.
+	CloudSkills []CloudSkillInstall `json:"cloud_skills,omitempty"`
 	// PriorSessionID is the csc session id of the last task on the same
 	// (agent, issue), letting this task resume the conversation. Empty on first
 	// round / manual rerun / runtime mismatch. Mirrors the server's payload.
