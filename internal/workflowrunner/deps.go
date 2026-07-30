@@ -7,7 +7,7 @@ import (
 )
 
 // ConversationBinder creates a local conversation session for a workflow task
-// so the frontend conversation proxy can resolve it by the multica chat
+// so the frontend conversation proxy can resolve it by the server chat
 // session ID.
 type ConversationBinder interface {
 	Bind(ctx context.Context, sessionID, cwd string, env []string) error
@@ -30,15 +30,19 @@ type SessionAborter interface {
 
 // Dependencies holds the external dependencies required by the workflow driver.
 type Dependencies struct {
-	MulticaBaseURL string
+	BackendBaseURL string
 	UserBaseURL    string
 	TokenProvider  func() (*provider.Credentials, error)
+	// AgentEnv is the environment configured for the managed agent process.
+	// Workflow addon installation must use the same values because csc skill
+	// and plugin commands resolve cloud/catalog endpoints from env too.
+	AgentEnv map[string]string
 	// DeviceID resolves the CoStrict Gateway device_id this daemon runs as.
-	// It is used as the daemon_id when registering with multica. When nil,
+	// It is used as the daemon_id when registering with the server. When nil,
 	// daemon registration is disabled (the driver still runs tasks pushed
 	// via localserver routes).
 	DeviceID func() (string, error)
-	// ConversationBinder creates a local csc session for the multica chat
+	// ConversationBinder creates a local csc session for the server chat
 	// session. When nil, session binding is skipped and the frontend
 	// conversation proxy will not resolve the session.
 	ConversationBinder ConversationBinder

@@ -268,7 +268,7 @@ func printUsage() {
 		{"logout", "Delete credentials and device info"},
 		{"serve", "Run server in foreground (no daemon)"},
 		{"gc", "Remove expired attachments and report freed bytes"},
-		{"workflow", "Manage multica workflow resources"},
+		{"workflow", "Manage workflow resources"},
 	}
 	fmt.Print(renderKV(cmds))
 }

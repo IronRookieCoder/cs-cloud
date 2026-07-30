@@ -64,11 +64,11 @@ func workflowProjectList(a *app.App) error {
 	if err != nil {
 		return err
 	}
-	wsID := os.Getenv("MULTICA_WORKSPACE_ID")
+	wsID := os.Getenv("CS_CLOUD_WORKSPACE_ID")
 	if wsID == "" {
-		return fmt.Errorf("MULTICA_WORKSPACE_ID not set")
+		return fmt.Errorf("CS_CLOUD_WORKSPACE_ID not set")
 	}
-	client := workflowrunner.NewClient(cfg.Workflow.MulticaBaseURL, "", func() (*provider.Credentials, error) {
+	client := workflowrunner.NewClient(cfg.Workflow.BackendBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

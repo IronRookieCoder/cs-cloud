@@ -90,11 +90,12 @@ func runDaemon(a *app.App) error {
 	}
 
 	logger.Info("[debug] initializing local server...")
+	workflowDriver := a.NewWorkflowDriver()
 	srv := localserver.New(
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
-		localserver.WithWorkflow(a.NewWorkflowDriver()),
+		localserver.WithWorkflow(workflowDriver),
 	)
 
 	ctx := context.Background()

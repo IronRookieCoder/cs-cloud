@@ -26,7 +26,7 @@ func isolatedConfig(t *testing.T, content string) {
 		}
 	}
 	// Provide a default CoStrict base URL so Load() does not fail on the
-	// required workflow multica URL. Tests that need to control this can
+	// required workflow server URL. Tests that need to control this can
 	// override the env var explicitly.
 	t.Setenv("COSTRICT_BASE_URL", "https://example.costrict.local")
 }
@@ -185,7 +185,7 @@ func TestLoadWorkflowConfigFromEnv(t *testing.T) {
 	t.Setenv("CS_BRIDGE_WORKFLOW_MAX_CONCURRENT_TASKS", "42")
 
 	// Clear other workflow env vars so defaults don't interfere with assertions.
-	t.Setenv("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
 	t.Setenv("CS_BRIDGE_WORKFLOW_CACHE_DIR", "")
 	t.Setenv("CS_BRIDGE_WORKFLOW_GC_INTERVAL", "")
 	t.Setenv("CS_BRIDGE_WORKFLOW_AGENT_TIMEOUT", "")
@@ -237,63 +237,162 @@ func TestLoad_WorkflowAllowedAgentsEnvOverridesConfigFileWithSameLengthAsDefault
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLDerivedFromBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLDerivedFromBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	want := "https://zgsmtest.cn:30443/workflow-backend"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLFromEnvOverridesBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLFromEnvOverridesBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "https://explicit.example.com/multica")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "https://explicit.example.com/backend")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	want := "https://explicit.example.com/multica"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	want := "https://explicit.example.com/backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLDefaultWhenNoBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLDefaultWhenNoBaseURL(t *testing.T) {
 	isolatedConfig(t, `{}`)
 	// Ensure neither explicit env nor derivation source is present.
 	t.Setenv("COSTRICT_BASE_URL", "")
-	t.Setenv("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.Workflow.MulticaBaseURL != "" {
-		t.Fatalf("MulticaBaseURL = %q, want empty", cfg.Workflow.MulticaBaseURL)
+	if cfg.Workflow.BackendBaseURL != "" {
+		t.Fatalf("BackendBaseURL = %q, want empty", cfg.Workflow.BackendBaseURL)
 	}
 }
 
-func TestLoad_WorkflowMulticaBaseURLFromConfigFilePreventsDerivation(t *testing.T) {
-	isolatedConfig(t, `{"workflow":{"multica_base_url":"https://file.example.com"}}`)
+func TestLoad_WorkflowBackendBaseURLFromConfigFilePreventsDerivation(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"backend_base_url":"https://file.example.com"}}`)
 	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
-	t.Setenv("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	want := "https://file.example.com"
-	if cfg.Workflow.MulticaBaseURL != want {
-		t.Fatalf("MulticaBaseURL = %q, want %q", cfg.Workflow.MulticaBaseURL, want)
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
+	}
+}
+
+// TestLoad_WorkflowGCDisabled_ValueParsed verifies GC_DISABLED is parsed as a
+// boolean, not "any non-empty value". An operator who sets
+// CS_CLOUD_WORKFLOW_GC_DISABLED=false is explicitly opting back IN — the prior
+// implementation treated that as truthy and unexpectedly disabled GC.
+// CodeRabbit PR #27 comment 9.
+func TestLoad_WorkflowGCDisabled_ValueParsed(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=false: GCEnabled = false, want true (explicit opt-in)")
+	}
+
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "true")
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg2.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=true: GCEnabled = true, want false (explicit opt-out)")
+	}
+}
+
+// TestLoad_WorkflowGCDisabled_FalseOverridesFile verifies GC_DISABLED=false is
+// treated as an env-level opt-in that overrides a file-level gc_enabled:false.
+// CodeRabbit PR #27 follow-up: without this, GC_DISABLED=false leaves envGCSet
+// unset, letting the file's false win — contradicting the operator's explicit
+// "don't disable GC" intent.
+func TestLoad_WorkflowGCDisabled_FalseOverridesFile(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("GC_DISABLED=false + file gc_enabled=false: GCEnabled = false, want true (env opt-in overrides file)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_MissingKeyKeepsDefault verifies a config file that
+// omits workflow.gc_enabled does NOT disable GC. json.Unmarshal maps a missing
+// key to false, which previously overrode the env/default true via
+// mergeWorkflowConfig's `if !file.GCEnabled` clause. CodeRabbit PR #27 comment 10.
+func TestLoad_WorkflowGCEnabled_MissingKeyKeepsDefault(t *testing.T) {
+	// File has a workflow object but no gc_enabled key.
+	isolatedConfig(t, `{"workflow":{"sync_interval":"15m"}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("config without workflow.gc_enabled: GCEnabled = false, want true (default preserved)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_ExplicitFileFalseDisables verifies the file still
+// wins when it explicitly writes gc_enabled:false (the legitimate opt-out path
+// the previous behavior was guarding).
+func TestLoad_WorkflowGCEnabled_ExplicitFileFalseDisables(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Workflow.GCEnabled {
+		t.Errorf("config with gc_enabled:false: GCEnabled = true, want false (explicit file opt-out)")
+	}
+}
+
+// TestLoad_WorkflowGCEnabled_EnvWinsOverFileFalse verifies env explicitly
+// enabling GC overrides a file that disables it.
+func TestLoad_WorkflowGCEnabled_EnvWinsOverFileFalse(t *testing.T) {
+	isolatedConfig(t, `{"workflow":{"gc_enabled":false}}`)
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_ENABLED", "true")
+	t.Setenv("CS_CLOUD_WORKFLOW_GC_DISABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Workflow.GCEnabled {
+		t.Errorf("env GC_ENABLED=true over file gc_enabled:false: GCEnabled = false, want true (env wins)")
 	}
 }
 

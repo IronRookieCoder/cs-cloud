@@ -46,7 +46,7 @@ func TestHandleWorkflowHealthRunning(t *testing.T) {
 		GCInterval:     time.Hour,
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: "http://localhost:1",
+		BackendBaseURL: "http://localhost:1",
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -65,10 +65,10 @@ func TestHandleWorkflowHealthRunning(t *testing.T) {
 }
 
 func TestHandleWorkflowTaskRun(t *testing.T) {
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
@@ -79,7 +79,7 @@ func TestHandleWorkflowTaskRun(t *testing.T) {
 		AllowedAgents:  []string{"true"},
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: multica.URL,
+		BackendBaseURL: backend.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -124,10 +124,10 @@ func TestHandleWorkflowTaskRunMissingTaskID(t *testing.T) {
 }
 
 func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
@@ -138,7 +138,7 @@ func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
 		AllowedAgents:  []string{"sh"},
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: multica.URL,
+		BackendBaseURL: backend.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -172,10 +172,10 @@ func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
 }
 
 func TestHandleWorkflowTaskAbort(t *testing.T) {
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
@@ -186,7 +186,7 @@ func TestHandleWorkflowTaskAbort(t *testing.T) {
 		AllowedAgents:  []string{"sh"},
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: multica.URL,
+		BackendBaseURL: backend.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {

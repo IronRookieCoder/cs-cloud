@@ -16,8 +16,12 @@ import (
 	"cs-cloud/internal/workflow"
 )
 
-// providerCSCloud is the multica runtime provider value the issue-conversation
-// flow searches for; registration must use exactly this string.
+// providerCSCloud is the runtime provider value multica's issue-conversation
+// flow filters runtimes by (server/internal/handler/issue_conversation.go:
+// csCloudRuntimeProvider). This is a cross-repo wire contract — it MUST stay
+// in lockstep with multica's constant, and is NOT the local agent CLI name
+// ("csc"). Registering "csc" here makes multica return 503 "cs-cloud device
+// not online" for every issue conversation.
 const providerCSCloud = "cs-cloud"
 
 // deregisterTimeout bounds the best-effort deregister call on Stop.
@@ -35,13 +39,19 @@ const sessionAbortTimeout = 5 * time.Second
 // task is remembered (the abort can race ahead of the pushed run request).
 const abortTombstoneTTL = time.Hour
 
-// maxCallbackOutputBytes caps the output uploaded to multica per task.
+// maxCallbackOutputBytes caps the output uploaded to the server per task.
 const maxCallbackOutputBytes = 256 * 1024
 
 // taskRecord tracks a running task so it can be aborted.
 type taskRecord struct {
 	cancel  context.CancelFunc
 	aborted bool
+	// payload is written once under d.mu in execute after Prepare; CheckoutRepo
+	// reads its fields without the lock. Safe only while payload is treated as
+	// read-only after that write — all current readers (CheckoutRepo, buildEnv,
+	// the pre-warm goroutine) treat it as immutable.
+	payload  workflow.TaskRunPayload
+	taskRoot string
 }
 
 // Driver is a persistent driver for the cs-workflow subsystem.
@@ -58,7 +68,7 @@ type Driver struct {
 	// abortedIDs tombstones task IDs aborted before their run request
 	// arrived; reserve rejects them so a cancelled task never executes.
 	abortedIDs map[string]time.Time
-	// registrations maps workspace ID → multica runtime row ID, kept alive
+	// registrations maps workspace ID → runtime row ID, kept alive
 	// by the maintain loop.
 	registrations map[string]string
 	mu            sync.Mutex
@@ -84,9 +94,9 @@ func (d *Driver) Start() error {
 		d.state = driverStateError
 		return fmt.Errorf("workflow driver dependencies not provided")
 	}
-	if d.deps.MulticaBaseURL == "" {
+	if d.deps.BackendBaseURL == "" {
 		d.state = driverStateError
-		return fmt.Errorf("workflow multica base URL is required")
+		return fmt.Errorf("workflow server base URL is required")
 	}
 
 	if d.cfg.MaxConcurrentTasks <= 0 {
@@ -102,19 +112,32 @@ func (d *Driver) Start() error {
 		return err
 	}
 
-	logger.Info("workflow: multica base URL=%s user base URL=%s", d.deps.MulticaBaseURL, d.deps.UserBaseURL)
+	logger.Info("workflow: server base URL=%s user base URL=%s", d.deps.BackendBaseURL, d.deps.UserBaseURL)
 	cache := workflow.NewCache(d.cfg.CacheDir)
-	d.client = NewClient(d.deps.MulticaBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
+	d.client = NewClient(d.deps.BackendBaseURL, d.deps.UserBaseURL, d.deps.TokenProvider)
 	d.runtime = newRuntime(d.cfg, d.client, cache)
 	d.runtime.maintainFunc = d.maintainRegistrations
+	if d.cfg.GCEnabled {
+		// Plug the GC decision state machine (gc.go) into the runtime loop's
+		// existing gcFunc slot. The loop already ticks on GCInterval; this just
+		// fills in the work each tick does.
+		d.runtime.gcFunc = d.runGC
+		logger.Info("workflow: gc enabled: interval=%s ttl=%s orphan_ttl=%s artifact_ttl=%s",
+			d.cfg.GCInterval, d.cfg.GCTTL, d.cfg.GCOrphanTTL, d.cfg.GCArtifactTTL)
+	} else {
+		logger.Info("workflow: gc disabled")
+	}
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
+	if d.deps != nil && d.deps.AgentEnv != nil {
+		d.runner.SetAgentEnv(d.deps.AgentEnv)
+	}
 	if d.deps != nil && d.deps.SessionRunner != nil {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)
 	}
-	// Inject multica endpoint + token so in-task CLIs (cs-cloud gitea
-	// submit/fetch) get MULTICA_SERVER_URL + MULTICA_TOKEN in their env.
+	// Inject server endpoint + token so in-task CLIs (cs-cloud gitea
+	// submit/fetch) get CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN in their env.
 	if d.deps != nil {
-		d.runner.SetMulticaEndpoint(d.deps.MulticaBaseURL, d.deps.TokenProvider)
+		d.runner.SetServerEndpoint(d.deps.BackendBaseURL, d.deps.TokenProvider)
 	}
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
@@ -126,12 +149,12 @@ func (d *Driver) Start() error {
 		return err
 	}
 
-	// Register with multica right away instead of waiting for the first
-	// heartbeat tick. Async so a slow/unreachable multica doesn't block
+	// Register with the server right away instead of waiting for the first
+	// heartbeat tick. Async so a slow/unreachable server doesn't block
 	// daemon startup; failures are retried by the maintain loop.
 	go func() {
 		if err := d.maintainRegistrations(); err != nil {
-			logger.Warn("workflow: initial multica registration failed: %v", err)
+			logger.Warn("workflow: initial server registration failed: %v", err)
 		}
 	}()
 
@@ -167,9 +190,9 @@ func (d *Driver) Stop() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Tell multica these runtimes went away so the runtime page doesn't
+	// Tell the server these runtimes went away so the runtime page doesn't
 	// wait for the sweeper to mark them offline. Best-effort: a
-	// dead multica must not delay daemon shutdown.
+	// dead server must not delay daemon shutdown.
 	ids := make([]string, 0, len(d.registrations))
 	for _, id := range d.registrations {
 		ids = append(ids, id)
@@ -179,7 +202,7 @@ func (d *Driver) Stop() error {
 		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 		defer cancel()
 		if err := d.client.DeregisterDaemon(ctx, ids); err != nil {
-			logger.Warn("workflow: multica deregister failed: %v", err)
+			logger.Warn("workflow: server deregister failed: %v", err)
 		}
 	}
 
@@ -234,9 +257,9 @@ func (d *Driver) RunTaskAsync(payload workflow.TaskRunPayload) error {
 		ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
 		defer cancel()
 		d.armCancel(rec, cancel)
-		if err := d.execute(ctx, payload, rec); err != nil {
-			logger.Warn("workflow: task %s failed: %v", payload.TaskID, err)
-		}
+		// execute owns all task-status callbacks + failure logging (failTask,
+		// StartTask warn); a duplicate "task failed" here just double-logs.
+		_ = d.execute(ctx, payload, rec)
 	}()
 	return nil
 }
@@ -301,12 +324,13 @@ func (d *Driver) armCancel(rec *taskRecord, cancel context.CancelFunc) {
 	}
 }
 
-// execute runs the agent and reports the outcome to multica.
+// execute runs the agent and reports the outcome to the server.
 func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, rec *taskRecord) error {
 	if err := d.client.StartTask(ctx, payload.TaskID); err != nil {
-		// multica rejected the start (e.g. the task was cancelled between
+		// the server rejected the start (e.g. the task was cancelled between
 		// dispatch and device accept) — abort locally without reporting a
 		// failure for a task that is already finalized server-side.
+		logger.Warn("workflow: task %s not started (rejected/cancelled by server): %v", payload.TaskID, err)
 		if rec.cancel != nil {
 			rec.cancel()
 		}
@@ -320,14 +344,86 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	if err != nil {
 		return d.failTask(payload.TaskID, err, "")
 	}
+	// Record payload + taskRoot on the running task so the localserver's
+	// repo-checkout RPC can serve the task's context without the CLI
+	// re-sending it. worktree is the task root after Task 6's Prepare change.
+	d.mu.Lock()
+	if rec, ok := d.running[payload.TaskID]; ok {
+		rec.payload = payload
+		rec.taskRoot = worktree
+	}
+	d.mu.Unlock()
+
+	// Write GC metadata so the gcLoop can reclaim this workdir once the task's
+	// parent record (issue / node-run / task) reaches a terminal state. The
+	// completion hook below rewrites it with the real finish time.
+	writeGCMetaForTask(worktree, payload, time.Time{})
+
+	logger.Info("workflow: task %s dispatched: agent=%s kind=%s node_run=%s workdir=%s repos=%s deliverables=%s env_keys=%s plugin=%s cloud_skills=%d resume=%v",
+		payload.TaskID, payload.Agent, payload.Kind, payload.NodeRunID, worktree,
+		repoSummary(payload.Repos, payload.RepoURL),
+		deliverableSummary(payload.Deliverables),
+		envKeySummary(payload.Env),
+		pluginName(payload.Plugin), len(payload.CloudSkills), payload.PriorSessionID != "")
+	if len(payload.Repos) > 0 {
+		logger.Info("workflow: task %s repo downloads expected: %s", payload.TaskID, repoSummary(payload.Repos, payload.RepoURL))
+	}
+
+	// Install the agent's configured plugin and cloud skills into the task
+	// workdir before the csc session runs. csc resolves plugins (-s local) and
+	// skills (--scope project) by cwd, and the bound session's cwd is this
+	// workdir, so installed addons become visible to the run. Fail-closed: a
+	// configured addon that cannot install means the task cannot run
+	// meaningfully (mirrors multica's execenv.Prepare).
+	if err := installCSCAddons(ctx, agentPath, worktree, payload, d.runner.buildEnv(payload, worktree)); err != nil {
+		return d.failTask(payload.TaskID, err, "addon_install_failed")
+	}
 
 	sessionID, err := d.bindSession(ctx, payload, worktree)
 	if err != nil {
 		return d.failTask(payload.TaskID, err, "")
 	}
 
+	// finalSessionID tracks the chat session that actually ran the agent. It
+	// defaults to the bound sessionID and is overwritten with freshSessionID
+	// when the resume-failure retry path runs. CompleteTask forwards it to
+	// the server so the task row's session_id is preserved (not NULLed) for the
+	// next round's GetLastTaskSession lookup.
+	finalSessionID := sessionID
+
+	// runAgent supervises the agent boundary (ctx-cancel aware + best-effort
+	// session abort on timeout) instead of trusting SessionRunner to return on
+	// cancellation. execute stays the single owner of task-status callbacks.
 	out, runErr := d.runAgent(ctx, payload, worktree, agentPath, sessionID)
+
+	// Resume failure fallback: a resumed prior session that fails on first run
+	// may be corrupt on disk — retry once with a fresh session. Skipped for
+	// terminal ctx errors (timeout/cancel), where a fresh session cannot help
+	// and the already-expired ctx would fail it instantly. Bounded to one retry.
+	if runErr != nil && payload.PriorSessionID != "" && !d.aborted(payload.TaskID) &&
+		!errors.Is(runErr, context.DeadlineExceeded) && !errors.Is(runErr, context.Canceled) {
+		logger.Warn("workflow: resumed session failed (%v); retrying with fresh session", runErr)
+		payload.PriorSessionID = "" // force bindSession to create a fresh chat session
+		freshSessionID, bindErr := d.bindSession(ctx, payload, worktree)
+		if bindErr != nil {
+			return d.failTask(payload.TaskID, bindErr, "")
+		}
+		out, runErr = d.runAgent(ctx, payload, worktree, agentPath, freshSessionID)
+		finalSessionID = freshSessionID
+	}
 	output := truncateOutput(string(out))
+	// Stamp the finish time into .gc_meta.json so the artifact-only and
+	// terminal TTLs anchor on when the task actually ended (covers both the
+	// success and run-err paths below).
+	writeGCMetaForTask(worktree, payload, time.Now().UTC())
+	if observations := observeRepoDownloads(worktree, payload.Repos); len(observations) > 0 {
+		summary := repoDownloadObservationSummary(observations)
+		if repoDownloadObservationHasMissing(observations) {
+			logger.Warn("workflow: task %s repo downloads observed: %s", payload.TaskID, summary)
+		} else {
+			logger.Info("workflow: task %s repo downloads observed: %s", payload.TaskID, summary)
+		}
+	}
 	if runErr != nil {
 		var taskErr error
 		if d.aborted(payload.TaskID) {
@@ -353,24 +449,10 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	}
 	d.postTaskMessages(payload.TaskID, output)
 
-	// Code-repo task: commit the agent's changes, push a source branch, open a
-	// GitLab MR, and fold the MR URL into the output. multica's worker-output
-	// parser files the URL as the node's pull_request deliverable. Best-effort:
-	// an MR failure is surfaced in the output, not by failing the task.
-	if strings.TrimSpace(payload.RepoURL) != "" {
-		token := ""
-		if payload.Env != nil {
-			token = payload.Env["MULTICA_GITLAB_TOKEN"]
-		}
-		if mrURL, err := OpenCodeMR(ctx, worktree, payload.RepoURL, token, payload.TaskID); err == nil && mrURL != "" {
-			output = strings.TrimSpace(output) + "\n\nMerge request: " + mrURL + "\n"
-		} else if err != nil {
-			output = strings.TrimSpace(output) + "\n\n[open merge request failed: " + err.Error() + "]\n"
-		}
-	}
+	logger.Info("workflow: task %s completed: session=%s output_bytes=%d", payload.TaskID, finalSessionID, len(output))
 
 	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
-		return d.client.CompleteTask(callbackCtx, payload.TaskID, output)
+		return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree)
 	})
 }
 
@@ -450,6 +532,7 @@ func (d *Driver) postTaskMessages(taskID, output string) {
 }
 
 func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
+	logger.Warn("workflow: task %s failed: reason=%s err=%v", taskID, failureReason, taskErr)
 	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
 		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
 	})
@@ -487,35 +570,45 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		return "", nil
 	}
 
-	session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
-	if err != nil {
-		return "", fmt.Errorf("create chat session: %w", err)
-	}
-	if session.ID == "" {
-		return "", fmt.Errorf("multica returned empty chat session id")
+	// Resume: reuse the prior csc session id (still on disk in csc serve's
+	// store). Skip CreateChatSession so the conversation carries forward across
+	// rounds of the same (agent, issue). First round: create a new chat session.
+	sessionID := payload.PriorSessionID
+	if sessionID == "" {
+		session, err := d.client.CreateChatSession(ctx, payload.WorkspaceID, payload.AgentID, chatSessionTitle(payload))
+		if err != nil {
+			return "", fmt.Errorf("create chat session: %w", err)
+		}
+		if session.ID == "" {
+			return "", fmt.Errorf("server returned empty chat session id")
+		}
+		sessionID = session.ID
 	}
 
 	if d.deps.ConversationBinder != nil {
 		// Create the csc session with the task env so in-task CLIs (notably
-		// `cs-cloud workflow deliverable submit`, which needs MULTICA_TOKEN +
-		// MULTICA_GITEA_* to push document deliverables to Gitea) inherit the
-		// credentials multica pushed in the task payload. RunSession reuses
-		// this session, so the env must be present at creation.
+		// `cs-cloud workflow deliverable submit`, which needs CS_CLOUD_TOKEN +
+		// CS_CLOUD_GITEA_* to push document deliverables to Gitea) inherit the
+		// credentials the server pushed in the task payload. RunSession reuses
+		// this session, so the env must be present at creation. Bind is fatal:
+		// a failed local session must not proceed to remote pin/bind, which
+		// would leave the task pointed at a session the frontend can't resolve.
 		env := d.runner.buildEnv(payload, worktree)
-		if err := d.deps.ConversationBinder.Bind(ctx, session.ID, worktree, env); err != nil {
+		if err := d.deps.ConversationBinder.Bind(ctx, sessionID, worktree, env); err != nil {
 			return "", fmt.Errorf("bind local conversation session: %w", err)
 		}
 	}
 
-	if err := d.client.PinTaskSession(ctx, payload.TaskID, session.ID, ""); err != nil {
+	// Pin the real workdir (task root) so the next round's prior_work_dir hits.
+	if err := d.client.PinTaskSession(ctx, payload.TaskID, sessionID, worktree); err != nil {
 		return "", fmt.Errorf("pin task session: %w", err)
 	}
-	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, session.ID); err != nil {
+	if err := d.client.BindNodeRunSession(ctx, payload.NodeRunID, runtimeID, deviceID, sessionID); err != nil {
 		return "", fmt.Errorf("bind node run session: %w", err)
 	}
 
-	logger.Info("workflow: bound session %s to task %s node_run %s", session.ID, payload.TaskID, payload.NodeRunID)
-	return session.ID, nil
+	logger.Info("workflow: bound session %s to task %s node_run %s", sessionID, payload.TaskID, payload.NodeRunID)
+	return sessionID, nil
 }
 
 func chatSessionTitle(payload workflow.TaskRunPayload) string {
@@ -584,9 +677,9 @@ func (d *Driver) tokenProvider() func() (*provider.Credentials, error) {
 	return d.deps.TokenProvider
 }
 
-// maintainRegistrations keeps the multica runtime rows for every workspace
+// maintainRegistrations keeps the runtime rows for every workspace
 // alive: register the missing ones, heartbeat the rest, and re-register any
-// row multica dropped (heartbeat 404). Called once at startup and then on
+// row the server dropped (heartbeat 404). Called once at startup and then on
 // every heartbeat tick by the runtime loop.
 func (d *Driver) maintainRegistrations() error {
 	if d.deps == nil || d.deps.DeviceID == nil || d.client == nil {
@@ -639,7 +732,7 @@ func (d *Driver) maintainRegistrations() error {
 }
 
 // maintainWorkspace heartbeats an existing registration or registers the
-// workspace if it has none. A 404 from heartbeat means multica deleted the
+// workspace if it has none. A 404 from heartbeat means the server deleted the
 // runtime row (sweeper or restart), so re-register immediately.
 func (d *Driver) maintainWorkspace(ctx context.Context, workspaceID, deviceID string) error {
 	d.mu.Lock()

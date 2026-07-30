@@ -344,9 +344,9 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 }
 
 // CreateSession creates a csc session with the requested ID and working
-// directory, waiting for a starting worker to become ready and replacing a
-// stopped session. This lets workflow tasks expose a stable conversation URL
-// that matches the multica chat_session.id.
+// directory. If a session with that ID already exists, it returns without
+// error. This lets workflow tasks expose a stable conversation URL that
+// matches the server chat_session.id.
 func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string) error {
 	return a.createSessionWithEnv(ctx, sessionID, cwd, env)
 }
@@ -394,6 +394,7 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 	if err != nil {
 		return err
 	}
+	logger.Info("[csc] session created: session_id=%s cwd=%s permission_mode=%s env_keys=%d", sessionID, cwd, permMode, len(env))
 	var created cscSession
 	if err := json.Unmarshal(response, &created); err != nil {
 		return fmt.Errorf("parse session response: %w", err)
@@ -706,7 +707,14 @@ func (a *Agent) GetSessionMessages(ctx context.Context, sessionID string) (json.
 // busy/idle events cannot race past the subscriber. If the context is
 // cancelled (e.g. the task is aborted), the session prompt is aborted
 // best-effort so the agent does not keep running detached.
-func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error) {
+func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) (out []byte, err error) {
+	begin := time.Now()
+	logger.Info("[csc] run session: start session=%s prompt_bytes=%d", sessionID, len(prompt))
+	defer func() {
+		if err != nil {
+			logger.Warn("[csc] run session: failed session=%s duration=%s err=%v", sessionID, time.Since(begin).Round(time.Millisecond), err)
+		}
+	}()
 	if err := a.createSessionWithEnv(ctx, sessionID, cwd, env); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
@@ -740,6 +748,7 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, e
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
 	}
+	logger.Info("[csc] run session: done session=%s output_bytes=%d duration=%s", sessionID, len(text), time.Since(begin).Round(time.Millisecond))
 	return []byte(text), nil
 }
 

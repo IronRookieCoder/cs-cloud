@@ -65,6 +65,72 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// RepoSpec mirrors the server's csCloudRepoSpec.
+type RepoSpec struct {
+	URL        string `json:"url"`
+	Provider   string `json:"provider"`
+	Role       string `json:"role"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Alias      string `json:"alias,omitempty"`
+	BotToken   string `json:"bot_token,omitempty"`
+}
+
+// DeliverableSpec mirrors the server's csCloudDeliverableSpec.
+type DeliverableSpec struct {
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	RepoAlias string     `json:"repo_alias,omitempty"`
+	Report    ReportSpec `json:"report"`
+}
+
+// ReportSpec mirrors the server's csCloudReportSpec.
+type ReportSpec struct {
+	Endpoint  string `json:"endpoint"`
+	Method    string `json:"method"`
+	BodyField string `json:"body_field"`
+}
+
+// PluginSpec mirrors the server's csCloudAgentPlugin: the plugin bound to an
+// agent that cs-cloud installs into the task working directory before the csc
+// session runs. Nil/empty means no plugin configured.
+type PluginSpec struct {
+	ID      string             `json:"id"`
+	Name    string             `json:"name"`
+	Install *PluginInstallSpec `json:"install,omitempty"`
+}
+
+// PluginInstallSpec describes how to install a plugin from a marketplace.
+// Mirrors multica's execenv.PluginInstall / handler.PluginInstall.
+type PluginInstallSpec struct {
+	Method              string `json:"method"`                // e.g. "plugin_marketplace"
+	Marketplace         string `json:"marketplace"`           // e.g. "anthropics/claude-plugins-official"
+	PluginName          string `json:"plugin_name"`           // e.g. "superpowers"
+	MarketplaceName     string `json:"marketplace_name"`      // e.g. "claude-plugins-official"
+	MarketplaceRepo     string `json:"marketplace_repo"`      // e.g. "anthropics/claude-plugins-official"
+	MarketplaceVerified bool   `json:"marketplace_verified"`
+}
+
+// CloudSkillInstall mirrors the server's csCloudCloudSkillInstall: a cloud
+// catalog skill binding the agent installs via `csc skill install`.
+type CloudSkillInstall struct {
+	ID          string                   `json:"id"`
+	Slug        string                   `json:"slug,omitempty"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	Install     *CloudSkillInstallSpec   `json:"install"`
+	Position    int32                    `json:"position"`
+}
+
+// CloudSkillInstallSpec is the executable subset of cloud skill install metadata.
+// Mirrors multica's execenv.CloudSkillInstallSpec.
+type CloudSkillInstallSpec struct {
+	Method    string `json:"method,omitempty"`
+	Spec      string `json:"spec,omitempty"`
+	SkillID   string `json:"skill_id,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
+	Verified  bool   `json:"verified,omitempty"`
+}
+
 type TaskRunPayload struct {
 	TaskID      string            `json:"task_id"`
 	WorkspaceID string            `json:"workspace_id"`
@@ -78,20 +144,34 @@ type TaskRunPayload struct {
 	// RepoURL is the workspace/project code repository the agent should clone
 	// into its worktree and develop in. Empty for tasks without a code repo
 	// (the worktree is then a scratch dir, as before).
-	RepoURL string `json:"repo_url,omitempty"`
-	// Kind is the multica task kind (direct|comment|chat|quick_create|
-	// autopilot). Optional; consumers may ignore it.
-	Kind string `json:"kind,omitempty"`
+	// deprecated: superseded by Repos; will be removed in M2 cleanup.
+	RepoURL      string            `json:"repo_url,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Repos        []RepoSpec        `json:"repos,omitempty"`
+	Deliverables []DeliverableSpec `json:"deliverables,omitempty"`
+	// Plugin is the agent's bound plugin to install into the task workdir via
+	// `csc plugin install` before the session runs. Nil = no plugin.
+	Plugin *PluginSpec `json:"plugin,omitempty"`
+	// CloudSkills are the agent's cloud catalog skill bindings to install via
+	// `csc skill install` before the session runs. Empty = none.
+	CloudSkills []CloudSkillInstall `json:"cloud_skills,omitempty"`
+	// PriorSessionID is the csc session id of the last task on the same
+	// (agent, issue), letting this task resume the conversation. Empty on first
+	// round / manual rerun / runtime mismatch. Mirrors the server's payload.
+	PriorSessionID string `json:"prior_session_id,omitempty"`
+	// PriorWorkDir is the workdir of the last task on the same (agent, issue),
+	// so this task reuses (resets) the same checkout. Empty on first round.
+	PriorWorkDir string `json:"prior_work_dir,omitempty"`
 }
 
-// CreateChatSessionRequest mirrors multica's POST
+// CreateChatSessionRequest mirrors the server's POST
 // /api/workspaces/{id}/api/chat/sessions body.
 type CreateChatSessionRequest struct {
 	AgentID string `json:"agent_id"`
 	Title   string `json:"title"`
 }
 
-// ChatSession mirrors the subset of multica's chat session response that
+// ChatSession mirrors the subset of the server's chat session response that
 // cs-cloud needs to bind a workflow task/node run to a session.
 type ChatSession struct {
 	ID        string  `json:"id"`
@@ -100,14 +180,14 @@ type ChatSession struct {
 	Title     string  `json:"title"`
 }
 
-// PinTaskSessionRequest mirrors multica's POST
+// PinTaskSessionRequest mirrors the server's POST
 // /api/daemon/tasks/{taskId}/session body.
 type PinTaskSessionRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 	WorkDir   string `json:"work_dir,omitempty"`
 }
 
-// BindNodeRunSessionRequest mirrors multica's POST
+// BindNodeRunSessionRequest mirrors the server's POST
 // /api/daemon/node-runs/{nodeRunId}/session body.
 type BindNodeRunSessionRequest struct {
 	RuntimeID string `json:"runtime_id,omitempty"`
@@ -115,7 +195,7 @@ type BindNodeRunSessionRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// TaskMessage mirrors one entry of multica's POST
+// TaskMessage mirrors one entry of the server's POST
 // /api/daemon/tasks/{id}/messages batch body.
 type TaskMessage struct {
 	Seq     int    `json:"seq"`
@@ -124,7 +204,7 @@ type TaskMessage struct {
 }
 
 // DaemonRuntime describes one runtime reported during daemon registration.
-// Type becomes the multica provider field; it must be "cs-cloud" for the
+// Type becomes the server provider field; it must be "cs-cloud" for the
 // issue-conversation flow to discover this device.
 type DaemonRuntime struct {
 	Name    string `json:"name"`
@@ -133,7 +213,7 @@ type DaemonRuntime struct {
 	Status  string `json:"status"`
 }
 
-// DaemonRegisterRequest mirrors multica's POST /api/daemon/register body.
+// DaemonRegisterRequest mirrors the server's POST /api/daemon/register body.
 type DaemonRegisterRequest struct {
 	WorkspaceID string          `json:"workspace_id"`
 	DaemonID    string          `json:"daemon_id"`
@@ -142,7 +222,7 @@ type DaemonRegisterRequest struct {
 	Runtimes    []DaemonRuntime `json:"runtimes"`
 }
 
-// DaemonRuntimeResponse is one registered runtime row returned by multica.
+// DaemonRuntimeResponse is one registered runtime row returned by the server.
 // Only the fields cs-cloud needs are decoded.
 type DaemonRuntimeResponse struct {
 	ID          string `json:"id"`
@@ -151,7 +231,7 @@ type DaemonRuntimeResponse struct {
 	Status      string `json:"status"`
 }
 
-// DaemonRegisterResponse is the envelope returned by multica's POST
+// DaemonRegisterResponse is the envelope returned by the server's POST
 // /api/daemon/register. The runtimes array contains the registered rows.
 type DaemonRegisterResponse struct {
 	Runtimes     []DaemonRuntimeResponse `json:"runtimes"`

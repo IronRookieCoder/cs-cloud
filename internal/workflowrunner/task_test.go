@@ -13,15 +13,19 @@ import (
 
 func TestTaskRunnerBuildEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
-	t.Setenv("MULTICA_TASK_ID", "parent-task")
+	t.Setenv("CS_CLOUD_TASK_ID", "parent-task")
 	tr := &TaskRunner{}
+	tr.SetAgentEnv(map[string]string{
+		"COSTRICT_BASE_URL": "https://catalog.example.test",
+		"CUSTOM_VAR":        "agent-value",
+	})
 	env := tr.buildEnv(workflow.TaskRunPayload{
 		WorkspaceID: "ws-1",
 		TaskID:      "task-1",
 		Agent:       "claude",
 		Env: map[string]string{
-			"CUSTOM_VAR":      "custom-value",
-			"MULTICA_TASK_ID": "override-task",
+			"CUSTOM_VAR":       "custom-value",
+			"CS_CLOUD_TASK_ID": "override-task",
 		},
 	}, "/tmp/ws")
 
@@ -32,17 +36,20 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 		}
 	}
 
-	if got["MULTICA_WORKSPACE_ID"] != "ws-1" {
-		t.Fatalf("MULTICA_WORKSPACE_ID = %q", got["MULTICA_WORKSPACE_ID"])
+	if got["CS_CLOUD_WORKSPACE_ID"] != "ws-1" {
+		t.Fatalf("CS_CLOUD_WORKSPACE_ID = %q", got["CS_CLOUD_WORKSPACE_ID"])
 	}
-	if got["MULTICA_TASK_ID"] != "task-1" {
-		t.Fatalf("MULTICA_TASK_ID = %q, want task-1 (override failed)", got["MULTICA_TASK_ID"])
+	if got["CS_CLOUD_TASK_ID"] != "task-1" {
+		t.Fatalf("CS_CLOUD_TASK_ID = %q, want task-1 (override failed)", got["CS_CLOUD_TASK_ID"])
 	}
 	if got["CS_CLOUD_WORKTREE"] != "/tmp/ws" {
 		t.Fatalf("CS_CLOUD_WORKTREE = %q", got["CS_CLOUD_WORKTREE"])
 	}
 	if got["CUSTOM_VAR"] != "custom-value" {
 		t.Fatalf("CUSTOM_VAR = %q", got["CUSTOM_VAR"])
+	}
+	if got["COSTRICT_BASE_URL"] != "https://catalog.example.test" {
+		t.Fatalf("COSTRICT_BASE_URL = %q", got["COSTRICT_BASE_URL"])
 	}
 	if got["PATH"] != "/usr/local/bin:/usr/bin" {
 		t.Fatalf("PATH not inherited: %q", got["PATH"])
@@ -153,8 +160,8 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 		Agent:       "csc",
 		Prompt:      "do thing",
 		Env: map[string]string{
-			"FAKE_AGENT_PRINT_ENV": "MULTICA_NODE_RUN_ID",
-			"MULTICA_NODE_RUN_ID":  "nr-env",
+			"FAKE_AGENT_PRINT_ENV": "CS_CLOUD_NODE_RUN_ID",
+			"CS_CLOUD_NODE_RUN_ID": "nr-env",
 		},
 	}, t.TempDir(), "session-1")
 	if err != nil {
@@ -170,7 +177,75 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 			env[k] = v
 		}
 	}
-	if env["MULTICA_NODE_RUN_ID"] != "nr-env" {
-		t.Fatalf("MULTICA_NODE_RUN_ID = %q, want nr-env", env["MULTICA_NODE_RUN_ID"])
+	if env["CS_CLOUD_NODE_RUN_ID"] != "nr-env" {
+		t.Fatalf("CS_CLOUD_NODE_RUN_ID = %q, want nr-env", env["CS_CLOUD_NODE_RUN_ID"])
+	}
+}
+
+func TestPrepare_TaskRootFresh(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc) // make exec.LookPath("csc") resolve
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(), AllowedAgents: []string{AgentCsc},
+	}
+	wm := NewWorkspaceManager(cfg.WorkspacesRoot)
+	tr := NewTaskRunner(wm, 0, cfg.AllowedAgents)
+
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "11111111-aaaa-bbbb-cccc-dddddddddddd", WorkspaceID: "ws-1", Agent: AgentCsc,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(cfg.WorkspacesRoot, "ws-1", "tasks", "11111111-aaaa-bbbb-cccc-dddddddddddd")
+	if worktree != want {
+		t.Errorf("taskRoot = %q, want %q", worktree, want)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Errorf("taskRoot not created: %v", err)
+	}
+}
+
+func TestPrepare_PriorWorkDirReused(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc)
+	root := t.TempDir()
+	prior := filepath.Join(root, "ws-1", "tasks", "prior-task")
+	_ = os.MkdirAll(prior, 0o755)
+	wm := NewWorkspaceManager(root)
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "new-task-id", WorkspaceID: "ws-1", Agent: AgentCsc, PriorWorkDir: prior,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if worktree != prior {
+		t.Errorf("taskRoot = %q, want reuse prior %q", worktree, prior)
+	}
+}
+
+func TestPrepare_PriorWorkDirMissingFallsBackToFresh(t *testing.T) {
+	requireGit(t)
+	installFakeAgent(t, AgentCsc)
+	root := t.TempDir()
+	wm := NewWorkspaceManager(root)
+	tr := NewTaskRunner(wm, 0, []string{AgentCsc})
+
+	// PriorWorkDir set but does NOT exist on disk (e.g. GC'd, or different device).
+	missingPrior := filepath.Join(root, "ws-1", "tasks", "gone-task")
+	worktree, _, err := tr.Prepare(context.Background(), workflow.TaskRunPayload{
+		TaskID: "new-task-id", WorkspaceID: "ws-1", Agent: AgentCsc, PriorWorkDir: missingPrior,
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(root, "ws-1", "tasks", "new-task-id") // TaskWorktreeDir
+	if worktree != want {
+		t.Errorf("taskRoot = %q, want fresh fallback %q", worktree, want)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Errorf("fresh taskRoot not created: %v", err)
 	}
 }

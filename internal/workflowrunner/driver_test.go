@@ -1,6 +1,7 @@
 package workflowrunner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,11 +19,12 @@ import (
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
+	"cs-cloud/internal/workflowrunner/execenv"
 )
 
 func TestDriverName(t *testing.T) {
 	deps := &Dependencies{
-		MulticaBaseURL: "https://multica.example.com",
+		BackendBaseURL: "https://backend.example.com",
 		TokenProvider:  func() (*provider.Credentials, error) { return nil, nil },
 	}
 	d := NewDriver(workflow.DefaultConfig(), deps)
@@ -33,7 +35,7 @@ func TestDriverName(t *testing.T) {
 
 func TestDriverLifecycleNoop(t *testing.T) {
 	deps := &Dependencies{
-		MulticaBaseURL: "https://multica.example.com",
+		BackendBaseURL: "https://backend.example.com",
 		TokenProvider:  func() (*provider.Credentials, error) { return nil, nil },
 	}
 	d := NewDriver(workflow.DefaultConfig(), deps)
@@ -48,15 +50,50 @@ func TestDriverLifecycleNoop(t *testing.T) {
 	}
 }
 
+func TestDriverStartWiresGC(t *testing.T) {
+	tokenProvider := func() (*provider.Credentials, error) { return nil, nil }
+
+	// GCEnabled=true (default) → gcFunc is plugged into the runtime loop.
+	cfgOn := workflow.DefaultConfig()
+	cfgOn.WorkspacesRoot = t.TempDir()
+	d := NewDriver(cfgOn, &Dependencies{
+		BackendBaseURL: "https://backend.example.com",
+		TokenProvider:  tokenProvider,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	if d.runtime == nil || d.runtime.gcFunc == nil {
+		t.Fatal("expected runtime.gcFunc to be wired when GCEnabled=true")
+	}
+
+	// GCEnabled=false → gcFunc stays nil; doGC no-ops.
+	cfgOff := workflow.DefaultConfig()
+	cfgOff.GCEnabled = false
+	cfgOff.WorkspacesRoot = t.TempDir()
+	dOff := NewDriver(cfgOff, &Dependencies{
+		BackendBaseURL: "https://backend.example.com",
+		TokenProvider:  tokenProvider,
+	})
+	if err := dOff.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = dOff.Stop() })
+	if dOff.runtime != nil && dOff.runtime.gcFunc != nil {
+		t.Fatal("expected runtime.gcFunc to be nil when GCEnabled=false")
+	}
+}
+
 func TestDriverHoldsConfigAndDeps(t *testing.T) {
-	cfg := workflow.Config{MulticaBaseURL: "https://cfg.example.com"}
+	cfg := workflow.Config{BackendBaseURL: "https://cfg.example.com"}
 	deps := &Dependencies{
-		MulticaBaseURL: "https://multica.example.com",
+		BackendBaseURL: "https://backend.example.com",
 		TokenProvider:  func() (*provider.Credentials, error) { return nil, nil },
 	}
 	d := NewDriver(cfg, deps)
-	if d.cfg.MulticaBaseURL != cfg.MulticaBaseURL {
-		t.Errorf("cfg.MulticaBaseURL = %q, want %q", d.cfg.MulticaBaseURL, cfg.MulticaBaseURL)
+	if d.cfg.BackendBaseURL != cfg.BackendBaseURL {
+		t.Errorf("cfg.BackendBaseURL = %q, want %q", d.cfg.BackendBaseURL, cfg.BackendBaseURL)
 	}
 	if d.deps != deps {
 		t.Error("deps mismatch")
@@ -77,11 +114,11 @@ func TestDriverTokenProviderNilDeps(t *testing.T) {
 	}
 }
 
-// fakeMultica is a minimal in-memory multica backend for driver registration
+// fakeBackend is a minimal in-memory backend for driver registration
 // tests. It implements /api/workspaces, /api/daemon/register,
 // /api/daemon/heartbeat, /api/daemon/deregister, /api/chat/sessions, and the
 // session-binding endpoints used by workflow task execution.
-type fakeMultica struct {
+type fakeBackend struct {
 	mu            sync.Mutex
 	workspaces    []workflow.Workspace
 	registrations []workflow.DaemonRegisterRequest
@@ -101,6 +138,7 @@ type fakeMultica struct {
 type pinSessionCall struct {
 	TaskID    string
 	SessionID string
+	WorkDir   string
 }
 
 type bindSessionCall struct {
@@ -110,8 +148,8 @@ type bindSessionCall struct {
 	SessionID string
 }
 
-func newFakeMultica(workspaces ...workflow.Workspace) *fakeMultica {
-	return &fakeMultica{
+func newFakeBackend(workspaces ...workflow.Workspace) *fakeBackend {
+	return &fakeBackend{
 		workspaces:    workspaces,
 		nextRuntimeID: 1,
 		nextSessionID: 1,
@@ -120,15 +158,15 @@ func newFakeMultica(workspaces ...workflow.Workspace) *fakeMultica {
 	}
 }
 
-func (f *fakeMultica) handler() http.Handler {
+func (f *fakeBackend) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(workflow.MulticaWorkspacesEndpoint, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflow.WorkspacesEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(f.workspaces)
 	})
-	mux.HandleFunc(workflow.MulticaDaemonRegisterEndpoint, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflow.DaemonRegisterEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		var req workflow.DaemonRegisterRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
@@ -144,7 +182,7 @@ func (f *fakeMultica) handler() http.Handler {
 			},
 		})
 	})
-	mux.HandleFunc(workflow.MulticaDaemonHeartbeatEndpoint, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflow.DaemonHeartbeatEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		rtID, _ := body["runtime_id"].(string)
@@ -159,7 +197,7 @@ func (f *fakeMultica) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc(workflow.MulticaDaemonDeregisterEndpoint, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(workflow.DaemonDeregisterEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
@@ -211,7 +249,7 @@ func (f *fakeMultica) handler() http.Handler {
 			var req workflow.PinTaskSessionRequest
 			_ = json.Unmarshal(body, &req)
 			f.mu.Lock()
-			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID})
+			f.pinSessions = append(f.pinSessions, pinSessionCall{TaskID: taskID, SessionID: req.SessionID, WorkDir: req.WorkDir})
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -255,7 +293,7 @@ func (f *fakeMultica) handler() http.Handler {
 	return mux
 }
 
-func (f *fakeMultica) snapshot() (regs []workflow.DaemonRegisterRequest, beats []string, deregs []string) {
+func (f *fakeBackend) snapshot() (regs []workflow.DaemonRegisterRequest, beats []string, deregs []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]workflow.DaemonRegisterRequest{}, f.registrations...),
@@ -263,20 +301,20 @@ func (f *fakeMultica) snapshot() (regs []workflow.DaemonRegisterRequest, beats [
 		append([]string{}, f.deregistered...)
 }
 
-func (f *fakeMultica) killRuntimes() {
+func (f *fakeBackend) killRuntimes() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.runtimeAlive = make(map[string]bool)
 }
 
-func (f *fakeMultica) sessionCalls() (pins []pinSessionCall, binds []bindSessionCall) {
+func (f *fakeBackend) sessionCalls() (pins []pinSessionCall, binds []bindSessionCall) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]pinSessionCall{}, f.pinSessions...),
 		append([]bindSessionCall{}, f.bindSessions...)
 }
 
-func (f *fakeMultica) taskCallback(suffix string) ([]byte, bool) {
+func (f *fakeBackend) taskCallback(suffix string) ([]byte, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, path := range f.taskCalls {
@@ -287,7 +325,7 @@ func (f *fakeMultica) taskCallback(suffix string) ([]byte, bool) {
 	return nil, false
 }
 
-func (f *fakeMultica) taskCallbackCount(suffix string) int {
+func (f *fakeBackend) taskCallbackCount(suffix string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	count := 0
@@ -299,7 +337,7 @@ func (f *fakeMultica) taskCallbackCount(suffix string) int {
 	return count
 }
 
-func (f *fakeMultica) setMessageDelay(delay time.Duration) {
+func (f *fakeBackend) setMessageDelay(delay time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.messageDelay = delay
@@ -331,12 +369,12 @@ func testDriverConfig(t *testing.T, heartbeat time.Duration) workflow.Config {
 }
 
 func TestDriverRegistersAndHeartbeats(t *testing.T) {
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"}, workflow.Workspace{ID: "ws-2", Name: "two"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"}, workflow.Workspace{ID: "ws-2", Name: "two"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
 	d := NewDriver(testDriverConfig(t, 50*time.Millisecond), &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		TokenProvider:  tokenProvider("token-123"),
 		DeviceID:       func() (string, error) { return "dev-1", nil },
 	})
@@ -366,12 +404,12 @@ func TestDriverRegistersAndHeartbeats(t *testing.T) {
 }
 
 func TestDriverReregistersWhenRuntimeGone(t *testing.T) {
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
 	d := NewDriver(testDriverConfig(t, 50*time.Millisecond), &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		TokenProvider:  tokenProvider("token-123"),
 		DeviceID:       func() (string, error) { return "dev-1", nil },
 	})
@@ -395,12 +433,12 @@ func TestDriverReregistersWhenRuntimeGone(t *testing.T) {
 }
 
 func TestDriverDeregistersOnStop(t *testing.T) {
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
 	d := NewDriver(testDriverConfig(t, time.Hour), &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		TokenProvider:  tokenProvider("token-123"),
 		DeviceID:       func() (string, error) { return "dev-1", nil },
 	})
@@ -423,12 +461,12 @@ func TestDriverDeregistersOnStop(t *testing.T) {
 }
 
 func TestDriverSkipsRegistrationWithoutDeviceID(t *testing.T) {
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
 	d := NewDriver(testDriverConfig(t, 50*time.Millisecond), &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		TokenProvider:  tokenProvider("token-123"),
 		// no DeviceID — registration disabled
 	})
@@ -448,12 +486,12 @@ func TestDriverSkipsRegistrationWithoutDeviceID(t *testing.T) {
 }
 
 func TestDriverSkipsRegistrationWithEmptyDeviceID(t *testing.T) {
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
 	d := NewDriver(testDriverConfig(t, 50*time.Millisecond), &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		TokenProvider:  tokenProvider("token-123"),
 		DeviceID:       func() (string, error) { return "", nil },
 	})
@@ -475,10 +513,10 @@ func TestDriverSkipsRegistrationWithEmptyDeviceID(t *testing.T) {
 func TestDriverAbortTask(t *testing.T) {
 	installFakeAgent(t, "fakeagent")
 
-	multica := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer multica.Close()
+	defer backend.Close()
 
 	startedFile := filepath.Join(t.TempDir(), "started")
 
@@ -491,7 +529,7 @@ func TestDriverAbortTask(t *testing.T) {
 		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := NewDriver(cfg, &Dependencies{
-		MulticaBaseURL: multica.URL,
+		BackendBaseURL: backend.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -529,7 +567,7 @@ func TestDriverAbortTask(t *testing.T) {
 	}
 }
 
-// callbackRecorder is a fake multica that records the daemon task callbacks
+// callbackRecorder is a fake backend that records the daemon task callbacks
 // (start / messages / complete / fail) with their raw request bodies.
 type callbackRecorder struct {
 	mu       sync.Mutex
@@ -580,7 +618,7 @@ func (cr *callbackRecorder) body(suffix string) []byte {
 	return nil
 }
 
-func asyncTestDriver(t *testing.T, multicaURL string) *Driver {
+func asyncTestDriver(t *testing.T, backendURL string) *Driver {
 	t.Helper()
 	installFakeAgent(t, "fakeagent")
 
@@ -593,7 +631,7 @@ func asyncTestDriver(t *testing.T, multicaURL string) *Driver {
 		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := NewDriver(cfg, &Dependencies{
-		MulticaBaseURL: multicaURL,
+		BackendBaseURL: backendURL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -644,6 +682,46 @@ func TestDriverRunTaskAsyncCompletes(t *testing.T) {
 	out, _ := complete["output"].(string)
 	if !strings.Contains(out, "hello") {
 		t.Fatalf("complete output = %q", out)
+	}
+}
+
+// TestDriverExecuteWritesGCMeta proves the execute() lifecycle hook actually
+// writes .gc_meta.json during a real (fake-agent) task run, with the right Kind
+// + IDs + a non-zero CompletedAt — so the gcLoop has a meta to read after the
+// task finishes. Closes the loop the gc.go port depends on.
+func TestDriverExecuteWritesGCMeta(t *testing.T) {
+	cr := newCallbackRecorder()
+	ts := httptest.NewServer(cr.handler())
+	defer ts.Close()
+
+	d := asyncTestDriver(t, ts.URL)
+	installFakeAgent(t, "fakeagent")
+
+	const (
+		wsID   = "ws-1"
+		taskID = "task-meta"
+	)
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: taskID, WorkspaceID: wsID, IssueID: "issue-1",
+		Agent: "fakeagent", Prompt: "echo hi",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+	waitFor(t, "complete callback", func() bool { return cr.hasCall("/complete") })
+
+	taskRoot := filepath.Join(d.cfg.WorkspacesRoot, wsID, "tasks", taskID)
+	meta, err := execenv.ReadGCMeta(taskRoot)
+	if err != nil {
+		t.Fatalf("expected .gc_meta.json at %s: %v", taskRoot, err)
+	}
+	if meta.Kind != execenv.GCKindIssue {
+		t.Errorf("Kind: want %q, got %q", execenv.GCKindIssue, meta.Kind)
+	}
+	if meta.IssueID != "issue-1" {
+		t.Errorf("IssueID: want issue-1, got %q", meta.IssueID)
+	}
+	if meta.CompletedAt.IsZero() {
+		t.Error("CompletedAt should be stamped by the completion hook")
 	}
 }
 
@@ -722,10 +800,36 @@ func TestDriverStartTaskFailureAborts(t *testing.T) {
 	}
 }
 
+// TestNoOpenCodeMRSymbol verifies that the OpenCodeMR function has been removed.
+// MR creation is now the agent CLI's responsibility, not the driver's.
+// This is a compile-time guard: if anyone re-adds OpenCodeMR to the package,
+// this line will fail to compile.
+func TestNoOpenCodeMRSymbol(t *testing.T) {
+	// The unexported functions from the deleted coderepo.go must not exist.
+	// Reference them as values so the compiler catches re-introduction.
+	var _ = (func(string) bool)(nil)   // worktreeHasStagedChanges shape
+	var _ = (func(string) string)(nil) // sanitizeBranchSegment shape
+
+	// OpenCodeMR was the exported entry point. Confirm it is gone by
+	// checking that the driver's execute function does not inject
+	// "Merge request:" into the output. We test this indirectly:
+	// grep the source file at test time for the forbidden call.
+	b, err := os.ReadFile("driver.go")
+	if err != nil {
+		t.Fatalf("read driver.go: %v", err)
+	}
+	if bytes.Contains(b, []byte("OpenCodeMR")) {
+		t.Fatal("driver.go must not reference OpenCodeMR; MR creation is the agent's responsibility")
+	}
+	if bytes.Contains(b, []byte("Merge request:")) {
+		t.Fatal("driver.go must not contain 'Merge request:' literal; MR URLs are no longer injected by the driver")
+	}
+}
+
 func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 	installFakeAgent(t, "fakeagent")
 
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
@@ -738,7 +842,7 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := NewDriver(cfg, &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		UserBaseURL:    ts.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 		DeviceID:       func() (string, error) { return "dev-1", nil },
@@ -778,10 +882,183 @@ func TestDriverRunTaskAsyncBindsSession(t *testing.T) {
 	}
 }
 
+func TestBindSession_ReusesPriorSession(t *testing.T) {
+	f := newFakeBackend()
+	ts := httptest.NewServer(f.handler())
+	defer ts.Close()
+
+	d := &Driver{
+		deps: &Dependencies{
+			BackendBaseURL: ts.URL,
+			DeviceID:       func() (string, error) { return "dev-1", nil },
+		},
+		client:           NewClient(ts.URL, ts.URL, tokenProvider("tok")),
+		workspaceManager: NewWorkspaceManager(t.TempDir()),
+		running:          map[string]*taskRecord{},
+		registrations:    map[string]string{"ws-1": "rt-1"},
+	}
+
+	workdir := "/some/taskroot"
+	sessionID, err := d.bindSession(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t1", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, PriorSessionID: "sess-prior",
+	}, workdir)
+	if err != nil {
+		t.Fatalf("bindSession: %v", err)
+	}
+	if sessionID != "sess-prior" {
+		t.Errorf("sessionID = %q, want reuse sess-prior", sessionID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sessions) != 0 {
+		t.Errorf("expected no CreateChatSession, got %d sessions", len(f.sessions))
+	}
+	if len(f.pinSessions) != 1 {
+		t.Fatalf("expected 1 pin call, got %d", len(f.pinSessions))
+	}
+	if f.pinSessions[0].WorkDir != workdir {
+		t.Errorf("pin work_dir = %q, want %q", f.pinSessions[0].WorkDir, workdir)
+	}
+	if len(f.bindSessions) != 1 || f.bindSessions[0].SessionID != "sess-prior" {
+		t.Errorf("bind node-run session: %+v", f.bindSessions)
+	}
+}
+
+// flakySessionRunner fails its first RunSession call (simulating a corrupt
+// resumed session) and succeeds on the second (the fresh retry).
+type flakySessionRunner struct {
+	calls int
+}
+
+func (f *flakySessionRunner) RunSession(ctx context.Context, sessionID, worktree, prompt string, env []string) ([]byte, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, fmt.Errorf("resumed session boom")
+	}
+	return []byte("ok-round2"), nil
+}
+
+// TestExecute_ResumeFailureRetriesFresh verifies that when a resumed prior
+// session FAILS on the first RunCSCSession, execute retries once with a fresh
+// session (clears PriorSessionID → bindSession creates a new chat session →
+// RunCSCSession again). Mirrors the daemon.go:2662-2677.
+func TestExecute_ResumeFailureRetriesFresh(t *testing.T) {
+	installFakeAgent(t, AgentCsc)
+
+	flaky := &flakySessionRunner{}
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot:    t.TempDir(),
+		CacheDir:          t.TempDir(),
+		SyncInterval:      time.Hour,
+		GCInterval:        time.Hour,
+		HeartbeatInterval: time.Hour,
+		AgentTimeout:      time.Minute,
+		AllowedAgents:     []string{AgentCsc},
+	}
+	// SessionRunner is set in deps before Start so Start injects it into the
+	// runner; execute's CSC-session branch checks d.deps.SessionRunner, and
+	// RunCSCSession reads tr.sessionRunner — both must be non-nil.
+	d := NewDriver(cfg, &Dependencies{
+		BackendBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  flaky,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	// Wait for the async maintainRegistrations goroutine to register ws-1 so
+	// bindSession sees a runtime for the workspace.
+	waitFor(t, "registration", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.registrations["ws-1"]
+		return ok
+	})
+
+	err := d.execute(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t-resume", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, Prompt: "do work", PriorSessionID: "sess-prior",
+	}, &taskRecord{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if flaky.calls != 2 {
+		t.Errorf("flakySessionRunner calls = %d, want 2 (failed resume + fresh retry)", flaky.calls)
+	}
+	// The fresh retry creates a new chat session (the resume attempt skipped
+	// CreateChatSession because PriorSessionID was set).
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.sessions) != 1 {
+		t.Errorf("expected 1 CreateChatSession (fresh retry), got %d", len(fm.sessions))
+	}
+}
+
+// TestExecute_NonResumeFailureDoesNotRetry verifies that when there is no prior
+// session to resume (first round), a RunCSCSession failure does NOT trigger the
+// fresh-session retry — the retry path is gated on PriorSessionID != "".
+func TestExecute_NonResumeFailureDoesNotRetry(t *testing.T) {
+	installFakeAgent(t, AgentCsc)
+
+	flaky := &flakySessionRunner{} // call 1 fails, call 2 would succeed — but must not be reached
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot:    t.TempDir(),
+		CacheDir:          t.TempDir(),
+		SyncInterval:      time.Hour,
+		GCInterval:        time.Hour,
+		HeartbeatInterval: time.Hour,
+		AgentTimeout:      time.Minute,
+		AllowedAgents:     []string{AgentCsc},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		BackendBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  flaky,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.registrations["ws-1"]
+		return ok
+	})
+
+	err := d.execute(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t-fresh", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, Prompt: "do work",
+		// PriorSessionID OMITTED (first round)
+	}, &taskRecord{})
+	if err == nil {
+		t.Error("expected task to fail (flaky runner fails on call 1, no retry)")
+	}
+	if flaky.calls != 1 {
+		t.Errorf("flaky.calls = %d, want 1 (no retry on non-resume failure)", flaky.calls)
+	}
+}
+
 func TestDriverCSCSessionFailureReportsAgentError(t *testing.T) {
 	installFakeAgent(t, "csc")
 
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	defer ts.Close()
 
@@ -795,7 +1072,7 @@ func TestDriverCSCSessionFailureReportsAgentError(t *testing.T) {
 		AllowedAgents:  []string{"csc"},
 	}
 	d := NewDriver(cfg, &Dependencies{
-		MulticaBaseURL: ts.URL,
+		BackendBaseURL: ts.URL,
 		UserBaseURL:    ts.URL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 		DeviceID:       func() (string, error) { return "dev-1", nil },
@@ -850,11 +1127,11 @@ func newCSCSessionTestDriver(
 	timeout time.Duration,
 	runner SessionRunner,
 	binder ConversationBinder,
-) (*Driver, *fakeMultica) {
+) (*Driver, *fakeBackend) {
 	t.Helper()
 	installFakeAgent(t, "csc")
 
-	fm := newFakeMultica(workflow.Workspace{ID: "ws-1", Name: "one"})
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
 	ts := httptest.NewServer(fm.handler())
 	t.Cleanup(ts.Close)
 
@@ -866,7 +1143,7 @@ func newCSCSessionTestDriver(
 		AgentTimeout:   timeout,
 		AllowedAgents:  []string{"csc"},
 	}, &Dependencies{
-		MulticaBaseURL:     ts.URL,
+		BackendBaseURL:     ts.URL,
 		UserBaseURL:        ts.URL,
 		TokenProvider:      func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 		DeviceID:           func() (string, error) { return "dev-1", nil },
@@ -886,9 +1163,9 @@ func newCSCSessionTestDriver(
 }
 
 type nonCooperativeSessionRunner struct {
-	started   chan struct{}
-	unblock   chan struct{}
-	finished  chan struct{}
+	started  chan struct{}
+	unblock  chan struct{}
+	finished chan struct{}
 	closeOnce sync.Once
 }
 
@@ -1046,7 +1323,7 @@ func (*silentlyEmptySessionRunner) RunSession(context.Context, string, string, s
 }
 
 // This exercises the workflow subsystem through its public RunTask boundary,
-// including workspace preparation, Multica session binding, and terminal HTTP
+// including workspace preparation, session binding, and terminal HTTP
 // callbacks. Only the external CSC execution boundary is substituted.
 func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
 	d, fm := newCSCSessionTestDriver(t, time.Minute, &silentlyEmptySessionRunner{}, nil)

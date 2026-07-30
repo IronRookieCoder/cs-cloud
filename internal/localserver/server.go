@@ -309,7 +309,7 @@ func (s *Server) Start(addr string) error {
 	if s.workflow != nil {
 		if err := s.workflow.Start(); err != nil {
 			// The workflow subsystem is optional. A daemon registered
-			// against a server without the workflow backend (no multica
+			// against a server without the workflow backend (no server
 			// base URL) must still come up — degrade to "workflow
 			// disabled" instead of failing the whole server.
 			logger.Warn("workflow driver disabled: %v", err)

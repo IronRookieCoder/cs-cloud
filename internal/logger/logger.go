@@ -21,6 +21,11 @@ type Config struct {
 	MaxAgeDays int
 	MaxBackups int
 	Console    bool
+	// Level is the minimum level written to app.log. The zero value is
+	// InfoLevel, which keeps the codebase's many Debug diagnostics (terminal
+	// io, git/file watchers, dispatchers) out of the production log; set
+	// DebugLevel to turn them back on for troubleshooting.
+	Level zapcore.Level
 }
 
 func Init(cfg Config) {
@@ -75,7 +80,7 @@ func Init(cfg Config) {
 
 	fileEncoder := zapcore.NewConsoleEncoder(encoderCfg)
 
-	appCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(appRotator), zap.DebugLevel)
+	appCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(appRotator), cfg.Level)
 	errCore := zapcore.NewCore(fileEncoder, zapcore.AddSync(errRotator), zap.ErrorLevel)
 
 	cores := []zapcore.Core{appCore, errCore}

@@ -21,7 +21,7 @@ func TestWorkflowHealthRoute(t *testing.T) {
 		GCInterval:     time.Hour,
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
-		MulticaBaseURL: "http://localhost:1",
+		BackendBaseURL: "http://localhost:1",
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
 	})
 	if err := d.Start(); err != nil {
@@ -46,7 +46,7 @@ func TestWorkflowHealthRoute(t *testing.T) {
 }
 
 // A daemon registered against a server without the workflow backend has no
-// multica base URL, so the driver cannot start. The server must come up
+// server base URL, so the driver cannot start. The server must come up
 // anyway (the workflow subsystem is optional), and the workflow endpoints
 // must report 503 with the underlying reason instead of a dead daemon.
 func TestServerStartDegradesWhenWorkflowDriverFails(t *testing.T) {
@@ -74,7 +74,7 @@ func TestServerStartDegradesWhenWorkflowDriverFails(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("health status = %d, body = %s", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), "multica base URL") {
+	if !strings.Contains(string(body), "server base URL") {
 		t.Fatalf("health body should name the root cause, got %s", body)
 	}
 

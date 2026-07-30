@@ -30,8 +30,8 @@ func Load() (*Config, error) {
 	}
 
 	// Workflow config from environment variables.
-	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_MULTICA_BASE_URL", "CS_CLOUD_WORKFLOW_MULTICA_BASE_URL"); v != "" {
-		cfg.Workflow.MulticaBaseURL = v
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "CS_CLOUD_WORKFLOW_BACKEND_BASE_URL"); v != "" {
+		cfg.Workflow.BackendBaseURL = v
 	}
 	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_WORKSPACES_ROOT", "CS_CLOUD_WORKFLOW_WORKSPACES_ROOT"); v != "" {
 		cfg.Workflow.WorkspacesRoot = v
@@ -48,6 +48,41 @@ func Load() (*Config, error) {
 		if d, ok := parsePositiveDuration(v); ok {
 			cfg.Workflow.GCInterval = d
 		}
+	}
+	// envGCSet tracks whether the env explicitly set GC state, so the file
+	// merge below knows whether the file's gc_enabled is allowed to win. With-
+	// out it, json.Unmarshal maps a missing workflow.gc_enabled key to false,
+	// which would silently disable GC for every config file that doesn't write
+	// the key explicitly (CodeRabbit PR #27 comment 10).
+	envGCSet := false
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_ENABLED", "CS_CLOUD_WORKFLOW_GC_ENABLED"); v != "" {
+		cfg.Workflow.GCEnabled = v == "true" || v == "1" || v == "yes"
+		envGCSet = true
+	} else if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_DISABLED", "CS_CLOUD_WORKFLOW_GC_DISABLED"); v != "" {
+		// Any explicit value is an env-level override: truthy (true/1/yes) →
+		// disabled, anything else (false/0/no) → enabled. This ensures
+		// GC_DISABLED=false wins over a file-level gc_enabled:false, honoring
+		// the operator's explicit opt-in (CodeRabbit PR #27 follow-up).
+		cfg.Workflow.GCEnabled = !(v == "true" || v == "1" || v == "yes")
+		envGCSet = true
+	}
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_TTL", "CS_CLOUD_WORKFLOW_GC_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCTTL = d
+		}
+	}
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_ORPHAN_TTL", "CS_CLOUD_WORKFLOW_GC_ORPHAN_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCOrphanTTL = d
+		}
+	}
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_ARTIFACT_TTL", "CS_CLOUD_WORKFLOW_GC_ARTIFACT_TTL"); v != "" {
+		if d, ok := parsePositiveDuration(v); ok {
+			cfg.Workflow.GCArtifactTTL = d
+		}
+	}
+	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_GC_ARTIFACT_PATTERNS", "CS_CLOUD_WORKFLOW_GC_ARTIFACT_PATTERNS"); v != "" {
+		cfg.Workflow.GCArtifactPatterns = strings.Split(v, ",")
 	}
 	if v := platform.GetenvCompat("CS_BRIDGE_WORKFLOW_HEARTBEAT_INTERVAL", "CS_CLOUD_WORKFLOW_HEARTBEAT_INTERVAL"); v != "" {
 		if d, ok := parsePositiveDuration(v); ok {
@@ -126,6 +161,24 @@ func Load() (*Config, error) {
 					cfg.IdleBufferSeconds = fileCfg.IdleBufferSeconds
 				}
 				cfg.Workflow = mergeWorkflowConfig(cfg.Workflow, fileCfg.Workflow)
+
+				// GCEnabled file-merge: a config file that explicitly writes
+				// workflow.gc_enabled should override the default true, but
+				// ONLY when the env hasn't already set it (env wins over file).
+				// json.Unmarshal maps a missing key to false, so detect presence
+				// with a *bool probe rather than treating default-false as an
+				// explicit opt-out — otherwise every config file that omits the
+				// key silently disables GC (CodeRabbit PR #27 comment 10).
+				if !envGCSet {
+					var probe struct {
+						Workflow struct {
+							GCEnabled *bool `json:"gc_enabled"`
+						} `json:"workflow"`
+					}
+					if err := json.Unmarshal(b, &probe); err == nil && probe.Workflow.GCEnabled != nil {
+						cfg.Workflow.GCEnabled = *probe.Workflow.GCEnabled
+					}
+				}
 			}
 		}
 	}
@@ -170,14 +223,14 @@ func Load() (*Config, error) {
 		cfg.IdleBufferSeconds = 30
 	}
 
-	// If the workflow multica base URL is not explicitly configured and we
+	// If the workflow server base URL is not explicitly configured and we
 	// have a CoStrict base URL, derive the test/enterprise workflow backend
 	// URL from it. Explicit env/file config always wins. The URL is not
 	// required at config load time so that commands like stop/restart work
 	// without a network configuration; workflow components validate it when
 	// they start.
-	if cfg.Workflow.MulticaBaseURL == "" && cfg.BaseURL != "" {
-		cfg.Workflow.MulticaBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
+	if cfg.Workflow.BackendBaseURL == "" && cfg.BaseURL != "" {
+		cfg.Workflow.BackendBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
 	}
 
 	return cfg, nil
@@ -197,8 +250,8 @@ func parsePositiveDuration(v string) (time.Duration, bool) {
 
 func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	defaults := workflow.DefaultConfig()
-	if file.MulticaBaseURL != "" && current.MulticaBaseURL == "" {
-		current.MulticaBaseURL = file.MulticaBaseURL
+	if file.BackendBaseURL != "" && current.BackendBaseURL == "" {
+		current.BackendBaseURL = file.BackendBaseURL
 	}
 	if file.WorkspacesRoot != "" && current.WorkspacesRoot == defaults.WorkspacesRoot {
 		current.WorkspacesRoot = file.WorkspacesRoot
@@ -212,6 +265,27 @@ func mergeWorkflowConfig(current, file workflow.Config) workflow.Config {
 	if file.GCInterval != 0 && current.GCInterval == defaults.GCInterval {
 		current.GCInterval = file.GCInterval
 	}
+	// GC TTLs: file overrides only when current still equals the default (env
+	// wins over file, mirroring GCInterval). GCEnabled is handled in Load()
+	// (see the *bool probe there) — not here, because json.Unmarshal zeroes a
+	// missing key and we need to distinguish absent from explicit-false.
+	if file.GCTTL != 0 && current.GCTTL == defaults.GCTTL {
+		current.GCTTL = file.GCTTL
+	}
+	if file.GCOrphanTTL != 0 && current.GCOrphanTTL == defaults.GCOrphanTTL {
+		current.GCOrphanTTL = file.GCOrphanTTL
+	}
+	if file.GCArtifactTTL != 0 && current.GCArtifactTTL == defaults.GCArtifactTTL {
+		current.GCArtifactTTL = file.GCArtifactTTL
+	}
+	if len(file.GCArtifactPatterns) > 0 && stringSlicesEqual(current.GCArtifactPatterns, defaults.GCArtifactPatterns) {
+		current.GCArtifactPatterns = file.GCArtifactPatterns
+	}
+	// GCEnabled is intentionally NOT handled here: json.Unmarshal maps a
+	// missing workflow.gc_enabled key to false, so merging in this function
+	// (which runs unconditionally) would silently disable GC for any file
+	// that doesn't write the key. The override lives in Load() instead,
+	// where a *bool probe distinguishes explicit-false from absent.
 	if file.HeartbeatInterval != 0 && current.HeartbeatInterval == defaults.HeartbeatInterval {
 		current.HeartbeatInterval = file.HeartbeatInterval
 	}
