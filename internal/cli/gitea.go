@@ -203,6 +203,7 @@ func submitDeliverable(cfg submitConfig) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitting node_run=%s branch=%s\n", cfg.deliverableID, gctx.nodeRunID, gctx.nodeBranch)
 	worktree, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
@@ -260,6 +261,7 @@ func submitDeliverable(cfg submitConfig) error {
 	if err := reportDeliverablePR(ctx, envOr("CS_CLOUD_BACKEND_URL", ""), os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitted pr=%s\n", cfg.deliverableID, prURL)
 	fmt.Println(prURL)
 	return nil
 }

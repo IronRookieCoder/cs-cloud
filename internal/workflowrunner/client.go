@@ -9,8 +9,10 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
+	"cs-cloud/internal/logger"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
@@ -115,6 +117,7 @@ func (c *Client) doRequest(ctx context.Context, baseURL, method, path string, he
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
+		logger.Warn("workflow: server %s %s returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
 		return &StatusError{Method: method, URL: url, Path: path, StatusCode: resp.StatusCode, Body: string(b)}
 	}
 

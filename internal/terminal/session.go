@@ -106,7 +106,6 @@ func (s *Session) readOutput(ctx context.Context) {
 
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
-			logger.Debug("terminal: readOutput got %d bytes id=%s", n, s.ID)
 			data := make([]byte, n)
 			copy(data, buf[:n])
 			s.broadcast(data)

@@ -80,10 +80,13 @@ func handleStream(stream net.Conn, localPort int) {
 		proxyWebSocket(stream, method, path, headers, body, localPort)
 		logger.Info("[tunnel-req] %s %s ws-end duration=%s", method, path, time.Since(start))
 	} else {
-		logger.Debug("[tunnel-req] %s %s recv body=%d", method, path, contentLength)
 		status, outBytes := proxyHTTPStream(stream, br, method, path, headers, contentLength, localPort)
-		logger.Info("[tunnel-req] %s %s status=%d out=%dB duration=%s",
-			method, path, status, outBytes, time.Since(start))
+		// Successful forwards are the common case; log only failures so the
+		// access-log noise doesn't drown out business events in app.log.
+		if status >= 400 {
+			logger.Warn("[tunnel-req] %s %s status=%d out=%dB duration=%s",
+				method, path, status, outBytes, time.Since(start))
+		}
 	}
 }
 

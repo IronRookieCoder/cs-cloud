@@ -51,6 +51,8 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("current branch: %w", err)
 	}
 
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitting MR node_run=%s branch=%s\n", cfg.deliverableID, nodeRunID, currentBranch)
+
 	// Push current branch to the repo.
 	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
 	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
@@ -69,6 +71,7 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("report submit: %w", err)
 	}
 
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitted mr=%s\n", cfg.deliverableID, mrURL)
 	fmt.Println(mrURL)
 	return nil
 }

@@ -254,9 +254,9 @@ func (d *Driver) RunTaskAsync(payload workflow.TaskRunPayload) error {
 		ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
 		defer cancel()
 		d.armCancel(rec, cancel)
-		if err := d.execute(ctx, payload, rec); err != nil {
-			logger.Warn("workflow: task %s failed: %v", payload.TaskID, err)
-		}
+		// execute owns all task-status callbacks + failure logging (failTask,
+		// StartTask warn); a duplicate "task failed" here just double-logs.
+		_ = d.execute(ctx, payload, rec)
 	}()
 	return nil
 }
@@ -327,6 +327,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		// the server rejected the start (e.g. the task was cancelled between
 		// dispatch and device accept) — abort locally without reporting a
 		// failure for a task that is already finalized server-side.
+		logger.Warn("workflow: task %s not started (rejected/cancelled by server): %v", payload.TaskID, err)
 		if rec.cancel != nil {
 			rec.cancel()
 		}
@@ -498,6 +499,7 @@ func (d *Driver) postTaskMessages(taskID, output string) {
 }
 
 func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
+	logger.Warn("workflow: task %s failed: reason=%s err=%v", taskID, failureReason, taskErr)
 	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
 		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
 	})

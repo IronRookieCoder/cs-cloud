@@ -345,7 +345,6 @@ func (f *NotifyForwarder) sendNotify(payload map[string]any) {
 	}
 
 	url := f.cloudClient.URL("/cloud/device/notify", f.credBaseURL)
-	logger.Debug("[notify-forwarder] POST %s body=%s", url, string(body))
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -395,7 +394,6 @@ func (f *NotifyForwarder) handleResponseEvent(event agent.Event) {
 	}
 
 	url := f.cloudClient.URL("/cloud/device/notify/responded", f.credBaseURL)
-	logger.Debug("[notify-forwarder] POST %s body=%s", url, string(body))
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"cs-cloud/internal/logger"
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 	"cs-cloud/internal/workflowrunner"
@@ -101,6 +102,7 @@ func (s *Server) handleWorkflowTaskRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.workflow.RunTaskAsync(payload); err != nil {
+		logger.Warn("workflow: task %s rejected: %v", payload.TaskID, err)
 		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
