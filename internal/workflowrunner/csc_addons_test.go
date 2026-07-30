@@ -329,3 +329,19 @@ func TestInstallCloudSkillFailureIncludesStdoutAndStderr(t *testing.T) {
 		t.Fatalf("error missing combined output: %v", err)
 	}
 }
+
+func TestInstallCloudSkillTreatsSuccessJSONWithUVAssertionAsInstalled(t *testing.T) {
+	bin, _ := fakeCSC(t)
+	workDir := t.TempDir()
+	t.Setenv("CSC_FAIL", "1")
+	t.Setenv("CSC_STDOUT", `{"id":"e5aaa64b-b4af-4b5a-a058-39bdce045e63","slug":"cheat-publish-skill","name":"cheat-publish","targetName":"cheat-publish-skill","path":"C:\\Users\\SXF-Admin\\.costrict\\skills\\cheat-publish-skill\\SKILL.md","scope":"project"}`)
+	t.Setenv("CSC_STDERR", "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 76")
+
+	err := installCloudSkill(context.Background(), bin, workDir, normalizedCloudSkillInstall{
+		id:     "e5aaa64b-b4af-4b5a-a058-39bdce045e63",
+		target: "e5aaa64b-b4af-4b5a-a058-39bdce045e63",
+	}, nil)
+	if err != nil {
+		t.Fatalf("expected success JSON to win over post-install UV assertion, got %v", err)
+	}
+}

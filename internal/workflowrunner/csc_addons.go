@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -98,23 +99,28 @@ func setupCSCPlugins(ctx context.Context, cscBin, workDir string, plugin *workfl
 	// Step 1: marketplace add (non-fatal — may already be registered).
 	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "marketplace", "add", repo); err != nil {
 		logger.Warn("workflow: csc plugin marketplace add failed (non-fatal): repo=%s err=%v", repo, err)
+	} else {
+		logger.Info("workflow: csc plugin marketplace add done: repo=%s marketplace=%s", repo, name)
 	}
 
 	// Step 2: marketplace update.
 	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "marketplace", "update", name); err != nil {
 		return fmt.Errorf("csc plugin marketplace update %s: %w", name, err)
 	}
+	logger.Info("workflow: csc plugin marketplace update done: marketplace=%s", name)
 
 	// Step 3: install with local scope.
 	spec := install.PluginName + "@" + name
 	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "install", spec, "-s", "local"); err != nil {
 		return fmt.Errorf("csc plugin install %s: %w", spec, err)
 	}
+	logger.Info("workflow: csc plugin install done: plugin=%s marketplace=%s", install.PluginName, name)
 
 	// Step 4: update installed plugin.
 	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "update", spec, "-s", "local"); err != nil {
 		return fmt.Errorf("csc plugin update %s: %w", spec, err)
 	}
+	logger.Info("workflow: csc plugin update done: plugin=%s marketplace=%s", install.PluginName, name)
 
 	logger.Info("workflow: csc plugin installed: plugin=%s marketplace=%s", install.PluginName, name)
 	return nil
@@ -248,6 +254,10 @@ func installCloudSkill(ctx context.Context, cscBin, workDir string, install norm
 	if ctxErr := installCtx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
+	if cloudSkillInstallSucceeded(stdout.String(), install) && isUVHandleClosingAssertion(stderr.String()) {
+		logger.Warn("workflow: csc skill install returned success JSON but exited after UV assertion; treating as installed: target=%s id=%s err=%v", install.target, install.id, err)
+		return nil
+	}
 	detail := strings.TrimSpace(strings.Join([]string{
 		strings.TrimSpace(stdout.String()),
 		strings.TrimSpace(stderr.String()),
@@ -257,6 +267,37 @@ func installCloudSkill(ctx context.Context, cscBin, workDir string, install norm
 	}
 	logger.Error("workflow: csc skill install failed: target=%s id=%s err=%v", install.target, install.id, err)
 	return fmt.Errorf("csc cloud skill install %q (id %q) failed%s: %w", install.target, install.id, detail, err)
+}
+
+type cscSkillInstallResult struct {
+	ID         string `json:"id"`
+	Slug       string `json:"slug"`
+	TargetName string `json:"targetName"`
+	Path       string `json:"path"`
+	Scope      string `json:"scope"`
+}
+
+func cloudSkillInstallSucceeded(out string, install normalizedCloudSkillInstall) bool {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return false
+	}
+	var result cscSkillInstallResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		return false
+	}
+	if result.Path == "" || result.Scope == "" {
+		return false
+	}
+	id := strings.TrimSpace(result.ID)
+	target := strings.TrimSpace(install.target)
+	return id != "" && (id == strings.TrimSpace(install.id) || id == target || result.Slug == target || result.TargetName == target)
+}
+
+func isUVHandleClosingAssertion(s string) bool {
+	return strings.Contains(s, "UV_HANDLE_CLOSING") &&
+		strings.Contains(s, "Assertion failed") &&
+		strings.Contains(s, "handle->flags")
 }
 
 // boundedOutput is a bytes.Buffer that caps captured output at limit bytes and
