@@ -50,26 +50,25 @@ func (w *corsWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func setCORSHeaders(headers http.Header, origin string) {
-	if origin == "" {
-		origin = "*"
+	// Non-localhost Origin: refuse cross-origin access. This is a local dev
+	// server bound to 127.0.0.1 and only localhost-variant webview/webapp
+	// origins are trusted. Reflecting arbitrary origins (the old behavior)
+	// let any malicious page the victim visits issue cross-origin requests
+	// against their localserver and read the responses, exposing every API
+	// endpoint (file read/write, terminal, workflow). Setting no CORS
+	// headers makes the browser block the response from being read.
+	if origin != "" && !isLocalhostOrigin(origin) {
+		return
 	}
 
-	// When the request origin is a localhost variant (127.0.0.1 or localhost),
-	// VS Code's service worker may rewrite the Origin header when proxying
-	// webview requests (e.g., page origin http://localhost:8282 becomes
-	// http://127.0.0.1 in the proxied request). The browser then rejects the
-	// CORS response because the echoed origin doesn't match the page origin.
-	//
-	// For localhost origins, use a wildcard and skip credentials. Auth is
-	// handled via the Authorization header, not cookies, so dropping
+	// No Origin header (non-browser clients like curl) or localhost origin:
+	// wildcard ACAO. VS Code's service worker may rewrite the Origin header
+	// when proxying webview requests (page origin http://localhost:8282
+	// becomes http://127.0.0.1 in the proxied request), so a wildcard avoids
+	// a browser-side ACAO/page-origin mismatch. Auth is via the
+	// Authorization header, not cookies, so dropping
 	// Access-Control-Allow-Credentials is safe.
-	if isLocalhostOrigin(origin) {
-		headers.Set("Access-Control-Allow-Origin", "*")
-	} else {
-		headers.Set("Access-Control-Allow-Origin", origin)
-		headers.Set("Access-Control-Allow-Credentials", "true")
-	}
-
+	headers.Set("Access-Control-Allow-Origin", "*")
 	headers.Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 	headers.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Workspace-Directory, x-opencode-directory, x-csc-directory, Cookie")
 	headers.Set("Access-Control-Max-Age", "86400")
