@@ -24,6 +24,11 @@ import (
 // not online" for every issue conversation.
 const providerCSCloud = "cs-cloud"
 
+// SessionPermissionBypass is the permission mode used for workflow-bound
+// conversation sessions. Workflow tasks run unattended, so nobody would
+// answer permission.asked prompts; sessions must not wait for approval.
+const SessionPermissionBypass = "bypassPermissions"
+
 // deregisterTimeout bounds the best-effort deregister call on Stop.
 const deregisterTimeout = 10 * time.Second
 
@@ -594,7 +599,7 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 		// a failed local session must not proceed to remote pin/bind, which
 		// would leave the task pointed at a session the frontend can't resolve.
 		env := d.runner.buildEnv(payload, worktree)
-		if err := d.deps.ConversationBinder.Bind(ctx, sessionID, worktree, env); err != nil {
+		if err := d.deps.ConversationBinder.Bind(ctx, sessionID, worktree, env, SessionPermissionBypass); err != nil {
 			return "", fmt.Errorf("bind local conversation session: %w", err)
 		}
 	}

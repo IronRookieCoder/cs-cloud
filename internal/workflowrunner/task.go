@@ -91,7 +91,7 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 	if tr.sessionRunner != nil {
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
-		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree))
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree), SessionPermissionBypass)
 	}
 
 	agentPath, err := exec.LookPath(payload.Agent)

@@ -8,17 +8,19 @@ import (
 
 // ConversationBinder creates a local conversation session for a workflow task
 // so the frontend conversation proxy can resolve it by the server chat
-// session ID.
+// session ID. permMode selects the session permission mode (e.g.
+// "bypassPermissions"); an empty string lets the backend pick its default.
 type ConversationBinder interface {
-	Bind(ctx context.Context, sessionID, cwd string, env []string) error
+	Bind(ctx context.Context, sessionID, cwd string, env []string, permMode string) error
 }
 
 // SessionRunner executes a workflow prompt inside an existing local
 // conversation session and returns the final text output. When implemented,
 // csc workflow tasks run in the bound session so the conversation page shows
-// the live run and can be taken over afterwards.
+// the live run and can be taken over afterwards. permMode is only used when
+// the session has to be created.
 type SessionRunner interface {
-	RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) ([]byte, error)
+	RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string, permMode string) ([]byte, error)
 }
 
 // SessionAborter stops a prompt running in an already-bound conversation

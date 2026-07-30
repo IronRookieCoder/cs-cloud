@@ -2,6 +2,7 @@ package csc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -259,7 +260,7 @@ func TestRunSessionReturnsTerminalErrorFromEventStream(t *testing.T) {
 		rawEndpoint: server.URL,
 		httpClient:  server.Client(),
 	}
-	_, err := agent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	_, err := agent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil, "")
 	if err == nil {
 		t.Fatal("expected terminal session error, got nil")
 	}
@@ -305,7 +306,7 @@ func TestRunSessionRejectsCompletedSessionWithoutAssistantOutput(t *testing.T) {
 		rawEndpoint: server.URL,
 		httpClient:  server.Client(),
 	}
-	_, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	_, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil, "")
 	if !errors.Is(err, agent.ErrEmptySessionOutput) {
 		t.Fatalf("RunSession error = %v, want ErrEmptySessionOutput", err)
 	}
@@ -367,7 +368,7 @@ func TestRunSessionWaitsThroughToolUseIdle(t *testing.T) {
 		rawEndpoint: server.URL,
 		httpClient:  server.Client(),
 	}
-	out, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	out, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil, "")
 	if err != nil {
 		t.Fatalf("RunSession: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestRunSessionReturnsNestedCSCMessageContent(t *testing.T) {
 		rawEndpoint: server.URL,
 		httpClient:  server.Client(),
 	}
-	out, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil)
+	out, err := cscAgent.RunSession(context.Background(), "session-1", t.TempDir(), "do thing", nil, "")
 	if err != nil {
 		t.Fatalf("RunSession: %v", err)
 	}
@@ -466,9 +467,59 @@ func TestCreateSessionFailsWhenWorkerStopsBeforeReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	err = agent.CreateSession(ctx, "session-1", t.TempDir(), nil)
+	err = agent.CreateSession(ctx, "session-1", t.TempDir(), nil, "")
 	if err == nil || !strings.Contains(err.Error(), "stopped before becoming ready") {
 		t.Fatalf("CreateSession error = %v, want stopped-before-ready error", err)
+	}
+}
+
+func TestCreateSessionPermissionMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		permMode  string
+		customEnv map[string]string
+		want      string
+	}{
+		{"explicit bypass", "bypassPermissions", nil, "bypassPermissions"},
+		{"explicit default", "default", nil, "default"},
+		{"explicit mode beats env override", "bypassPermissions", map[string]string{"ACP_PERMISSION_MODE": "default"}, "bypassPermissions"},
+		{"empty falls back to env bypass", "", map[string]string{"ACP_PERMISSION_MODE": "bypassPermissions"}, "bypassPermissions"},
+		{"empty falls back to env default", "", map[string]string{"ACP_PERMISSION_MODE": "default"}, "default"},
+		{"empty with unrecognized env falls back to default", "", map[string]string{"ACP_PERMISSION_MODE": "acceptEdits"}, "default"},
+		{"empty without env falls back to default", "", nil, "default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/session/session-1":
+					http.NotFound(w, r)
+				case r.Method == http.MethodPost && r.URL.Path == "/session":
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode /session body: %v", err)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"session_id":"session-1","status":"running","version":"1.0.0"}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			agent := &Agent{
+				endpoint:    server.URL,
+				rawEndpoint: server.URL,
+				httpClient:  server.Client(),
+				customEnv:   tc.customEnv,
+			}
+			if err := agent.CreateSession(context.Background(), "session-1", t.TempDir(), nil, tc.permMode); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if got := body["permission_mode"]; got != tc.want {
+				t.Fatalf("permission_mode = %v, want %s", got, tc.want)
+			}
+		})
 	}
 }
 
