@@ -148,6 +148,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 			logger.Error("proxy %s %s -> %s %d %s, body: %s", r.Method, r.URL.Path, targetAddr, resp.StatusCode, time.Since(start), body)
+		} else {
+			logger.Info("proxy %s %s -> %s %d %s", r.Method, r.URL.Path, targetAddr, resp.StatusCode, time.Since(start))
 		}
 		return nil
 	}
