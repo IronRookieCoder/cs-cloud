@@ -218,6 +218,19 @@ func TestInstallCSCAddons_PluginCommands(t *testing.T) {
 	}
 }
 
+func TestRunCSCCmdTreatsSuccessOutputWithUVAssertionAsSuccess(t *testing.T) {
+	bin, _ := fakeCSC(t)
+	workDir := t.TempDir()
+	t.Setenv("CSC_FAIL", "1")
+	t.Setenv("CSC_STDOUT", "正在更新市场: costrict-plugins...\n√ 成功更新市场: costrict-plugins\n")
+	t.Setenv("CSC_STDERR", "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 76")
+
+	err := runCSCCmd(context.Background(), bin, workDir, nil, "plugin", "marketplace", "update", "costrict-plugins")
+	if err != nil {
+		t.Fatalf("expected success output to win over post-command UV assertion, got %v", err)
+	}
+}
+
 func TestInstallCSCAddons_SkillCommands(t *testing.T) {
 	bin, record := fakeCSC(t)
 	workDir := t.TempDir()

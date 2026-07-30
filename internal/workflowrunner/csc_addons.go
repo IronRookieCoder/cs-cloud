@@ -157,6 +157,10 @@ func runCSCCmd(ctx context.Context, cscBin, workDir string, env []string, args .
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if cscCommandSucceeded(stdout.String()) && isUVHandleClosingAssertion(stderr.String()) {
+			logger.Warn("workflow: csc command returned success output but exited after UV assertion; treating as successful: args=%s err=%v", strings.Join(args, " "), err)
+			return nil
+		}
 		output := strings.TrimSpace(strings.Join([]string{
 			strings.TrimSpace(stdout.String()),
 			strings.TrimSpace(stderr.String()),
@@ -294,10 +298,18 @@ func cloudSkillInstallSucceeded(out string, install normalizedCloudSkillInstall)
 	return id != "" && (id == strings.TrimSpace(install.id) || id == target || result.Slug == target || result.TargetName == target)
 }
 
+func cscCommandSucceeded(out string) bool {
+	out = strings.TrimSpace(out)
+	return strings.Contains(out, "√") &&
+		(strings.Contains(strings.ToLower(out), "success") ||
+			strings.Contains(out, "成功") ||
+			strings.Contains(out, "已存在"))
+}
+
 func isUVHandleClosingAssertion(s string) bool {
 	return strings.Contains(s, "UV_HANDLE_CLOSING") &&
 		strings.Contains(s, "Assertion failed") &&
-		strings.Contains(s, "handle->flags")
+		strings.Contains(s, "handle")
 }
 
 // boundedOutput is a bytes.Buffer that caps captured output at limit bytes and
