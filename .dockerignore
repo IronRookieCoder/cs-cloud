@@ -1,0 +1,29 @@
+# Build artifacts / dev binaries shipped in repo root
+*.exe
+*.exe.old
+cs-cloud-1.2.28.exe
+cs-cloud-heartbeat.exe
+cs-cloud-ws-debug.exe
+test_compile.exe
+
+# Logs
+*.log
+serve-stdout.log
+test-stderr.log
+
+# Local build dirs (cs-binaries is consumed by the original Dockerfile, keep it)
+bin/
+dist/
+
+# Repo metadata & dev files
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+todo/
+serve-stdout.log
+
+# WSL/Windows junk
+*:Zone.Identifier

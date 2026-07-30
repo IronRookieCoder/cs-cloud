@@ -1,0 +1,113 @@
+# Bare localserver image: cs-cloud + csc, no cloud registration / login.
+# Exposes a fixed-port local control plane. Configure model backend via env.
+#
+# Build:
+#   docker build -f Dockerfile.localserver -t cs-cloud-localserver .
+#   docker build -f Dockerfile.localserver --build-arg CSC_VERSION=v4.2.16 -t cs-cloud-localserver .
+#
+# Run:
+#   docker run -p 8080:8080 \
+#     -e MODEL_BASE_URL=https://your-model-endpoint \
+#     -e MODEL_API_KEY=sk-xxx \
+#     -e MODEL_PROVIDER=anthropic \
+#     -v $PWD/workspace:/workspace \
+#     cs-cloud-localserver
+
+# ---------------------------------------------------------------------------
+# Stage 1: build cs-cloud (Go binary)
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS cs-cloud-builder
+
+WORKDIR /build
+
+RUN apk add --no-cache git
+
+# Use a reachable Go module proxy (default proxy.golang.org is unreachable from CN networks).
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Regenerate swagger docs (apidocs/ is gitignored, not present in checkout)
+RUN go install github.com/swaggo/swag/cmd/swag@latest && \
+    swag init -g cmd/cs-cloud/main.go -o internal/localserver/apidocs --parseDependency --parseInternal
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags "-s -w \
+    -X cs-cloud/internal/version.Version=${VERSION} \
+    -X cs-cloud/internal/version.Commit=${COMMIT} \
+    -X cs-cloud/internal/version.BuildTime=${BUILD_TIME}" \
+    -o cs-cloud ./cmd/cs-cloud
+
+# ---------------------------------------------------------------------------
+# Stage 2: copy pre-built csc dist/ artifacts (output of `bun run build` in
+# the csc source tree). No tarball / network fetch required.
+#
+# Before building this image:
+#   1. In the csc source tree: `bun install && SKIP_REVIEW_BUILTIN=1 bun run build`
+#   2. Copy the resulting dist/ into this repo: `cp -r <csc>/dist ./csc-dist/`
+# Or run scripts/docker-localserver-build.sh which does both steps.
+# ---------------------------------------------------------------------------
+FROM scratch AS csc-fetcher
+COPY csc-dist /csc-dist
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime image
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.source="https://github.com/XDfield/cs-cloud"
+LABEL org.opencontainers.image.description="cs-cloud localserver (bare, no cloud registration) with built-in csc agent"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates git tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install bun runtime. We COPY a pre-staged bun binary from the build
+# context as bun-linux-<TARGETARCH> (e.g. bun-linux-amd64 / bun-linux-arm64)
+# to avoid reaching github.com from inside the container.
+# scripts/docker-localserver-build.sh stages it — either reusing the host
+# bun when the arch matches, or downloading the matching arch otherwise.
+ARG TARGETARCH=amd64
+COPY bun-linux-${TARGETARCH} /usr/local/bin/bun
+RUN chmod +x /usr/local/bin/bun && bun --version
+
+# Install csc: dist/ artifacts + a /usr/local/bin/csc wrapper that runs
+# dist/cli-bun.js under bun.
+COPY --from=csc-fetcher /csc-dist /usr/local/lib/csc/dist
+RUN printf '#!/bin/sh\nexec /usr/local/bin/bun /usr/local/lib/csc/dist/cli.js "$@"\n' > /usr/local/bin/csc \
+    && chmod +x /usr/local/bin/csc
+
+# Install cs-cloud binary
+COPY --from=cs-cloud-builder /build/cs-cloud /usr/local/bin/cs-cloud
+RUN chmod +x /usr/local/bin/cs-cloud
+
+# Default runtime directories
+RUN mkdir -p /root/.costrict/share /root/.costrict/cs-cloud /workspace
+
+# Default env: bare localserver, no cloud, no auto-upgrade, fixed port.
+ENV PATH="/usr/local/bin:${PATH}" \
+    COSTRICT_SHARE_DIR=/root/.costrict/share \
+    CS_CLOUD_AGENT_PATH=/usr/local/bin/csc \
+    CS_CLOUD_AUTO_UPGRADE=false \
+    CS_CLOUD_PORT=8080 \
+    CS_CLOUD_HOST=0.0.0.0 \
+    MODEL_PROVIDER=anthropic \
+    BYPASS_PERMISSIONS=1
+
+COPY scripts/docker-localserver-entrypoint.sh /usr/local/bin/docker-localserver-entrypoint
+RUN chmod +x /usr/local/bin/docker-localserver-entrypoint
+
+WORKDIR /workspace
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/bin/tini", "--", "docker-localserver-entrypoint"]

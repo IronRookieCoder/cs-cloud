@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,8 +30,18 @@ func NewInputWsHandler(mgr *TerminalManager) *InputWsHandler {
 }
 
 func (h *InputWsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Terminal input is a sensitive sink (raw bytes written into a PTY), so
+	// reject non-localhost Origin. The previous OriginPatterns: ["*"] let any
+	// website the victim visits open a WebSocket against their localserver
+	// and inject shell commands. Browsers always send Origin on cross-origin
+	// WS handshakes, so a missing Origin (non-browser clients) is allowed.
+	if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostWsOrigin(origin) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		OriginPatterns: []string{"localhost", "127.0.0.1", "::1"},
 	})
 	if err != nil {
 		logger.Error("terminal: ws accept error: %v", err)
@@ -138,6 +150,18 @@ func (c *inputWsConn) sendPong() {
 	defer cancel()
 
 	wsjson.Write(ctx, c.conn, wsControlMsg{Type: "po", Version: 1})
+}
+
+// isLocalhostWsOrigin reports whether the WebSocket request Origin is a
+// localhost variant (http://localhost, http://127.0.0.1, or http://[::1] on
+// any port).
+func isLocalhostWsOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func (c *inputWsConn) pingLoop() {
