@@ -121,7 +121,8 @@ func New(opts ...Option) *Server {
 
 	mux := http.NewServeMux()
 	api := http.NewServeMux()
-	mux.Handle("/api/v1/", corsMiddleware(http.StripPrefix("/api/v1", api)))
+	apiAuth := authMiddleware(apiKeyFromConfig(s.cfg))
+	mux.Handle("/api/v1/", corsMiddleware(apiAuth(http.StripPrefix("/api/v1", api))))
 
 	// CORS-friendly 404 for paths outside /api/v1/ (e.g. wrong baseUrl)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +237,15 @@ type Option func(*Server)
 
 func WithVersion(v string) Option {
 	return func(s *Server) { s.version = v }
+}
+
+// apiKeyFromConfig pulls the optional shared request key from the configured
+// Config. Empty string means "no auth" (the default).
+func apiKeyFromConfig(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.APIKey
 }
 
 func WithRuntimeConfig(cfg config.RuntimeConfig) Option {

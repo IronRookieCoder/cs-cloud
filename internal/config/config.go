@@ -18,6 +18,7 @@ type Config struct {
 	IdleBufferSeconds       int               `json:"idle_buffer_seconds"`
 	Runtime                 RuntimeConfig     `json:"runtime"`
 	Workflow                workflow.Config   `json:"workflow"`
+	APIKey                  string            `json:"api_key,omitempty"`
 }
 
 type RuntimeConfig struct {

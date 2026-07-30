@@ -153,8 +153,7 @@ goreleaser release --snapshot --clean
 |------|------|
 | `COSTRICT_CLOUD_BASE_URL` | 强制指定云端基址 |
 | `COSTRICT_BASE_URL` | 平台基址（次优先） |
-| `CS_CLOUD_AGENT_CLI` | 自定义 agent CLI 路径 |
-| `CS_CLOUD_AGENT_PATH` | 多 agent 路径（自动派生命令） |
+| `CS_BRIDGE_AGENT_PATH` | 多 agent 路径（自动派生命令）；旧名 `CS_CLOUD_AGENT_PATH` 仍兼容 |
 | `CSC_CLOUD_INVOKER` | 标识调用来源（cloud / cli） |
 
 ---

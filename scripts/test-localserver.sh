@@ -27,7 +27,7 @@
 #     scripts/test-localserver.sh
 #
 #   # 直接覆盖整包（绕过 entrypoint 的 L1 翻译）
-#   EXTRA_ENV='-e CS_CLOUD_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o"}' \
+#   EXTRA_ENV='-e CS_BRIDGE_AGENT_ENV={"OPENAI_BASE_URL":"https://api.openai.com/v1","OPENAI_API_KEY":"sk-xxx","OPENAI_DEFAULT_SONNET_MODEL":"gpt-4o"}' \
 #     scripts/test-localserver.sh
 set -euo pipefail
 
