@@ -365,6 +365,9 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		deliverableSummary(payload.Deliverables),
 		envKeySummary(payload.Env),
 		pluginName(payload.Plugin), len(payload.CloudSkills), payload.PriorSessionID != "")
+	if len(payload.Repos) > 0 {
+		logger.Info("workflow: task %s repo downloads expected: %s", payload.TaskID, repoSummary(payload.Repos, payload.RepoURL))
+	}
 
 	// Install the agent's configured plugin and cloud skills into the task
 	// workdir before the csc session runs. csc resolves plugins (-s local) and
@@ -413,6 +416,14 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// terminal TTLs anchor on when the task actually ended (covers both the
 	// success and run-err paths below).
 	writeGCMetaForTask(worktree, payload, time.Now().UTC())
+	if observations := observeRepoDownloads(worktree, payload.Repos); len(observations) > 0 {
+		summary := repoDownloadObservationSummary(observations)
+		if repoDownloadObservationHasMissing(observations) {
+			logger.Warn("workflow: task %s repo downloads observed: %s", payload.TaskID, summary)
+		} else {
+			logger.Info("workflow: task %s repo downloads observed: %s", payload.TaskID, summary)
+		}
+	}
 	if runErr != nil {
 		var taskErr error
 		if d.aborted(payload.TaskID) {
