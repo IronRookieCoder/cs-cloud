@@ -15,12 +15,16 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
 	t.Setenv("CS_CLOUD_TASK_ID", "parent-task")
 	tr := &TaskRunner{}
+	tr.SetAgentEnv(map[string]string{
+		"COSTRICT_BASE_URL": "https://catalog.example.test",
+		"CUSTOM_VAR":        "agent-value",
+	})
 	env := tr.buildEnv(workflow.TaskRunPayload{
 		WorkspaceID: "ws-1",
 		TaskID:      "task-1",
 		Agent:       "claude",
 		Env: map[string]string{
-			"CUSTOM_VAR":      "custom-value",
+			"CUSTOM_VAR":       "custom-value",
 			"CS_CLOUD_TASK_ID": "override-task",
 		},
 	}, "/tmp/ws")
@@ -43,6 +47,9 @@ func TestTaskRunnerBuildEnv(t *testing.T) {
 	}
 	if got["CUSTOM_VAR"] != "custom-value" {
 		t.Fatalf("CUSTOM_VAR = %q", got["CUSTOM_VAR"])
+	}
+	if got["COSTRICT_BASE_URL"] != "https://catalog.example.test" {
+		t.Fatalf("COSTRICT_BASE_URL = %q", got["COSTRICT_BASE_URL"])
 	}
 	if got["PATH"] != "/usr/local/bin:/usr/bin" {
 		t.Fatalf("PATH not inherited: %q", got["PATH"])
@@ -154,7 +161,7 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 		Prompt:      "do thing",
 		Env: map[string]string{
 			"FAKE_AGENT_PRINT_ENV": "CS_CLOUD_NODE_RUN_ID",
-			"CS_CLOUD_NODE_RUN_ID":  "nr-env",
+			"CS_CLOUD_NODE_RUN_ID": "nr-env",
 		},
 	}, t.TempDir(), "session-1")
 	if err != nil {

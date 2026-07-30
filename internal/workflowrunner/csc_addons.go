@@ -22,11 +22,11 @@ import (
 // multica's execenv.Prepare does it for the local daemon.
 
 const (
-	cscCmdTimeout        = 120 * time.Second
-	cscSkillCmdTimeout   = 120 * time.Second
-	cscSkillOutputLimit  = 4 * 1024
-	maxCloudSkillCount   = 20
-	maxCloudSkillTarget  = 200
+	cscCmdTimeout       = 120 * time.Second
+	cscSkillCmdTimeout  = 120 * time.Second
+	cscSkillOutputLimit = 4 * 1024
+	maxCloudSkillCount  = 20
+	maxCloudSkillTarget = 200
 )
 
 // Built-in github defaults for the CSC plugin marketplace. Used only when the
@@ -46,7 +46,7 @@ var (
 // workdir. It is a no-op when the payload carries neither. Failures are
 // fail-closed (returned) — like multica, a configured plugin/skill that cannot
 // install means the task cannot run meaningfully.
-func installCSCAddons(ctx context.Context, cscBin, workDir string, payload workflow.TaskRunPayload) error {
+func installCSCAddons(ctx context.Context, cscBin, workDir string, payload workflow.TaskRunPayload, env []string) error {
 	if cscBin == "" {
 		// Nothing to install with; the caller (Driver.execute) only reaches here
 		// after Prepare resolved the csc binary, so this is defensive.
@@ -56,12 +56,12 @@ func installCSCAddons(ctx context.Context, cscBin, workDir string, payload workf
 		return fmt.Errorf("csc addon install requires a csc binary")
 	}
 	if payload.Plugin != nil {
-		if err := setupCSCPlugins(ctx, cscBin, workDir, payload.Plugin); err != nil {
+		if err := setupCSCPlugins(ctx, cscBin, workDir, payload.Plugin, env); err != nil {
 			return err
 		}
 	}
 	if len(payload.CloudSkills) > 0 {
-		if err := setupCSCSkills(ctx, cscBin, workDir, payload.CloudSkills); err != nil {
+		if err := setupCSCSkills(ctx, cscBin, workDir, payload.CloudSkills, env); err != nil {
 			return err
 		}
 	}
@@ -77,7 +77,7 @@ func installCSCAddons(ctx context.Context, cscBin, workDir string, payload workf
 //
 // All commands run with cmd.Dir = workDir (CSC uses cwd + scope, not --dir).
 // marketplace add failure is non-fatal: the marketplace may already be registered.
-func setupCSCPlugins(ctx context.Context, cscBin, workDir string, plugin *workflow.PluginSpec) error {
+func setupCSCPlugins(ctx context.Context, cscBin, workDir string, plugin *workflow.PluginSpec, env []string) error {
 	if plugin == nil || plugin.Install == nil {
 		return nil
 	}
@@ -96,23 +96,23 @@ func setupCSCPlugins(ctx context.Context, cscBin, workDir string, plugin *workfl
 		install.PluginName, name, repo, workDir)
 
 	// Step 1: marketplace add (non-fatal — may already be registered).
-	if err := runCSCCmd(ctx, cscBin, workDir, "plugin", "marketplace", "add", repo); err != nil {
+	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "marketplace", "add", repo); err != nil {
 		logger.Warn("workflow: csc plugin marketplace add failed (non-fatal): repo=%s err=%v", repo, err)
 	}
 
 	// Step 2: marketplace update.
-	if err := runCSCCmd(ctx, cscBin, workDir, "plugin", "marketplace", "update", name); err != nil {
+	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "marketplace", "update", name); err != nil {
 		return fmt.Errorf("csc plugin marketplace update %s: %w", name, err)
 	}
 
 	// Step 3: install with local scope.
 	spec := install.PluginName + "@" + name
-	if err := runCSCCmd(ctx, cscBin, workDir, "plugin", "install", spec, "-s", "local"); err != nil {
+	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "install", spec, "-s", "local"); err != nil {
 		return fmt.Errorf("csc plugin install %s: %w", spec, err)
 	}
 
 	// Step 4: update installed plugin.
-	if err := runCSCCmd(ctx, cscBin, workDir, "plugin", "update", spec, "-s", "local"); err != nil {
+	if err := runCSCCmd(ctx, cscBin, workDir, env, "plugin", "update", spec, "-s", "local"); err != nil {
 		return fmt.Errorf("csc plugin update %s: %w", spec, err)
 	}
 
@@ -122,13 +122,13 @@ func setupCSCPlugins(ctx context.Context, cscBin, workDir string, plugin *workfl
 
 // setupCSCSkills installs each cloud skill binding via
 // `csc skill install <target> --scope project --force --json` in the task workdir.
-func setupCSCSkills(ctx context.Context, cscBin, workDir string, skills []workflow.CloudSkillInstall) error {
+func setupCSCSkills(ctx context.Context, cscBin, workDir string, skills []workflow.CloudSkillInstall, env []string) error {
 	installs, err := normalizeCloudSkillInstalls(skills)
 	if err != nil {
 		return err
 	}
 	for _, install := range installs {
-		if err := installCloudSkill(ctx, cscBin, workDir, install); err != nil {
+		if err := installCloudSkill(ctx, cscBin, workDir, install, env); err != nil {
 			return err
 		}
 	}
@@ -138,11 +138,14 @@ func setupCSCSkills(ctx context.Context, cscBin, workDir string, skills []workfl
 // runCSCCmd executes a csc CLI command with cmd.Dir = workDir and a bounded
 // timeout. Captures stdout+stderr into the returned error for diagnostics.
 // Ported from multica's execenv.runCSCCmd.
-func runCSCCmd(ctx context.Context, cscBin, workDir string, args ...string) error {
+func runCSCCmd(ctx context.Context, cscBin, workDir string, env []string, args ...string) error {
 	cmdCtx, cancel := context.WithTimeout(ctx, cscCmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, cscBin, args...)
 	cmd.Dir = workDir
+	if len(env) > 0 {
+		cmd.Env = env
+	}
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -221,7 +224,7 @@ func firstNonEmptyTrimmed(values ...string) string {
 // installCloudSkill runs `csc skill install <target> --scope project --force --json`
 // in the task workdir with bounded output capture. Ported from multica's
 // execenv.installCloudSkill.
-func installCloudSkill(ctx context.Context, cscBin, workDir string, install normalizedCloudSkillInstall) error {
+func installCloudSkill(ctx context.Context, cscBin, workDir string, install normalizedCloudSkillInstall, env []string) error {
 	logger.Info("workflow: installing csc skill: target=%s id=%s workdir=%s", install.target, install.id, workDir)
 
 	installCtx, cancel := context.WithTimeout(ctx, cscSkillCmdTimeout)
@@ -229,6 +232,9 @@ func installCloudSkill(ctx context.Context, cscBin, workDir string, install norm
 	cmd := exec.CommandContext(installCtx, cscBin,
 		"skill", "install", install.target, "--scope", "project", "--force", "--json")
 	cmd.Dir = workDir
+	if len(env) > 0 {
+		cmd.Env = env
+	}
 	stdout := &boundedOutput{limit: cscSkillOutputLimit}
 	stderr := &boundedOutput{limit: cscSkillOutputLimit}
 	cmd.Stdout = stdout
@@ -242,7 +248,10 @@ func installCloudSkill(ctx context.Context, cscBin, workDir string, install norm
 	if ctxErr := installCtx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
-	detail := strings.TrimSpace(stderr.String())
+	detail := strings.TrimSpace(strings.Join([]string{
+		strings.TrimSpace(stdout.String()),
+		strings.TrimSpace(stderr.String()),
+	}, "\n"))
 	if detail != "" {
 		detail = ": " + detail
 	}

@@ -33,6 +33,10 @@ type Dependencies struct {
 	BackendBaseURL string
 	UserBaseURL    string
 	TokenProvider  func() (*provider.Credentials, error)
+	// AgentEnv is the environment configured for the managed agent process.
+	// Workflow addon installation must use the same values because csc skill
+	// and plugin commands resolve cloud/catalog endpoints from env too.
+	AgentEnv map[string]string
 	// DeviceID resolves the CoStrict Gateway device_id this daemon runs as.
 	// It is used as the daemon_id when registering with the server. When nil,
 	// daemon registration is disabled (the driver still runs tasks pushed

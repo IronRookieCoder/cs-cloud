@@ -15,7 +15,8 @@ import (
 // the production setupCSCPlugins path against the local marketplace mirror.
 // Gated by CS_CLOUD_E2E=1 + CSC_BIN on PATH — a one-off local verification, not
 // part of the normal suite. Run with:
-//   CSC_CLOUD_E2E=1 go test ./internal/workflowrunner/ -run Integration_RealCSC -count=1 -v
+//
+//	CSC_CLOUD_E2E=1 go test ./internal/workflowrunner/ -run Integration_RealCSC -count=1 -v
 func TestIntegration_SetupCSCPlugins_RealCSC(t *testing.T) {
 	if os.Getenv("CSC_CLOUD_E2E") != "1" {
 		t.Skip("set CSC_CLOUD_E2E=1 to run the real-csc integration test")
@@ -40,7 +41,7 @@ func TestIntegration_SetupCSCPlugins_RealCSC(t *testing.T) {
 			MarketplaceRepo: marketplaceRepo,
 		},
 	}
-	if err := setupCSCPlugins(context.Background(), cscBin, workDir, plugin); err != nil {
+	if err := setupCSCPlugins(context.Background(), cscBin, workDir, plugin, nil); err != nil {
 		t.Fatalf("setupCSCPlugins with real csc failed: %v", err)
 	}
 

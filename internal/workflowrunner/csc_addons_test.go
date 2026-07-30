@@ -45,6 +45,27 @@ func TestNormalizeCloudSkillInstalls(t *testing.T) {
 		}
 	})
 
+	t.Run("uuid metadata wins over slug", func(t *testing.T) {
+		u := "12345678-1234-1234-1234-1234567890ab"
+		got, err := normalizeCloudSkillInstalls([]workflow.CloudSkillInstall{
+			{
+				ID:   u,
+				Slug: "code-review",
+				Install: &workflow.CloudSkillInstallSpec{
+					Method:  "csc",
+					Spec:    u,
+					SkillID: u,
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0].target != u {
+			t.Fatalf("got %q", got[0].target)
+		}
+	})
+
 	t.Run("unsupported method rejected", func(t *testing.T) {
 		if _, err := normalizeCloudSkillInstalls([]workflow.CloudSkillInstall{
 			mk("a", "s", "npm", "s"),
@@ -123,8 +144,19 @@ func main() {
 		f, err := os.OpenFile(rec, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err == nil {
 			f.WriteString(wd + "\x1f" + strings.Join(os.Args[1:], "\x1f") + "\n")
+			for _, key := range strings.Split(os.Getenv("CSC_RECORD_ENV_KEYS"), ",") {
+				if key != "" {
+					f.WriteString("env\x1f" + key + "\x1f" + os.Getenv(key) + "\n")
+				}
+			}
 			f.Close()
 		}
+	}
+	if out := os.Getenv("CSC_STDOUT"); out != "" {
+		os.Stdout.WriteString(out)
+	}
+	if errOut := os.Getenv("CSC_STDERR"); errOut != "" {
+		os.Stderr.WriteString(errOut)
 	}
 	if os.Getenv("CSC_FAIL") == "1" {
 		os.Exit(1)
@@ -161,7 +193,7 @@ func TestInstallCSCAddons_PluginCommands(t *testing.T) {
 			},
 		},
 	}
-	if err := installCSCAddons(context.Background(), bin, workDir, payload); err != nil {
+	if err := installCSCAddons(context.Background(), bin, workDir, payload, nil); err != nil {
 		t.Fatalf("installCSCAddons: %v", err)
 	}
 
@@ -197,7 +229,7 @@ func TestInstallCSCAddons_SkillCommands(t *testing.T) {
 			{ID: "id-2", Slug: "plan", Install: &workflow.CloudSkillInstallSpec{Method: "csc", Spec: "plan"}},
 		},
 	}
-	if err := installCSCAddons(context.Background(), bin, workDir, payload); err != nil {
+	if err := installCSCAddons(context.Background(), bin, workDir, payload, nil); err != nil {
 		t.Fatalf("installCSCAddons: %v", err)
 	}
 
@@ -217,13 +249,42 @@ func TestInstallCSCAddons_SkillCommands(t *testing.T) {
 	}
 }
 
+func TestInstallCSCAddons_PassesAgentEnvToSkillInstall(t *testing.T) {
+	bin, record := fakeCSC(t)
+	workDir := t.TempDir()
+	t.Setenv("CSC_RECORD_FILE", record)
+	t.Setenv("CSC_RECORD_ENV_KEYS", "COSTRICT_BASE_URL")
+
+	payload := workflow.TaskRunPayload{
+		CloudSkills: []workflow.CloudSkillInstall{
+			{
+				ID:   "83c97a47-dee8-4cf7-afd3-5153673f17d9",
+				Slug: "code-review",
+				Install: &workflow.CloudSkillInstallSpec{
+					Method:  "csc",
+					SkillID: "83c97a47-dee8-4cf7-afd3-5153673f17d9",
+				},
+			},
+		},
+	}
+	env := setEnv(os.Environ(), "COSTRICT_BASE_URL", "https://catalog.example.test")
+	if err := installCSCAddons(context.Background(), bin, workDir, payload, env); err != nil {
+		t.Fatalf("installCSCAddons: %v", err)
+	}
+
+	data, _ := os.ReadFile(record)
+	if !strings.Contains(string(data), "env\x1fCOSTRICT_BASE_URL\x1fhttps://catalog.example.test") {
+		t.Fatalf("install did not receive COSTRICT_BASE_URL env:\n%s", data)
+	}
+}
+
 func TestInstallCSCAddons_NoopWhenEmpty(t *testing.T) {
 	bin, record := fakeCSC(t)
 	workDir := t.TempDir()
 	t.Setenv("CSC_RECORD_FILE", record)
 
 	// no plugin, no skills → no calls, no error
-	if err := installCSCAddons(context.Background(), bin, workDir, workflow.TaskRunPayload{}); err != nil {
+	if err := installCSCAddons(context.Background(), bin, workDir, workflow.TaskRunPayload{}, nil); err != nil {
 		t.Fatalf("installCSCAddons: %v", err)
 	}
 	if _, err := os.Stat(record); err == nil {
@@ -244,7 +305,27 @@ func TestInstallCSCAddons_PluginInstallFailureFails(t *testing.T) {
 			Install: &workflow.PluginInstallSpec{PluginName: "p", MarketplaceName: "mp", MarketplaceRepo: "https://x/y.git"},
 		},
 	}
-	if err := installCSCAddons(context.Background(), bin, workDir, payload); err == nil {
+	if err := installCSCAddons(context.Background(), bin, workDir, payload, nil); err == nil {
 		t.Fatal("expected install to fail when csc exits non-zero on a fatal step")
+	}
+}
+
+func TestInstallCloudSkillFailureIncludesStdoutAndStderr(t *testing.T) {
+	bin, _ := fakeCSC(t)
+	workDir := t.TempDir()
+	t.Setenv("CSC_FAIL", "1")
+	t.Setenv("CSC_STDOUT", "remote skill not found")
+	t.Setenv("CSC_STDERR", "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)")
+
+	err := installCloudSkill(context.Background(), bin, workDir, normalizedCloudSkillInstall{
+		id:     "skill-id",
+		target: "code-review",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected install failure")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "remote skill not found") || !strings.Contains(msg, "UV_HANDLE_CLOSING") {
+		t.Fatalf("error missing combined output: %v", err)
 	}
 }

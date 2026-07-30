@@ -38,6 +38,7 @@ type TaskRunner struct {
 	agentTimeout     time.Duration
 	allowedAgents    []string
 	sessionRunner    SessionRunner
+	agentEnv         map[string]string
 	// serverBaseURL + tokenProvider let buildEnv inject CS_CLOUD_BACKEND_URL +
 	// CS_CLOUD_TOKEN so task-invoked CLIs (e.g. `cs-cloud gitea submit`)
 	// can call the server's daemon-auth API. Set via SetServerEndpoint.
@@ -59,6 +60,12 @@ func NewTaskRunner(wm *WorkspaceManager, timeout time.Duration, allowedAgents []
 func (tr *TaskRunner) SetServerEndpoint(baseURL string, tp func() (*provider.Credentials, error)) {
 	tr.serverBaseURL = baseURL
 	tr.tokenProvider = tp
+}
+
+// SetAgentEnv injects the daemon-level agent environment. It is applied before
+// task payload env so per-task values can still override it.
+func (tr *TaskRunner) SetAgentEnv(env map[string]string) {
+	tr.agentEnv = env
 }
 
 // SetSessionRunner injects a runner that executes prompts inside an already
@@ -180,6 +187,9 @@ func (tr *TaskRunner) validateAgent(agent string) error {
 
 func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string) []string {
 	env := os.Environ()
+	for k, v := range tr.agentEnv {
+		env = setEnv(env, k, v)
+	}
 	for k, v := range payload.Env {
 		env = setEnv(env, k, v)
 	}

@@ -128,6 +128,9 @@ func (d *Driver) Start() error {
 		logger.Info("workflow: gc disabled")
 	}
 	d.runner = NewTaskRunner(d.workspaceManager, d.cfg.AgentTimeout, d.cfg.AllowedAgents)
+	if d.deps != nil && d.deps.AgentEnv != nil {
+		d.runner.SetAgentEnv(d.deps.AgentEnv)
+	}
 	if d.deps != nil && d.deps.SessionRunner != nil {
 		d.runner.SetSessionRunner(d.deps.SessionRunner)
 	}
@@ -369,7 +372,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// workdir, so installed addons become visible to the run. Fail-closed: a
 	// configured addon that cannot install means the task cannot run
 	// meaningfully (mirrors multica's execenv.Prepare).
-	if err := installCSCAddons(ctx, agentPath, worktree, payload); err != nil {
+	if err := installCSCAddons(ctx, agentPath, worktree, payload, d.runner.buildEnv(payload, worktree)); err != nil {
 		return d.failTask(payload.TaskID, err, "addon_install_failed")
 	}
 

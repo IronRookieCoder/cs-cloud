@@ -51,6 +51,7 @@ func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
 		BackendBaseURL: a.cfg.Workflow.BackendBaseURL,
 		UserBaseURL:    a.cfg.Workflow.BackendBaseURL,
 		TokenProvider:  a.workflowTokenProvider(),
+		AgentEnv:       a.cfg.AgentEnv,
 		DeviceID: func() (string, error) {
 			dev, err := a.Device()
 			if err != nil {
