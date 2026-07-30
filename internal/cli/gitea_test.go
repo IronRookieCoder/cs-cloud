@@ -1,11 +1,18 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -25,6 +32,8 @@ type fakeGitOps struct {
 	pushCalls         []struct{ dir, authURL, branch string }
 	currentBranchDirs []string
 	currentBranch     string // value returned by CurrentBranch
+	hasChanges        *bool  // nil → assume changes present (keeps existing happy-path tests green)
+	hasChangesDirs    []string
 }
 
 func (f *fakeGitOps) Clone(authURL, branch, dir string) error {
@@ -50,6 +59,13 @@ func (f *fakeGitOps) Push(dir, authURL, branch string) error {
 func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 	f.currentBranchDirs = append(f.currentBranchDirs, dir)
 	return f.currentBranch, nil
+}
+func (f *fakeGitOps) HasChanges(dir string) (bool, error) {
+	f.hasChangesDirs = append(f.hasChangesDirs, dir)
+	if f.hasChanges != nil {
+		return *f.hasChanges, nil
+	}
+	return true, nil
 }
 
 // TestSubmitDeliverable_HappyPath wires a fake git + httptest Gitea + httptest
@@ -370,6 +386,150 @@ func TestInjectTokenIntoURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeGiteaBase(t *testing.T) {
+	cases := []struct {
+		name              string
+		base, owner, repo string
+		want              string
+	}{
+		{"server root", "https://gitea.test", "t-aaa", "wf-bbb", "https://gitea.test"},
+		{"repo web url stripped", "https://gitea.test/t-aaa/wf-bbb", "t-aaa", "wf-bbb", "https://gitea.test"},
+		{"repo git url stripped", "https://gitea.test/t-aaa/wf-bbb.git", "t-aaa", "wf-bbb", "https://gitea.test"},
+		{"repo url with port and trailing slash", "https://zgsmtest.xyz:30443/t-ad9d561c/wf-deliverable-archive/", "t-ad9d561c", "wf-deliverable-archive", "https://zgsmtest.xyz:30443"},
+		{"unrelated repo suffix not stripped", "https://gitea.test/t-aaa/wf-bbb-extra", "t-aaa", "wf-bbb", "https://gitea.test/t-aaa/wf-bbb-extra"},
+		{"server path prefix preserved", "https://corp.example/gitea/t-aaa/wf-bbb", "t-aaa", "wf-bbb", "https://corp.example/gitea"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := normalizeGiteaBase(c.base, c.owner, c.repo); got != c.want {
+				t.Errorf("normalizeGiteaBase(%q,%q,%q) = %q, want %q", c.base, c.owner, c.repo, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOpenGiteaPR_NormalizesRepoPathBase reproduces the zgsmtest incident:
+// CS_CLOUD_GITEA_BASE_URL carried the /<owner>/<repo> repo path, so the PR POST
+// went to /<owner>/<repo>/api/v1/repos/<owner>/<repo>/pulls and Gitea 404'd.
+// openGiteaPR must normalize the base to the server root before appending the
+// API path.
+func TestOpenGiteaPR_NormalizesRepoPathBase(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method == http.MethodPost && gotPath == "/api/v1/repos/t-aaa/wf-bbb/pulls" {
+			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// base deliberately carries the repo path, as the misconfigured deploy did.
+	prURL, err := openGiteaPR(context.Background(), srv.URL+"/t-aaa/wf-bbb", "tok", "t-aaa", "wf-bbb", "node/x", "inst-y", "d1")
+	if err != nil {
+		t.Fatalf("openGiteaPR: %v (gotPath=%q)", err, gotPath)
+	}
+	if gotPath != "/api/v1/repos/t-aaa/wf-bbb/pulls" {
+		t.Fatalf("request path = %q, want /api/v1/repos/t-aaa/wf-bbb/pulls (base not normalized)", gotPath)
+	}
+	if prURL != "https://gitea.test/t-aaa/wf-bbb/pulls/9" {
+		t.Errorf("prURL = %q, want html_url", prURL)
+	}
+}
+
+// TestSubmitDeliverable_SkipsCommitWhenClean reproduces the re-run incident:
+// the document was already committed (byte-identical), so `git commit` would
+// exit 1 and abort the whole pipeline. submit must detect the clean tree,
+// skip commit, and still push / open PR / report so the command is idempotent.
+func TestSubmitDeliverable_SkipsCommitWhenClean(t *testing.T) {
+	var reportedURL string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit" {
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			reportedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			jsonResponse(w, 201, map[string]any{"number": 7, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/7"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	t.Chdir(t.TempDir())
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+
+	noChanges := false
+	fake := &fakeGitOps{currentBranch: "node/dd", hasChanges: &noChanges}
+	if err := submitDeliverable(submitConfig{
+		giteaBaseOverride: giteaSrv.URL,
+		deliverableID:     "d1",
+		filePath:          tempFile(t, "body"),
+		gitOps:            fake,
+	}); err != nil {
+		t.Fatalf("submitDeliverable: %v", err)
+	}
+	if len(fake.commitMsgs) != 0 {
+		t.Errorf("expected NO commit when working tree is clean, got %+v", fake.commitMsgs)
+	}
+	if len(fake.pushCalls) != 1 {
+		t.Errorf("expected push to still run, got %+v", fake.pushCalls)
+	}
+	if reportedURL == "" {
+		t.Error("expected PR to be reported to backend despite clean tree")
+	}
+}
+
+// TestOpenGiteaPR_AlreadyExistsReturnsExistingURL covers the re-run case where
+// the PR was already opened (e.g. by a previous successful run). Gitea returns
+// 409 on the POST; openGiteaPR must look up the existing open PR and return its
+// html_url instead of erroring, so reporting still proceeds.
+func TestOpenGiteaPR_AlreadyExistsReturnsExistingURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			jsonResponse(w, 409, map[string]any{"message": "pull request already exists for these targets"})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
+			jsonResponse(w, 200, []map[string]any{{
+				"number":   6,
+				"html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/6",
+				"head":     map[string]any{"ref": "node/x"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	prURL, err := openGiteaPR(context.Background(), srv.URL, "tok", "t-aaa", "wf-bbb", "node/x", "inst-y", "d1")
+	if err != nil {
+		t.Fatalf("openGiteaPR: %v", err)
+	}
+	if prURL != "https://gitea.test/t-aaa/wf-bbb/pulls/6" {
+		t.Errorf("prURL = %q, want existing PR html_url", prURL)
+	}
+}
+
 func jsonResponse(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -385,4 +545,210 @@ func tempFile(t *testing.T, content string) string {
 	_, _ = f.WriteString(content)
 	_ = f.Close()
 	return f.Name()
+}
+
+// TestExecGitOps_CommitIsIdempotent drives the PRODUCTION execGitOps against a
+// real git repository. The submit-flow tests above use fakeGitOps (which cannot
+// reproduce `git commit` exiting 1 on a clean tree); this proves RC2's real-git
+// behavior: an identical re-write leaves the tree clean so the caller skips
+// commit, and a genuine change is detected + committed.
+func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@test"},
+		{"config", "user.name", "t"},
+	} {
+		c := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Skipf("git setup failed (%v): %s", err, out)
+		}
+	}
+	var ops execGitOps
+	write := func(content string) {
+		t.Helper()
+		if err := ops.WriteFile(repo, "nodes/d1.md", []byte(content)); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	dirty := func(want bool) {
+		t.Helper()
+		got, err := ops.HasChanges(repo)
+		if err != nil {
+			t.Fatalf("HasChanges: %v", err)
+		}
+		if got != want {
+			t.Fatalf("HasChanges = %v, want %v", got, want)
+		}
+	}
+
+	write("body") // new file → dirty
+	dirty(true)
+	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+		t.Fatalf("Commit #1: %v", err)
+	}
+	dirty(false)
+
+	write("body") // identical re-write → still clean (RC2: caller skips commit)
+	dirty(false)
+
+	write("body-v2") // real change → dirty again
+	dirty(true)
+	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+		t.Fatalf("Commit #2: %v", err)
+	}
+	dirty(false)
+}
+
+// gitRun runs git -C dir and fails the test on error.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+}
+
+// serveGitHTTP serves a local bare-repo "platform Gitea" via `git http-backend`
+// so cs-cloud's real `git push` (over an http:// URL with the token embedded by
+// injectTokenIntoURL) lands in a real repository.
+func serveGitHTTP(t *testing.T, root string, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cmd := exec.Command("git", "http-backend")
+	cmd.Env = []string{
+		"GIT_PROJECT_ROOT=" + root,
+		"GIT_HTTP_EXPORT_ALL=1",
+		"PATH_INFO=" + r.URL.Path,
+		"REQUEST_METHOD=" + r.Method,
+		"QUERY_STRING=" + r.URL.RawQuery,
+		"CONTENT_TYPE=" + r.Header.Get("Content-Type"),
+		"CONTENT_LENGTH=" + strconv.Itoa(len(body)),
+		"GATEWAY_INTERFACE=CGI/1.1",
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+	}
+	cmd.Stdin = bytes.NewReader(body)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		http.Error(w, "git http-backend: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rdr := bufio.NewReader(bytes.NewReader(out.Bytes()))
+	status := http.StatusOK
+	for {
+		line, err := rdr.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if strings.HasPrefix(line, "Status:") {
+			fmt.Sscanf(strings.TrimPrefix(line, "Status:"), "%d", &status)
+		} else if i := strings.Index(line, ":"); i > 0 {
+			w.Header().Set(line[:i], strings.TrimSpace(line[i+1:]))
+		}
+	}
+	w.WriteHeader(status)
+	_, _ = io.Copy(w, rdr)
+}
+
+// TestSubmitDeliverable_E2E_RealPush is a true end-to-end: a real git worktree
+// pushed over HTTP (local git http-backend) into a bare "platform Gitea" repo,
+// with the Gitea PR API and the multica backend report faked on the same HTTP
+// server. Exercises the PRODUCTION execGitOps — real WriteFile / HasChanges /
+// Commit / Push — under the http:// clone URL that carries cs-cloud's injected
+// token, and asserts the doc actually lands on the bare repo's node branch and
+// the PR URL is reported. Covers RC1 (base normalization) + RC2 (commit/push).
+func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	bare := filepath.Join(root, "t-aaa", "wf-bbb.git")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, bare, "init", "--bare", "-q")
+	gitRun(t, bare, "config", "http.receivepack", "true")
+
+	wt := t.TempDir()
+	gitRun(t, wt, "init", "-q")
+	gitRun(t, wt, "config", "user.email", "t@t")
+	gitRun(t, wt, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(wt, "README.md"), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wt, "add", "-A")
+	gitRun(t, wt, "commit", "-qm", "init")
+	gitRun(t, wt, "checkout", "-q", "-b", "node/dd")
+
+	var reportedURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/t-aaa/wf-bbb.git/"):
+			serveGitHTTP(t, root, w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/t-aaa/wf-bbb/pulls":
+			jsonResponse(w, 201, map[string]any{"number": 7, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/7"})
+		case r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit":
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			reportedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", srv.URL+"/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", srv.URL)
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", srv.URL)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+
+	doc := filepath.Join(wt, "doc.md")
+	if err := os.WriteFile(doc, []byte("# real deliverable body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(wt)
+
+	if err := submitDeliverable(submitConfig{
+		deliverableID: "d1",
+		filePath:      doc,
+		gitOps:        &execGitOps{},
+	}); err != nil {
+		t.Fatalf("submitDeliverable E2E: %v", err)
+	}
+
+	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
+		t.Errorf("reported PR = %q, want the html_url", reportedURL)
+	}
+	// Real proof the push happened: the bare "platform Gitea" now has node/dd
+	// carrying the deliverable document.
+	got, err := exec.Command("git", "-C", bare, "show", "node/dd:nodes/dd/d1.md").Output()
+	if err != nil {
+		t.Fatalf("bare repo has no node/dd deliverable: %v", err)
+	}
+	if string(got) != "# real deliverable body\n" {
+		t.Errorf("bare repo node/dd:nodes/dd/d1.md = %q, want deliverable body", string(got))
+	}
 }

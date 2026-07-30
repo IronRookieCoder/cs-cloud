@@ -130,6 +130,7 @@ type submitConfig struct {
 type gitOps interface {
 	Clone(authURL, branch, dir string) error
 	WriteFile(dir, path string, content []byte) error
+	HasChanges(dir string) (bool, error)
 	Commit(dir, message string) error
 	Push(dir, authURL, branch string) error
 	CurrentBranch(dir string) (string, error)
@@ -237,8 +238,21 @@ func submitDeliverable(cfg submitConfig) error {
 	if err := cfg.gitOps.WriteFile(worktree, docPath, content); err != nil {
 		return fmt.Errorf("write document: %w", err)
 	}
-	if err := cfg.gitOps.Commit(worktree, "deliverable: "+cfg.deliverableID); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	// Idempotent submit: if the document is byte-identical to what's already
+	// committed (re-run), `git commit` exits 1 and would abort the pipeline
+	// before push/PR/report. Skip commit on a clean tree so the command can be
+	// retried to success.
+	hasChanges, err := cfg.gitOps.HasChanges(worktree)
+	if err != nil {
+		return fmt.Errorf("detect changes: %w", err)
+	}
+	if hasChanges {
+		if err := cfg.gitOps.Commit(worktree, "deliverable: "+cfg.deliverableID); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable %s: committed branch=%s\n", cfg.deliverableID, currentBranch)
+	} else {
+		fmt.Fprintf(os.Stderr, "deliverable %s: clean tree, nothing to commit — continuing\n", cfg.deliverableID)
 	}
 
 	// Validate the backend URL before committing to the push/open-PR flow — a
@@ -334,6 +348,27 @@ func readGiteaCredential() (struct {
 	}{BaseURL: strings.TrimSpace(os.Getenv("CS_CLOUD_GITEA_BASE_URL")), Token: token}, nil
 }
 
+// normalizeGiteaBase returns base as a bare Gitea server root, suitable for
+// appending "/api/v1/repos/{owner}/{repo}/pulls". Operators (or the workspace
+// gitea_web_url setting) sometimes supply the repository web URL instead of
+// the server root; openGiteaPR would otherwise build
+// ".../{owner}/{repo}/api/v1/repos/{owner}/{repo}/pulls" and Gitea 404s.
+func normalizeGiteaBase(base, owner, repo string) string {
+	b := strings.TrimRight(strings.TrimSpace(base), "/")
+	// Strip a trailing "/{owner}/{repo}" or "/{owner}/{repo}.git" if present —
+	// base is meant to be the server root, not the repository web URL. Matching
+	// on the full owner+repo suffix avoids stripping unrelated path segments.
+	for _, suffix := range []string{
+		"/" + owner + "/" + repo + ".git",
+		"/" + owner + "/" + repo,
+	} {
+		if strings.HasSuffix(b, suffix) {
+			return strings.TrimSuffix(b, suffix)
+		}
+	}
+	return b
+}
+
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.
 func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch, deliverableID string) (string, error) {
 	body, _ := json.Marshal(map[string]string{
@@ -342,7 +377,7 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 		"title": "document deliverable " + deliverableID,
 	})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(base, "/")+"/api/v1/repos/"+owner+"/"+repo+"/pulls", bytes.NewReader(body))
+		normalizeGiteaBase(base, owner, repo)+"/api/v1/repos/"+owner+"/"+repo+"/pulls", bytes.NewReader(body))
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := sharedHTTPClient.Do(req)
@@ -351,6 +386,12 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusConflict {
+		// PR already exists (re-run after a prior success, or a manually created
+		// PR). Look up the existing open PR by head and return its html_url so
+		// reporting can proceed — submit stays idempotent.
+		return findExistingGiteaPR(ctx, base, token, owner, repo, head)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("gitea create PR: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -362,6 +403,41 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 		return "", fmt.Errorf("parse PR response: %w", err)
 	}
 	return pr.HTMLURL, nil
+}
+
+// findExistingGiteaPR lists a repo's open PRs and returns the html_url of the
+// one whose head ref matches. Used when openGiteaPR's POST returned 409 (the PR
+// was already opened, e.g. on a re-run) so submission is idempotent.
+func findExistingGiteaPR(ctx context.Context, base, token, owner, repo, head string) (string, error) {
+	listURL := strings.TrimRight(normalizeGiteaBase(base, owner, repo), "/") +
+		"/api/v1/repos/" + owner + "/" + repo + "/pulls?state=open"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+	req.Header.Set("Authorization", "token "+token)
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("list existing PRs: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("list existing PRs: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var prs []struct {
+		HTMLURL string `json:"html_url"`
+		Number  int    `json:"number"`
+		Head    struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(body, &prs); err != nil {
+		return "", fmt.Errorf("parse existing PR list: %w", err)
+	}
+	for _, pr := range prs {
+		if pr.Head.Ref == head && pr.HTMLURL != "" {
+			return pr.HTMLURL, nil
+		}
+	}
+	return "", fmt.Errorf("PR already exists (409) but no open PR with head %q found", head)
 }
 
 // reportToServer POSTs a pull_request_url to the given server endpoint.
@@ -413,6 +489,13 @@ func (execGitOps) Commit(dir, message string) error {
 		return err
 	}
 	return runGitInDir(dir, "-c", "user.email=bot@cs-cloud", "-c", "user.name=CS-Cloud Bot", "commit", "-m", message)
+}
+func (execGitOps) HasChanges(dir string) (bool, error) {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
 }
 func (execGitOps) Push(dir, authURL, branch string) error {
 	// Force-push: a node branch has a single writer pre-merge; re-submit
