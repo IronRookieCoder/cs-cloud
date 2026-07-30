@@ -62,6 +62,7 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 // PR URL. NO clone / MkdirTemp / PrepareBranch — those are tmp-clone leftovers.
 func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	var reportedURL string
+	var gotAgentID, gotTaskID string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/gitea/credential":
@@ -72,6 +73,8 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			reportedURL = body.PullRequestURL
+			gotAgentID = r.Header.Get("X-Agent-ID")
+			gotTaskID = r.Header.Get("X-Task-ID")
 			jsonResponse(w, 200, map[string]any{"id": "sub-1", "pull_request_url": body.PullRequestURL})
 		default:
 			http.NotFound(w, r)
@@ -96,6 +99,8 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
 	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
 	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-333")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-444")
 	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
 	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
 	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
@@ -107,6 +112,8 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
 	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
 	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-111")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-222")
 
 	tmpFile := tempFile(t, "# my document body")
 
@@ -169,6 +176,12 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
 		t.Errorf("submit received %q, want the PR html_url", reportedURL)
 	}
+	if gotAgentID != "agent-uuid-111" {
+		t.Errorf("X-Agent-ID = %q, want agent-uuid-111", gotAgentID)
+	}
+	if gotTaskID != "task-uuid-222" {
+		t.Errorf("X-Task-ID = %q, want task-uuid-222", gotTaskID)
+	}
 }
 
 func TestSubmitDeliverable_GitLabMR(t *testing.T) {
@@ -189,12 +202,15 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 
 	// Fake backend: POST /api/node-runs/<nr>/deliverables/<did>/submit
 	var submittedURL string
+	var glAgentID, glTaskID string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			PullRequestURL string `json:"pull_request_url"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		submittedURL = body.PullRequestURL
+		glAgentID = r.Header.Get("X-Agent-ID")
+		glTaskID = r.Header.Get("X-Task-ID")
 		jsonResponse(w, 200, map[string]any{"id": "sub-1"})
 	}))
 	defer backend.Close()
@@ -204,6 +220,8 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
 	t.Setenv("CS_CLOUD_TOKEN", "tok")
 	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-333")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-444")
 	// The agent cloned the code repo and runs this command from inside it, so
 	// submit resolves the repo dir from the current working directory.
 	repoDir := t.TempDir()
@@ -263,6 +281,12 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	// Assert backend submit received the MR URL
 	if submittedURL != "https://gitlab.test/group/repo/-/merge_requests/42" {
 		t.Errorf("submit received %q, want GitLab MR web_url", submittedURL)
+	}
+	if glAgentID != "agent-uuid-333" {
+		t.Errorf("X-Agent-ID = %q, want agent-uuid-333", glAgentID)
+	}
+	if glTaskID != "task-uuid-444" {
+		t.Errorf("X-Task-ID = %q, want task-uuid-444", glTaskID)
 	}
 }
 

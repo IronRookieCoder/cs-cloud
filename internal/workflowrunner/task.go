@@ -24,6 +24,7 @@ const (
 	// Environment variables injected into every agent process.
 	EnvWorkspaceID     = "CS_CLOUD_WORKSPACE_ID"
 	EnvTaskID          = "CS_CLOUD_TASK_ID"
+	EnvAgentID         = "CS_CLOUD_AGENT_ID"
 	EnvPrompt          = "CS_CLOUD_PROMPT"
 	EnvCSCloudWorktree = "CS_CLOUD_WORKTREE"
 	// For in-task CLIs (cs-cloud gitea submit) that call the server.
@@ -195,6 +196,7 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	}
 	env = setEnv(env, EnvWorkspaceID, payload.WorkspaceID)
 	env = setEnv(env, EnvTaskID, payload.TaskID)
+	env = setEnv(env, EnvAgentID, payload.AgentID)
 	env = setEnv(env, EnvPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
 	// CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN so in-task CLIs (cs-cloud gitea
