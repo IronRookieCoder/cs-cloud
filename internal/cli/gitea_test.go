@@ -99,8 +99,6 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
 	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
 	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
-	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-333")
-	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-444")
 	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
 	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
 	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")

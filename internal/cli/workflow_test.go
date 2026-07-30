@@ -28,12 +28,8 @@ func TestWorkflowWorkspaceListEmptyCache(t *testing.T) {
 // instead of relying on env propagation through the agent subprocess.
 func TestLoadTaskEnvFile_PopulatesProcessEnv(t *testing.T) {
 	t.Chdir(t.TempDir())
-	os.Unsetenv("CS_CLOUD_TASK_ID")
-	os.Unsetenv("CS_CLOUD_LOCAL_URL")
-	t.Cleanup(func() {
-		os.Unsetenv("CS_CLOUD_TASK_ID")
-		os.Unsetenv("CS_CLOUD_LOCAL_URL")
-	})
+	t.Setenv("CS_CLOUD_TASK_ID", "")
+	t.Setenv("CS_CLOUD_LOCAL_URL", "")
 
 	content := "CS_CLOUD_TASK_ID=from-file\n# a comment, skip\nCS_CLOUD_LOCAL_URL=http://127.0.0.1:9\n"
 	if err := os.WriteFile(workflowrunner.TaskEnvFileName, []byte(content), 0o600); err != nil {

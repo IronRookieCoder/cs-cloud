@@ -101,6 +101,11 @@ func postTaskCompletion(body map[string]string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Authenticate to the localserver's apiAuth middleware when an API key is
+	// configured (no-op when none — the middleware is then a pass-through).
+	if key := os.Getenv(workflowrunner.EnvLocalServerAPIKey); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {

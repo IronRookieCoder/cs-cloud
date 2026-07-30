@@ -311,6 +311,9 @@ func (s *Server) Start(addr string) error {
 		// s.url is known now (listener bound); inject it so in-task CLIs can
 		// call back into this device's /workflow/tasks/{id}/complete endpoint.
 		s.workflow.SetLocalBaseURL(s.url)
+		// Pass the localserver API key so those callbacks authenticate when
+		// apiAuth is enabled (no-op when no key is configured).
+		s.workflow.SetLocalAPIKey(apiKeyFromConfig(s.cfg))
 		if err := s.workflow.Start(); err != nil {
 			// The workflow subsystem is optional. A daemon registered
 			// against a server without the workflow backend (no server

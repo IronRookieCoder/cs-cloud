@@ -241,6 +241,14 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 
+	// Validate the backend URL before committing to the push/open-PR flow — a
+	// misconfigured/unset URL would otherwise orphan the Gitea PR we're about to
+	// create (mirrors submitGitlabMR's existing guard).
+	backendURL := envOr("CS_CLOUD_BACKEND_URL", "")
+	if backendURL == "" {
+		return fmt.Errorf("CS_CLOUD_BACKEND_URL not set")
+	}
+
 	// Push URL: prefer the server-provided full clone URL; fall back to
 	// self-building from base + owner + repo.
 	authURL := ""
@@ -261,7 +269,7 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("open PR: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", cfg.deliverableID)
-	if err := reportDeliverablePR(ctx, envOr("CS_CLOUD_BACKEND_URL", ""), os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL, os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
+	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL, os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: submitted pr=%s\n", cfg.deliverableID, prURL)

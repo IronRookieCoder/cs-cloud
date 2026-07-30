@@ -87,7 +87,12 @@ type Driver struct {
 	// runner on Start so in-task CLIs can call back into the driver. Set by
 	// the localserver (which knows its URL only after binding its listener).
 	localBaseURL string
-	mu           sync.Mutex
+	// localAPIKey is the localserver API key (empty when none configured),
+	// applied to the task runner on Start so in-task completion callbacks
+	// authenticate to the localserver's apiAuth middleware. Set by the
+	// localserver alongside SetLocalBaseURL.
+	localAPIKey string
+	mu          sync.Mutex
 }
 
 // NewDriver creates a new workflow driver.
@@ -158,6 +163,9 @@ func (d *Driver) Start() error {
 	// Inject the localserver URL so in-task CLIs (cs-cloud workflow task
 	// complete) can call back into this device's driver via CS_CLOUD_LOCAL_URL.
 	d.runner.SetLocalServerURL(d.localBaseURL)
+	// Inject the localserver API key so those callbacks authenticate when the
+	// localserver has apiAuth enabled.
+	d.runner.SetLocalAPIKey(d.localAPIKey)
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)
@@ -474,15 +482,15 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// Explicit completion (agent invoked the complete tool): use the tool's
 	// payload as the task output / decision instead of the session stdout.
 	if sig, ok := d.popCompletionSignal(payload.TaskID); ok {
-		output := sig.Summary
+		output := truncateOutput(sig.Summary)
 		if strings.TrimSpace(output) == "" {
-			output = strings.TrimSpace(string(out))
+			output = strings.TrimSpace(truncateOutput(string(out)))
 		}
 		if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
 			emptyErr := fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
 			return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
 		}
-		d.postTaskMessages(payload.TaskID, truncateOutput(output))
+		d.postTaskMessages(payload.TaskID, output)
 		logger.Info("workflow: task %s completed via tool: session=%s action=%s decision=%s",
 			payload.TaskID, finalSessionID, sig.Action, sig.Decision)
 		return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
@@ -506,6 +514,14 @@ type agentRunResult struct {
 	output []byte
 	err    error
 }
+
+// completionGracePeriod bounds how long runAgent waits for a completion signal
+// after a pure-tool CSC session ends its turn cleanly without calling the
+// complete tool. Once the session has returned, nothing more can arrive except
+// a signal already in flight; wait a short grace for that race, then surface
+// ErrIncomplete (→ agent_incomplete) instead of holding the slot for the full
+// remaining AgentTimeout.
+const completionGracePeriod = 5 * time.Second
 
 // runAgent supervises the agent boundary instead of trusting every SessionRunner
 // implementation to return when its context is cancelled. The worker only
@@ -535,7 +551,11 @@ func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, 
 		// session and report success; execute reads the payload from the
 		// driver's completion registry.
 		d.abortSession(sessionID)
-		<-resultCh // drain; the aborted RunCSCSession result is irrelevant
+		select {
+		case <-resultCh: // drain; the aborted RunCSCSession result is irrelevant
+		case <-time.After(sessionAbortTimeout):
+			logger.Warn("workflow: session %s did not exit after abort", sessionID)
+		}
 		return nil, nil
 	case result := <-resultCh:
 		if err := ctx.Err(); err != nil {
@@ -553,11 +573,16 @@ func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, 
 				return nil, nil
 			default:
 			}
-			// Pure-tool mode: a clean idle is NOT a completion. Hold for the
-			// remaining deadline, then surface ErrIncomplete (→ agent_incomplete)
-			// so a task whose agent stopped without calling complete never
-			// silently advances the workflow.
+			// Pure-tool mode: a clean idle is NOT a completion. The session has
+			// ended, so nothing more can arrive except a completion signal
+			// already in flight — wait a short grace for that race, then surface
+			// ErrIncomplete (→ agent_incomplete) so a task whose agent stopped
+			// without calling complete never silently advances the workflow.
+			grace := time.NewTimer(completionGracePeriod)
+			defer grace.Stop()
 			select {
+			case <-grace.C:
+				return nil, agent.ErrIncomplete
 			case <-ctx.Done():
 				return nil, agent.ErrIncomplete
 			case <-notify:
@@ -754,6 +779,13 @@ func (d *Driver) SetConversationBinder(binder ConversationBinder) {
 // picks it up; the localserver sets it once it has bound its listener.
 func (d *Driver) SetLocalBaseURL(url string) {
 	d.localBaseURL = url
+}
+
+// SetLocalAPIKey injects the localserver API key so in-task completion
+// callbacks authenticate to the localserver's apiAuth middleware. Must be
+// called before Start; empty means the localserver has no API key configured.
+func (d *Driver) SetLocalAPIKey(key string) {
+	d.localAPIKey = key
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps

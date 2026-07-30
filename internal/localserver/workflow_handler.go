@@ -157,6 +157,21 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
+	// Validate the action before signaling: an unknown/empty action would
+	// otherwise irreversibly latch completion for a running task. summary is
+	// optional for both actions; reason is optional for review.
+	switch req.Action {
+	case "complete":
+		// no extra fields
+	case "review":
+		if req.Decision != "approve" && req.Decision != "reject" {
+			writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "review decision must be approve or reject")
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "unsupported action: "+req.Action)
+		return
+	}
 	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, Decision: req.Decision, Reason: req.Reason}
 	if err := s.workflow.SignalTaskCompletion(taskID, sig); err != nil {
 		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())

@@ -109,6 +109,31 @@ func TestClientCompleteTask(t *testing.T) {
 	}
 }
 
+// TestClientCompleteTaskForwardsReviewSignal covers the review-signal path:
+// a populated CompletionSignal (decision + reason) must be serialized into the
+// request body so the backend gets the critic's decision directly.
+func TestClientCompleteTaskForwardsReviewSignal(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "", tokenProvider("token-123"))
+	sig := agent.CompletionSignal{Action: "review", Decision: "approve", Reason: "lgtm"}
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", "", sig); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(gotBody, `"decision":"approve"`) {
+		t.Errorf("body missing decision=approve: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"reason":"lgtm"`) {
+		t.Errorf("body missing reason=lgtm: %s", gotBody)
+	}
+}
+
 func TestClientCompleteTaskIncludesSessionAndWorkDir(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
