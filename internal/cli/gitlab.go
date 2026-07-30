@@ -55,18 +55,21 @@ func submitGitlabMR(cfg submitConfig) error {
 
 	// Push current branch to the repo.
 	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
+	fmt.Fprintf(os.Stderr, "deliverable %s: pushing MR branch=%s\n", cfg.deliverableID, currentBranch)
 	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 
 	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "main")
 	title := "deliverable " + cfg.deliverableID
+	fmt.Fprintf(os.Stderr, "deliverable %s: opening MR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
 	if err != nil {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
 	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
+	fmt.Fprintf(os.Stderr, "deliverable %s: reporting MR\n", cfg.deliverableID)
 	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL); err != nil {
 		return fmt.Errorf("report submit: %w", err)
 	}

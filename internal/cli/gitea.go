@@ -250,14 +250,17 @@ func submitDeliverable(cfg submitConfig) error {
 	if authURL == "" {
 		authURL = injectToken(giteaBase, gctx.owner, gctx.repo, cred.Token)
 	}
+	fmt.Fprintf(os.Stderr, "deliverable %s: pushing branch=%s\n", cfg.deliverableID, currentBranch)
 	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 
+	fmt.Fprintf(os.Stderr, "deliverable %s: opening PR head=%s base=%s\n", cfg.deliverableID, currentBranch, gctx.instBranch)
 	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, currentBranch, gctx.instBranch, cfg.deliverableID)
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", cfg.deliverableID)
 	if err := reportDeliverablePR(ctx, envOr("CS_CLOUD_BACKEND_URL", ""), os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -113,14 +114,27 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	// the env-advertised CS_CLOUD_REPO_NODE_BRANCH (here aliased as
 	// CS_CLOUD_GITEA_NODE_BRANCH = "node/dd").
 	fake := &fakeGitOps{currentBranch: "node/dd"}
-	err := submitDeliverable(submitConfig{
-		giteaBaseOverride: giteaSrv.URL,
-		deliverableID:     "d1",
-		filePath:          tmpFile,
-		gitOps:            fake,
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			giteaBaseOverride: giteaSrv.URL,
+			deliverableID:     "d1",
+			filePath:          tmpFile,
+			gitOps:            fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("submitDeliverable: %v", err)
+	for _, want := range []string{
+		"deliverable d1: submitting node_run=nr-1 branch=node/dd",
+		"deliverable d1: pushing branch=node/dd",
+		"deliverable d1: opening PR head=node/dd base=inst-cc",
+		"deliverable d1: reporting PR",
+		"deliverable d1: submitted pr=https://gitea.test/t-aaa/wf-bbb/pulls/7",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
 	}
 
 	// NO tmp-clone leftovers: the worktree already exists (agent ran checkout).
@@ -198,14 +212,27 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	fake := &fakeGitOps{
 		currentBranch: "feat/code-changes",
 	}
-	err := submitDeliverable(submitConfig{
-		mrMode:        true,
-		deliverableID: "d1",
-		repoURL:       "https://gitlab.test/group/mycode.git",
-		gitOps:        fake,
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			mrMode:        true,
+			deliverableID: "d1",
+			repoURL:       "https://gitlab.test/group/mycode.git",
+			gitOps:        fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable (mr): %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("submitDeliverable (mr): %v", err)
+	for _, want := range []string{
+		"deliverable d1: submitting MR node_run=nr-1 branch=feat/code-changes",
+		"deliverable d1: pushing MR branch=feat/code-changes",
+		"deliverable d1: opening MR source=feat/code-changes target=main",
+		"deliverable d1: reporting MR",
+		"deliverable d1: submitted mr=https://gitlab.test/group/repo/-/merge_requests/42",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
 	}
 
 	// submit pushes from the repo the agent is running inside (cwd).
@@ -237,6 +264,27 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	if submittedURL != "https://gitlab.test/group/repo/-/merge_requests/42" {
 		t.Errorf("submit received %q, want GitLab MR web_url", submittedURL)
 	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+		_ = r.Close()
+	}()
+	fn()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(out)
 }
 
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
