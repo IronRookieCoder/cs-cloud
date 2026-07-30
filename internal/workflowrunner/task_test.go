@@ -137,12 +137,14 @@ func TestTaskRunnerCscAddsOutputFormatText(t *testing.T) {
 }
 
 type fakeSessionRunner struct {
-	env []string
-	err error
+	env      []string
+	permMode string
+	err      error
 }
 
-func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string) ([]byte, error) {
+func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string, permMode string) ([]byte, error) {
 	r.env = env
+	r.permMode = permMode
 	return []byte("session runner used"), r.err
 }
 

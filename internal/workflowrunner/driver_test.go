@@ -931,7 +931,7 @@ type flakySessionRunner struct {
 	calls int
 }
 
-func (f *flakySessionRunner) RunSession(ctx context.Context, sessionID, worktree, prompt string, env []string) ([]byte, error) {
+func (f *flakySessionRunner) RunSession(ctx context.Context, sessionID, worktree, prompt string, env []string, _ string) ([]byte, error) {
 	f.calls++
 	if f.calls == 1 {
 		return nil, fmt.Errorf("resumed session boom")
@@ -1169,7 +1169,7 @@ type nonCooperativeSessionRunner struct {
 	closeOnce sync.Once
 }
 
-func (r *nonCooperativeSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+func (r *nonCooperativeSessionRunner) RunSession(context.Context, string, string, string, []string, string) ([]byte, error) {
 	close(r.started)
 	<-r.unblock
 	close(r.finished)
@@ -1233,14 +1233,14 @@ func TestDriverTimesOutNonCooperativeCSCSession(t *testing.T) {
 
 type contextAwareTimeoutRunner struct{}
 
-func (*contextAwareTimeoutRunner) RunSession(ctx context.Context, _ string, _ string, _ string, _ []string) ([]byte, error) {
+func (*contextAwareTimeoutRunner) RunSession(ctx context.Context, _ string, _ string, _ string, _ []string, _ string) ([]byte, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
 type partialOutputFailureRunner struct{}
 
-func (*partialOutputFailureRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+func (*partialOutputFailureRunner) RunSession(context.Context, string, string, string, []string, string) ([]byte, error) {
 	return []byte("partial output"), errors.New("agent failed")
 }
 
@@ -1279,7 +1279,7 @@ func TestDriverReportsAgentTimeoutReason(t *testing.T) {
 
 type emptyOutputSessionRunner struct{}
 
-func (*emptyOutputSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+func (*emptyOutputSessionRunner) RunSession(context.Context, string, string, string, []string, string) ([]byte, error) {
 	return nil, agent.ErrEmptySessionOutput
 }
 
@@ -1318,7 +1318,7 @@ func TestDriverReportsEmptySessionOutputAsFailure(t *testing.T) {
 
 type silentlyEmptySessionRunner struct{}
 
-func (*silentlyEmptySessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+func (*silentlyEmptySessionRunner) RunSession(context.Context, string, string, string, []string, string) ([]byte, error) {
 	return nil, nil
 }
 
@@ -1398,7 +1398,7 @@ type abortableSessionRunner struct {
 	closeOnce   sync.Once
 }
 
-func (r *abortableSessionRunner) RunSession(context.Context, string, string, string, []string) ([]byte, error) {
+func (r *abortableSessionRunner) RunSession(context.Context, string, string, string, []string, string) ([]byte, error) {
 	close(r.started)
 	<-r.unblock
 	return nil, context.Canceled
@@ -1452,8 +1452,40 @@ type failingConversationBinder struct {
 	err error
 }
 
-func (b *failingConversationBinder) Bind(context.Context, string, string, []string) error {
+func (b *failingConversationBinder) Bind(context.Context, string, string, []string, string) error {
 	return b.err
+}
+
+type recordingConversationBinder struct {
+	permMode string
+}
+
+func (b *recordingConversationBinder) Bind(_ context.Context, _, _ string, _ []string, permMode string) error {
+	b.permMode = permMode
+	return nil
+}
+
+func TestDriverRunsWorkflowSessionWithBypassPermissionMode(t *testing.T) {
+	sessionRunner := &fakeSessionRunner{}
+	binder := &recordingConversationBinder{}
+	d, _ := newCSCSessionTestDriver(t, time.Minute, sessionRunner, binder)
+
+	if err := d.RunTask(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-perm-mode",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	}); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if binder.permMode != SessionPermissionBypass {
+		t.Fatalf("binder permMode = %q, want %q", binder.permMode, SessionPermissionBypass)
+	}
+	if sessionRunner.permMode != SessionPermissionBypass {
+		t.Fatalf("session runner permMode = %q, want %q", sessionRunner.permMode, SessionPermissionBypass)
+	}
 }
 
 func TestDriverFailsBeforeRemoteBindingWhenLocalSessionBindFails(t *testing.T) {

@@ -347,11 +347,31 @@ func (a *Agent) createSession(ctx context.Context) (*cscSession, error) {
 // directory. If a session with that ID already exists, it returns without
 // error. This lets workflow tasks expose a stable conversation URL that
 // matches the server chat_session.id.
-func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string) error {
-	return a.createSessionWithEnv(ctx, sessionID, cwd, env)
+//
+// permMode selects the session permission mode (e.g. "bypassPermissions" for
+// unattended workflow runs); an empty permMode falls back to
+// resolvePermissionMode. Interactive workspace conversations are created by
+// the frontend through the localserver proxy, not through this path, and keep
+// whatever mode the frontend requests.
+func (a *Agent) CreateSession(ctx context.Context, sessionID, cwd string, env []string, permMode string) error {
+	return a.createSessionWithEnv(ctx, sessionID, cwd, env, a.resolvePermissionMode(permMode))
 }
 
-func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string, env []string) error {
+// resolvePermissionMode picks the permission mode for a new session. An
+// explicit caller-provided mode wins; otherwise ACP_PERMISSION_MODE in
+// CS_BRIDGE_AGENT_ENV (legacy: CS_CLOUD_AGENT_ENV) can pin the mode to
+// "bypassPermissions" or "default"; the fallback is "default".
+func (a *Agent) resolvePermissionMode(requested string) string {
+	if requested != "" {
+		return requested
+	}
+	if v, ok := a.customEnv["ACP_PERMISSION_MODE"]; ok && (v == "bypassPermissions" || v == "default") {
+		return v
+	}
+	return "default"
+}
+
+func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string, env []string, permMode string) error {
 	if sessionID == "" {
 		return fmt.Errorf("session id is required")
 	}
@@ -368,16 +388,9 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 		}
 	}
 
-	// Default to "default" mode (read-only tools auto-allow, others ask via
-	// permission.asked/question.asked SSE). When ACP_PERMISSION_MODE=bypassPermissions
-	// is set in CS_BRIDGE_AGENT_ENV (legacy: CS_CLOUD_AGENT_ENV; typical for unattended deployments), forward
-	// it so csc starts the session in bypass mode. csc's HTTP /session handler
-	// treats body.permission_mode as authoritative and would otherwise override
-	// whatever the user settings file declares.
-	permMode := "default"
-	if v, ok := a.customEnv["ACP_PERMISSION_MODE"]; ok && v == "bypassPermissions" {
-		permMode = "bypassPermissions"
-	}
+	// csc's HTTP /session handler treats body.permission_mode as authoritative
+	// and would otherwise override whatever the user settings file declares, so
+	// always send the caller's mode explicitly.
 	body := map[string]any{
 		"session_id":      sessionID,
 		"permission_mode": permMode,
@@ -707,7 +720,11 @@ func (a *Agent) GetSessionMessages(ctx context.Context, sessionID string) (json.
 // busy/idle events cannot race past the subscriber. If the context is
 // cancelled (e.g. the task is aborted), the session prompt is aborted
 // best-effort so the agent does not keep running detached.
-func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string) (out []byte, err error) {
+//
+// permMode is only used when the session has to be created; an existing
+// session keeps the mode it was created with. An empty permMode falls back
+// to resolvePermissionMode.
+func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, env []string, permMode string) (out []byte, err error) {
 	begin := time.Now()
 	logger.Info("[csc] run session: start session=%s prompt_bytes=%d", sessionID, len(prompt))
 	defer func() {
@@ -715,7 +732,7 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, e
 			logger.Warn("[csc] run session: failed session=%s duration=%s err=%v", sessionID, time.Since(begin).Round(time.Millisecond), err)
 		}
 	}()
-	if err := a.createSessionWithEnv(ctx, sessionID, cwd, env); err != nil {
+	if err := a.createSessionWithEnv(ctx, sessionID, cwd, env, a.resolvePermissionMode(permMode)); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
