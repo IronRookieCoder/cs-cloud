@@ -75,14 +75,14 @@ func repoSummary(repos []workflow.RepoSpec, legacyRepoURL string) string {
 }
 
 // deliverableSummary renders the deliverable contracts for a task:
-// [id:kind(repo=alias); …].
+// [id(repo=alias); …].
 func deliverableSummary(ds []workflow.DeliverableSpec) string {
 	if len(ds) == 0 {
 		return "[]"
 	}
 	parts := make([]string, 0, len(ds))
 	for _, d := range ds {
-		s := d.ID + ":" + d.Kind
+		s := d.ID
 		if d.RepoAlias != "" {
 			s += "(repo=" + d.RepoAlias + ")"
 		}

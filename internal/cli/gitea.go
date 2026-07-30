@@ -374,10 +374,11 @@ func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL strin
 	return nil
 }
 
-// reportDeliverablePR POSTs the PR URL to the the daemon report-pr endpoint.
+// reportDeliverablePR POSTs the PR URL to the unified submit endpoint
+// (same endpoint the code-MR path uses).
 func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL string) error {
 	return reportToServer(ctx, serverURL, token,
-		serverURL+"/api/daemon/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/report-pr", prURL)
+		serverURL+"/api/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/submit", prURL)
 }
 
 // execGitOps implements gitOps via shelled-out git.

@@ -58,6 +58,25 @@ func TestRepoSummary(t *testing.T) {
 	}
 }
 
+func TestDeliverableSummary(t *testing.T) {
+	empty := deliverableSummary(nil)
+	if empty != "[]" {
+		t.Errorf("empty = %q, want []", empty)
+	}
+	withRepo := deliverableSummary([]workflow.DeliverableSpec{
+		{ID: "d1", RepoAlias: "code"},
+	})
+	if !strings.Contains(withRepo, "d1(repo=code)") {
+		t.Errorf("with repo alias = %q, want d1(repo=code)", withRepo)
+	}
+	noAlias := deliverableSummary([]workflow.DeliverableSpec{
+		{ID: "d2"},
+	})
+	if !strings.Contains(noAlias, "d2") {
+		t.Errorf("no alias = %q, want d2", noAlias)
+	}
+}
+
 func TestPluginName(t *testing.T) {
 	if got := pluginName(nil); got != "none" {
 		t.Errorf("pluginName(nil) = %q, want none", got)

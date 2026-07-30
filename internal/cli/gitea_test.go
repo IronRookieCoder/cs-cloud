@@ -66,7 +66,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/gitea/credential":
 			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
-		case "/api/daemon/node-runs/nr-1/deliverables/d1/report-pr":
+		case "/api/node-runs/nr-1/deliverables/d1/submit":
 			var body struct {
 				PullRequestURL string `json:"pull_request_url"`
 			}
@@ -167,7 +167,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 		t.Errorf("expected push of worktree branch node/dd, got %+v", fake.pushCalls)
 	}
 	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
-		t.Errorf("report-pr received %q, want the PR html_url", reportedURL)
+		t.Errorf("submit received %q, want the PR html_url", reportedURL)
 	}
 }
 
