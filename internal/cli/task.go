@@ -18,6 +18,11 @@ import (
 // taskCmd implements `cs-cloud workflow task`, the in-task tooling an agent uses
 // to explicitly signal task completion (worker) or a review decision (critic).
 // It calls back into this device's localserver, which signals the driver.
+//
+// The agent passes NO context flags: task id + local server URL come from the
+// environment, which `cs-cloud workflow` populated from .cs-cloud.env at task
+// start (see loadTaskEnvFile). Each command takes at most one optional flag
+// (summary / reason) to keep the surface small and hard to misuse.
 func taskCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
 	if len(args) == 0 {
@@ -27,8 +32,10 @@ func taskCmd(a *app.App, args []string) error {
 	switch args[0] {
 	case "complete":
 		return runTaskComplete(args[1:])
-	case "review":
-		return runTaskReview(args[1:])
+	case "approve":
+		return runTaskReview(args[1:], "approve")
+	case "reject":
+		return runTaskReview(args[1:], "reject")
 	case "help", "-h", "--help":
 		printTaskUsage()
 		return nil
@@ -44,8 +51,9 @@ func printTaskUsage() {
 	fmt.Println(dimStyle.Render("  cs-cloud workflow task <action> [flags]"))
 	printSection("Actions")
 	cmds := [][2]string{
-		{"complete", "Signal task completion (worker). --summary <text>. Use as your LAST action."},
-		{"review", "Signal a review decision (critic). --decision approve|reject [--reason <text>]"},
+		{"complete", "Worker finished. [--summary <text>]"},
+		{"approve", "Critic approves. [--reason <text>]"},
+		{"reject", "Critic requests rework. [--reason <text>]"},
 	}
 	fmt.Print(renderKV(cmds))
 }
@@ -61,12 +69,8 @@ func runTaskComplete(args []string) error {
 	})
 }
 
-// runTaskReview signals a critic's approve/reject decision.
-func runTaskReview(args []string) error {
-	decision, _ := parseStringFlag(args, "--decision")
-	if decision != "approve" && decision != "reject" {
-		return fmt.Errorf("--decision must be approve or reject, got %q", decision)
-	}
+// runTaskReview signals a critic's decision (approve or reject).
+func runTaskReview(args []string, decision string) error {
 	reason, _ := parseStringFlag(args, "--reason")
 	return postTaskCompletion(map[string]string{
 		"action":   "review",
@@ -76,17 +80,18 @@ func runTaskReview(args []string) error {
 }
 
 // postTaskCompletion POSTs the completion payload to this device's localserver
-// endpoint, which forwards it to the driver via SignalTaskCompletion.
+// endpoint, which forwards it to the driver via SignalTaskCompletion. Task id +
+// local URL come from the env (populated from .cs-cloud.env by loadTaskEnvFile).
 func postTaskCompletion(body map[string]string) error {
-	base := os.Getenv(workflowrunner.EnvLocalServerURL)
+	localURL := os.Getenv(workflowrunner.EnvLocalServerURL)
 	taskID := os.Getenv(workflowrunner.EnvTaskID)
-	if base == "" {
-		return fmt.Errorf("%s not set (this command must run inside a workflow task)", workflowrunner.EnvLocalServerURL)
+	if localURL == "" {
+		return fmt.Errorf("%s not set (run inside a workflow task; context is in .cs-cloud.env)", workflowrunner.EnvLocalServerURL)
 	}
 	if taskID == "" {
-		return fmt.Errorf("%s not set (this command must run inside a workflow task)", workflowrunner.EnvTaskID)
+		return fmt.Errorf("%s not set (run inside a workflow task; context is in .cs-cloud.env)", workflowrunner.EnvTaskID)
 	}
-	endpoint := strings.TrimRight(base, "/") + "/api/v1/workflow/tasks/" + taskID + "/complete"
+	endpoint := strings.TrimRight(localURL, "/") + "/api/v1/workflow/tasks/" + taskID + "/complete"
 
 	payload, _ := json.Marshal(body)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

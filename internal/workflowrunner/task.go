@@ -34,6 +34,11 @@ const (
 	// CLIs (e.g. `cs-cloud workflow task complete`) call back into the driver
 	// without going through the server.
 	EnvLocalServerURL = "CS_CLOUD_LOCAL_URL"
+	// TaskEnvFileName is the file cs-cloud writes into each task workdir
+	// containing the CS_CLOUD_* task variables. In-task CLIs load it (see
+	// cli.loadTaskEnvFile) so they resolve task context from a file rather than
+	// relying on env propagation through the agent subprocess.
+	TaskEnvFileName = ".cs-cloud.env"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -104,9 +109,11 @@ func (tr *TaskRunner) withAgentTimeout(ctx context.Context) (context.Context, co
 // back to the one-shot CLI if no session runner is configured.
 func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
 	if tr.sessionRunner != nil {
+		env := tr.buildEnv(payload, worktree)
+		writeTaskEnvFile(worktree, env)
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
-		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree), SessionPermissionBypass)
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, env, SessionPermissionBypass)
 	}
 
 	agentPath, err := exec.LookPath(payload.Agent)
@@ -170,9 +177,29 @@ func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunP
 
 	cmd := exec.CommandContext(ctx, agentPath, args...)
 	cmd.Dir = worktree
-	cmd.Env = tr.buildEnv(payload, worktree)
+	env := tr.buildEnv(payload, worktree)
+	writeTaskEnvFile(worktree, env)
+	cmd.Env = env
 
 	return cmd.CombinedOutput()
+}
+
+// writeTaskEnvFile persists the CS_CLOUD_* task variables to <workdir>/.cs-cloud.env
+// so in-task CLIs (cs-cloud workflow *) can read their target context from a
+// file. Only CS_CLOUD_* keys are written; the rest of the process env is not
+// persisted. Best-effort: a write failure only means CLIs fall back to process
+// env, so the error is ignored.
+func writeTaskEnvFile(workdir string, env []string) {
+	var lines []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "CS_CLOUD_") {
+			lines = append(lines, e)
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(workdir, TaskEnvFileName), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
 func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {

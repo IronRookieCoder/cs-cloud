@@ -30,7 +30,27 @@ func TestRunTaskCompletePostsToEndpoint(t *testing.T) {
 	}
 }
 
-func TestRunTaskReviewPostsDecision(t *testing.T) {
+func TestRunTaskCompleteBareNoArgs(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("CS_CLOUD_LOCAL_URL", srv.URL)
+	t.Setenv("CS_CLOUD_TASK_ID", "task-1")
+
+	// Bare command — no flags. Summary is optional.
+	if err := runTaskComplete(nil); err != nil {
+		t.Fatalf("runTaskComplete: %v", err)
+	}
+	if got["action"] != "complete" {
+		t.Errorf("body = %+v, want action=complete", got)
+	}
+}
+
+func TestRunTaskReviewApprove(t *testing.T) {
 	var got map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -41,11 +61,30 @@ func TestRunTaskReviewPostsDecision(t *testing.T) {
 	t.Setenv("CS_CLOUD_LOCAL_URL", srv.URL)
 	t.Setenv("CS_CLOUD_TASK_ID", "task-rev")
 
-	if err := runTaskReview([]string{"--decision", "approve", "--reason", "looks good"}); err != nil {
-		t.Fatalf("runTaskReview: %v", err)
+	if err := runTaskReview([]string{"--reason", "looks good"}, "approve"); err != nil {
+		t.Fatalf("runTaskReview approve: %v", err)
 	}
 	if got["action"] != "review" || got["decision"] != "approve" || got["reason"] != "looks good" {
 		t.Errorf("body = %+v, want action=review decision=approve reason=looks good", got)
+	}
+}
+
+func TestRunTaskReviewReject(t *testing.T) {
+	var got map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("CS_CLOUD_LOCAL_URL", srv.URL)
+	t.Setenv("CS_CLOUD_TASK_ID", "task-rev")
+
+	if err := runTaskReview(nil, "reject"); err != nil {
+		t.Fatalf("runTaskReview reject: %v", err)
+	}
+	if got["action"] != "review" || got["decision"] != "reject" {
+		t.Errorf("body = %+v, want action=review decision=reject", got)
 	}
 }
 
@@ -54,13 +93,5 @@ func TestRunTaskCompleteMissingEnv(t *testing.T) {
 	t.Setenv("CS_CLOUD_TASK_ID", "")
 	if err := runTaskComplete(nil); err == nil {
 		t.Fatal("expected error when CS_CLOUD_LOCAL_URL is unset")
-	}
-}
-
-func TestRunTaskReviewRejectsBadDecision(t *testing.T) {
-	t.Setenv("CS_CLOUD_LOCAL_URL", "http://x")
-	t.Setenv("CS_CLOUD_TASK_ID", "task-rev")
-	if err := runTaskReview([]string{"--decision", "maybe"}); err == nil {
-		t.Fatal("expected error for decision other than approve|reject")
 	}
 }
