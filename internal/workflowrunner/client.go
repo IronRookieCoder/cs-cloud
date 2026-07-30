@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
@@ -186,7 +187,7 @@ func (c *Client) StartTask(ctx context.Context, taskID string) error {
 // pointer — its CompleteAgentTask SQL is a direct SET (not COALESCE), so
 // omitting them NULLs the columns that bindSession pinned mid-run and breaks
 // GetLastTaskSession for the next round.
-func (c *Client) CompleteTask(ctx context.Context, taskID, output, sessionID, workDir string) error {
+func (c *Client) CompleteTask(ctx context.Context, taskID, output, sessionID, workDir string, sig agent.CompletionSignal) error {
 	path := fmt.Sprintf(workflow.TaskCompleteEndpoint, taskID)
 	body := map[string]any{"output": output}
 	if sessionID != "" {
@@ -194,6 +195,14 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, sessionID, wo
 	}
 	if workDir != "" {
 		body["work_dir"] = workDir
+	}
+	// Forward the agent's explicit completion payload so multica can use the
+	// critic's decision directly (review) instead of parsing session text.
+	if sig.Decision != "" {
+		body["decision"] = sig.Decision
+	}
+	if sig.Reason != "" {
+		body["reason"] = sig.Reason
 	}
 	return c.request(ctx, http.MethodPost, path, body, nil)
 }

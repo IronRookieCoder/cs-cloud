@@ -53,7 +53,7 @@ func TestPrintWorkflowUsageListsImplementedResources(t *testing.T) {
 	if !strings.Contains(out, "deliverable:") {
 		t.Fatalf("workflow usage missing deliverable resource:\n%s", out)
 	}
-	if strings.Contains(out, "task:") {
-		t.Fatalf("workflow usage should not advertise unimplemented task resource:\n%s", out)
+	if !strings.Contains(out, "task:") {
+		t.Fatalf("workflow usage missing task resource:\n%s", out)
 	}
 }

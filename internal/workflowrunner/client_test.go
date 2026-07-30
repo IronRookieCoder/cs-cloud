@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
@@ -100,7 +101,7 @@ func TestClientCompleteTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", tokenProvider("token-123"))
-	if err := c.CompleteTask(context.Background(), "task-1", "done", "", ""); err != nil {
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", "", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
@@ -117,7 +118,7 @@ func TestClientCompleteTaskIncludesSessionAndWorkDir(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
-	if err := c.CompleteTask(context.Background(), "t1", "the output", "sess-123", "/work/dir"); err != nil {
+	if err := c.CompleteTask(context.Background(), "t1", "the output", "sess-123", "/work/dir", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 	if !strings.Contains(gotBody, `"session_id":"sess-123"`) {
@@ -140,7 +141,7 @@ func TestClientCompleteTaskOmitsEmptySessionAndWorkDir(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
-	if err := c.CompleteTask(context.Background(), "t1", "done", "", ""); err != nil {
+	if err := c.CompleteTask(context.Background(), "t1", "done", "", "", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 	if strings.Contains(gotBody, "session_id") {

@@ -225,6 +225,7 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("GET /workflow/health", s.handleWorkflowHealth)
 	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
+	api.HandleFunc("POST /workflow/tasks/{id}/complete", s.handleWorkflowTaskComplete)
 
 	s.http = &http.Server{
 		Handler:           mux,
@@ -307,6 +308,9 @@ func (s *Server) Start(addr string) error {
 	}
 
 	if s.workflow != nil {
+		// s.url is known now (listener bound); inject it so in-task CLIs can
+		// call back into this device's /workflow/tasks/{id}/complete endpoint.
+		s.workflow.SetLocalBaseURL(s.url)
 		if err := s.workflow.Start(); err != nil {
 			// The workflow subsystem is optional. A daemon registered
 			// against a server without the workflow backend (no server

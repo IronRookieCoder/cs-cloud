@@ -30,6 +30,10 @@ const (
 	// For in-task CLIs (cs-cloud gitea submit) that call the server.
 	EnvServerURL = "CS_CLOUD_BACKEND_URL"
 	EnvToken     = "CS_CLOUD_TOKEN"
+	// EnvLocalServerURL is this device's localserver base URL, letting in-task
+	// CLIs (e.g. `cs-cloud workflow task complete`) call back into the driver
+	// without going through the server.
+	EnvLocalServerURL = "CS_CLOUD_LOCAL_URL"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -45,6 +49,10 @@ type TaskRunner struct {
 	// can call the server's daemon-auth API. Set via SetServerEndpoint.
 	serverBaseURL string
 	tokenProvider func() (*provider.Credentials, error)
+	// localServerURL is this device's localserver URL, injected as
+	// CS_CLOUD_LOCAL_URL so in-task CLIs can call back into the driver (e.g.
+	// the "complete task" tool). Set via SetLocalServerURL.
+	localServerURL string
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -67,6 +75,12 @@ func (tr *TaskRunner) SetServerEndpoint(baseURL string, tp func() (*provider.Cre
 // task payload env so per-task values can still override it.
 func (tr *TaskRunner) SetAgentEnv(env map[string]string) {
 	tr.agentEnv = env
+}
+
+// SetLocalServerURL injects this device's localserver URL so buildEnv can carry
+// CS_CLOUD_LOCAL_URL for in-task CLIs that call back into the driver.
+func (tr *TaskRunner) SetLocalServerURL(url string) {
+	tr.localServerURL = url
 }
 
 // SetSessionRunner injects a runner that executes prompts inside an already
@@ -209,6 +223,9 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 		if creds, err := tr.tokenProvider(); err == nil && creds != nil && creds.AccessToken != "" {
 			env = setEnv(env, EnvToken, creds.AccessToken)
 		}
+	}
+	if tr.localServerURL != "" {
+		env = setEnv(env, EnvLocalServerURL, tr.localServerURL)
 	}
 	return env
 }

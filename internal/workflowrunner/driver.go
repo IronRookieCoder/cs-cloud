@@ -76,7 +76,18 @@ type Driver struct {
 	// registrations maps workspace ID → runtime row ID, kept alive
 	// by the maintain loop.
 	registrations map[string]string
-	mu            sync.Mutex
+	// completion holds the explicit-completion state for running csc tasks,
+	// keyed by task ID. When the agent invokes the "complete task" tool, the
+	// localserver handler calls SignalTaskCompletion, which stores the payload
+	// and closes the notify channel so runAgent can stop the session and report
+	// success via the normal CompleteTask path. execute remains the sole owner
+	// of task-status callbacks.
+	completion map[string]*completionState
+	// localBaseURL is this device's localserver URL, applied to the task
+	// runner on Start so in-task CLIs can call back into the driver. Set by
+	// the localserver (which knows its URL only after binding its listener).
+	localBaseURL string
+	mu           sync.Mutex
 }
 
 // NewDriver creates a new workflow driver.
@@ -144,6 +155,9 @@ func (d *Driver) Start() error {
 	if d.deps != nil {
 		d.runner.SetServerEndpoint(d.deps.BackendBaseURL, d.deps.TokenProvider)
 	}
+	// Inject the localserver URL so in-task CLIs (cs-cloud workflow task
+	// complete) can call back into this device's driver via CS_CLOUD_LOCAL_URL.
+	d.runner.SetLocalServerURL(d.localBaseURL)
 	d.sem = make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)
@@ -399,6 +413,13 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	// runAgent supervises the agent boundary (ctx-cancel aware + best-effort
 	// session abort on timeout) instead of trusting SessionRunner to return on
 	// cancellation. execute stays the single owner of task-status callbacks.
+	if payload.Agent == AgentCsc && sessionID != "" {
+		// Enable the explicit "complete task" tool path for bound csc sessions:
+		// the localserver handler signals completion via this registry while
+		// runAgent waits on the session.
+		d.registerCompletion(payload.TaskID)
+		defer d.unregisterCompletion(payload.TaskID)
+	}
 	out, runErr := d.runAgent(ctx, payload, worktree, agentPath, sessionID)
 
 	// Resume failure fallback: a resumed prior session that fails on first run
@@ -433,6 +454,8 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		var taskErr error
 		if d.aborted(payload.TaskID) {
 			taskErr = d.failTask(payload.TaskID, fmt.Errorf("aborted: %w", runErr), "cancelled")
+		} else if errors.Is(runErr, agent.ErrIncomplete) {
+			taskErr = d.failTask(payload.TaskID, runErr, "agent_incomplete")
 		} else if errors.Is(runErr, context.DeadlineExceeded) {
 			taskErr = d.failTask(payload.TaskID, runErr, "agent_timeout")
 		} else if errors.Is(runErr, agent.ErrEmptySessionOutput) {
@@ -448,6 +471,24 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		}
 		return taskErr
 	}
+	// Explicit completion (agent invoked the complete tool): use the tool's
+	// payload as the task output / decision instead of the session stdout.
+	if sig, ok := d.popCompletionSignal(payload.TaskID); ok {
+		output := sig.Summary
+		if strings.TrimSpace(output) == "" {
+			output = strings.TrimSpace(string(out))
+		}
+		if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
+			emptyErr := fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
+			return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
+		}
+		d.postTaskMessages(payload.TaskID, truncateOutput(output))
+		logger.Info("workflow: task %s completed via tool: session=%s action=%s decision=%s",
+			payload.TaskID, finalSessionID, sig.Action, sig.Decision)
+		return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
+			return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree, sig)
+		})
+	}
 	if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
 		emptyErr := fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
 		return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
@@ -457,7 +498,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	logger.Info("workflow: task %s completed: session=%s output_bytes=%d", payload.TaskID, finalSessionID, len(output))
 
 	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
-		return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree)
+		return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree, agent.CompletionSignal{})
 	})
 }
 
@@ -471,10 +512,16 @@ type agentRunResult struct {
 // produces a buffered result; execute remains the single owner of task status
 // callbacks, so a late worker cannot complete a task that already timed out.
 func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, worktree, agentPath, sessionID string) ([]byte, error) {
+	// Pure-tool completion applies only to bound csc sessions — the only runs
+	// where the agent has a "complete task" tool. notify is non-nil iff execute
+	// registered a completion state for this task.
+	pureTool := payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil
+	notify := d.completionNotify(payload.TaskID)
+
 	resultCh := make(chan agentRunResult, 1)
 	go func() {
 		var result agentRunResult
-		if payload.Agent == AgentCsc && sessionID != "" && d.deps != nil && d.deps.SessionRunner != nil {
+		if pureTool {
 			result.output, result.err = d.runner.RunCSCSession(ctx, payload, worktree, sessionID)
 		} else {
 			result.output, result.err = d.runner.RunPrepared(ctx, payload, worktree, agentPath)
@@ -483,10 +530,39 @@ func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, 
 	}()
 
 	select {
+	case <-notify:
+		// The agent invoked the explicit complete tool mid-session. Stop the
+		// session and report success; execute reads the payload from the
+		// driver's completion registry.
+		d.abortSession(sessionID)
+		<-resultCh // drain; the aborted RunCSCSession result is irrelevant
+		return nil, nil
 	case result := <-resultCh:
 		if err := ctx.Err(); err != nil {
 			d.abortSession(sessionID)
 			return nil, err
+		}
+		if result.err != nil {
+			return result.output, result.err
+		}
+		if pureTool {
+			// The csc session ended its turn cleanly. If completion raced with
+			// session end, treat as complete.
+			select {
+			case <-notify:
+				return nil, nil
+			default:
+			}
+			// Pure-tool mode: a clean idle is NOT a completion. Hold for the
+			// remaining deadline, then surface ErrIncomplete (→ agent_incomplete)
+			// so a task whose agent stopped without calling complete never
+			// silently advances the workflow.
+			select {
+			case <-ctx.Done():
+				return nil, agent.ErrIncomplete
+			case <-notify:
+				return nil, nil
+			}
 		}
 		return result.output, result.err
 	case <-ctx.Done():
@@ -671,6 +747,13 @@ func (d *Driver) SetConversationBinder(binder ConversationBinder) {
 	if r, ok := binder.(SessionRunner); ok {
 		d.deps.SessionRunner = r
 	}
+}
+
+// SetLocalBaseURL injects this device's localserver URL so in-task CLIs can
+// call back into the driver. Must be called before Start so the task runner
+// picks it up; the localserver sets it once it has bound its listener.
+func (d *Driver) SetLocalBaseURL(url string) {
+	d.localBaseURL = url
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps

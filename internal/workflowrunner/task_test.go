@@ -140,9 +140,16 @@ type fakeSessionRunner struct {
 	env      []string
 	permMode string
 	err      error
+	// onRun, when set, is invoked at the start of RunSession. Tests use it to
+	// simulate the agent calling the explicit "complete task" tool so the
+	// pure-tool driver treats the run as completed.
+	onRun func()
 }
 
 func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string, permMode string) ([]byte, error) {
+	if r.onRun != nil {
+		r.onRun()
+	}
 	r.env = env
 	r.permMode = permMode
 	return []byte("session runner used"), r.err
@@ -181,6 +188,25 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 	}
 	if env["CS_CLOUD_NODE_RUN_ID"] != "nr-env" {
 		t.Fatalf("CS_CLOUD_NODE_RUN_ID = %q, want nr-env", env["CS_CLOUD_NODE_RUN_ID"])
+	}
+}
+
+// TestBuildEnvInjectsLocalServerURL verifies the in-task env carries the
+// localserver URL so the "complete task" CLI can call back into this device's
+// /workflow/tasks/{id}/complete endpoint.
+func TestBuildEnvInjectsLocalServerURL(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	tr.SetLocalServerURL("http://127.0.0.1:9999")
+
+	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1"}, t.TempDir())
+	got := ""
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_LOCAL_URL" {
+			got = v
+		}
+	}
+	if got != "http://127.0.0.1:9999" {
+		t.Fatalf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9999", got)
 	}
 }
 
