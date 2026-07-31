@@ -62,11 +62,13 @@ func TestReportToServer_SendsRequiredHeaders(t *testing.T) {
 }
 
 // TestReportToServer_OmitsEmptyWorkspaceHeader confirms an empty workspaceID
-// does not send an empty header (defensive — the caller controls the value).
+// does not send the header at all. Checking presence (not Header.Get, which
+// conflates "absent" and "present-but-empty") guards against a regression to
+// sending an empty-valued X-Workspace-ID header.
 func TestReportToServer_OmitsEmptyWorkspaceHeader(t *testing.T) {
-	var gotWorkspace string
+	var workspaceHeaderPresent bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotWorkspace = r.Header.Get("X-Workspace-ID")
+		_, workspaceHeaderPresent = r.Header[http.CanonicalHeaderKey("X-Workspace-ID")]
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -74,8 +76,8 @@ func TestReportToServer_OmitsEmptyWorkspaceHeader(t *testing.T) {
 	if err := reportToServer(context.Background(), srv.URL, "tok", srv.URL+"/x", "https://pr", "", "a", "t"); err != nil {
 		t.Fatalf("reportToServer: %v", err)
 	}
-	if gotWorkspace != "" {
-		t.Errorf("X-Workspace-ID = %q, want empty (not sent when workspaceID is empty)", gotWorkspace)
+	if workspaceHeaderPresent {
+		t.Error("X-Workspace-ID must not be sent when workspaceID is empty")
 	}
 }
 
