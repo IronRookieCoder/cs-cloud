@@ -283,7 +283,7 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("open PR: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", cfg.deliverableID)
-	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL, os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
+	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: submitted pr=%s\n", cfg.deliverableID, prURL)
@@ -441,11 +441,19 @@ func findExistingGiteaPR(ctx context.Context, base, token, owner, repo, head str
 }
 
 // reportToServer POSTs a pull_request_url to the given server endpoint.
-func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, agentID, taskID string) error {
+func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, workspaceID, agentID, taskID string) error {
 	body, _ := json.Marshal(map[string]string{"pull_request_url": prURL})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	// multica's RequireWorkspaceMember middleware gates this endpoint on a
+	// workspace identifier; without X-Workspace-ID the report is rejected with
+	// 400 "workspace_id or workspace_slug is required" AFTER the PR/MR is
+	// already opened, orphaning it. CS_CLOUD_WORKSPACE_ID is always present in
+	// the task env, so forward it as the header the middleware reads.
+	if workspaceID != "" {
+		req.Header.Set("X-Workspace-ID", workspaceID)
+	}
 	if agentID != "" {
 		req.Header.Set("X-Agent-ID", agentID)
 	}
@@ -466,9 +474,9 @@ func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, agen
 
 // reportDeliverablePR POSTs the PR URL to the unified submit endpoint
 // (same endpoint the code-MR path uses).
-func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL, agentID, taskID string) error {
+func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL, workspaceID, agentID, taskID string) error {
 	return reportToServer(ctx, serverURL, token,
-		serverURL+"/api/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/submit", prURL, agentID, taskID)
+		serverURL+"/api/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/submit", prURL, workspaceID, agentID, taskID)
 }
 
 // execGitOps implements gitOps via shelled-out git.
