@@ -16,7 +16,7 @@ func TestTaskRunPayloadReposAndDeliverables(t *testing.T) {
 	if len(p.Repos) != 1 || p.Repos[0].URL != "https://gitlab/o/r.git" {
 		t.Errorf("repos: %+v", p.Repos)
 	}
-	if len(p.Deliverables) != 1 || p.Deliverables[0].Kind != "pull_request" {
+	if len(p.Deliverables) != 1 || p.Deliverables[0].ID != "d1" {
 		t.Errorf("deliverables: %+v", p.Deliverables)
 	}
 	if p.Deliverables[0].Report.Endpoint != "/x" {

@@ -78,7 +78,6 @@ type RepoSpec struct {
 // DeliverableSpec mirrors the server's csCloudDeliverableSpec.
 type DeliverableSpec struct {
 	ID        string     `json:"id"`
-	Kind      string     `json:"kind"`
 	RepoAlias string     `json:"repo_alias,omitempty"`
 	Report    ReportSpec `json:"report"`
 }

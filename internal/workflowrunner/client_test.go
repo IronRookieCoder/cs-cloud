@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
@@ -100,11 +101,36 @@ func TestClientCompleteTask(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(ts.URL, "", tokenProvider("token-123"))
-	if err := c.CompleteTask(context.Background(), "task-1", "done", "", ""); err != nil {
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", "", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if !called {
 		t.Fatal("server not called")
+	}
+}
+
+// TestClientCompleteTaskForwardsReviewSignal covers the review-signal path:
+// a populated CompletionSignal (decision + reason) must be serialized into the
+// request body so the backend gets the critic's decision directly.
+func TestClientCompleteTaskForwardsReviewSignal(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "", tokenProvider("token-123"))
+	sig := agent.CompletionSignal{Action: "review", Decision: "approve", Reason: "lgtm"}
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", "", sig); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(gotBody, `"decision":"approve"`) {
+		t.Errorf("body missing decision=approve: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"reason":"lgtm"`) {
+		t.Errorf("body missing reason=lgtm: %s", gotBody)
 	}
 }
 
@@ -117,7 +143,7 @@ func TestClientCompleteTaskIncludesSessionAndWorkDir(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
-	if err := c.CompleteTask(context.Background(), "t1", "the output", "sess-123", "/work/dir"); err != nil {
+	if err := c.CompleteTask(context.Background(), "t1", "the output", "sess-123", "/work/dir", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 	if !strings.Contains(gotBody, `"session_id":"sess-123"`) {
@@ -140,7 +166,7 @@ func TestClientCompleteTaskOmitsEmptySessionAndWorkDir(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(srv.URL, srv.URL, tokenProvider("tok"))
-	if err := c.CompleteTask(context.Background(), "t1", "done", "", ""); err != nil {
+	if err := c.CompleteTask(context.Background(), "t1", "done", "", "", agent.CompletionSignal{}); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 	if strings.Contains(gotBody, "session_id") {

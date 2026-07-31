@@ -171,6 +171,56 @@ func TestHandleWorkflowTaskRunDuplicate(t *testing.T) {
 	}
 }
 
+func TestHandleWorkflowTaskCompleteNotRegistered(t *testing.T) {
+	s := New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-1/complete", bytes.NewReader([]byte(`{}`)))
+	req.SetPathValue("id", "task-1")
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskComplete(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleWorkflowTaskCompleteNotRunning(t *testing.T) {
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+	}
+	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
+		BackendBaseURL: "http://localhost:1",
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	defer d.Stop()
+	s := New(WithWorkflow(d))
+
+	body := []byte(`{"action":"complete","summary":"done"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-not-running/complete", bytes.NewReader(body))
+	req.SetPathValue("id", "task-not-running")
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskComplete(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("code = %d, body = %s; want 409 (task not running)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleWorkflowTaskCompleteBadBody(t *testing.T) {
+	d := workflowrunner.NewDriver(workflow.Config{}, nil)
+	s := New(WithWorkflow(d))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/tasks/task-1/complete", strings.NewReader("not-json"))
+	req.SetPathValue("id", "task-1")
+	rec := httptest.NewRecorder()
+	s.handleWorkflowTaskComplete(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleWorkflowTaskAbort(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

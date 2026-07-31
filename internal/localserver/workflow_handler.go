@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
@@ -127,4 +128,54 @@ func (s *Server) handleWorkflowTaskAbort(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeOK(w, map[string]string{"status": "aborted"})
+}
+
+// handleWorkflowTaskComplete forwards an agent's explicit "complete task"
+// signal to the workflow driver. It is called by the in-task CLI when the
+// agent decides its work is done (worker) or reaches a review decision
+// (critic). The driver stores the payload and wakes runAgent; it does NOT call
+// CompleteTask directly — execute remains the sole owner of task-status
+// callbacks. Responds 409 when the task is not running (already finished /
+// unknown) so the CLI can surface that to the agent.
+func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Request) {
+	if s.workflow == nil {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
+		return
+	}
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task id")
+		return
+	}
+	var req struct {
+		Action   string `json:"action"`
+		Summary  string `json:"summary"`
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	// Validate the action before signaling: an unknown/empty action would
+	// otherwise irreversibly latch completion for a running task. summary is
+	// optional for both actions; reason is optional for review.
+	switch req.Action {
+	case "complete":
+		// no extra fields
+	case "review":
+		if req.Decision != "approve" && req.Decision != "reject" {
+			writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "review decision must be approve or reject")
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "unsupported action: "+req.Action)
+		return
+	}
+	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, Decision: req.Decision, Reason: req.Reason}
+	if err := s.workflow.SignalTaskCompletion(taskID, sig); err != nil {
+		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "accepted"})
 }

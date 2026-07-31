@@ -928,13 +928,17 @@ func TestBindSession_ReusesPriorSession(t *testing.T) {
 // flakySessionRunner fails its first RunSession call (simulating a corrupt
 // resumed session) and succeeds on the second (the fresh retry).
 type flakySessionRunner struct {
-	calls int
+	calls     int
+	onSuccess func() // invoked on the succeeding (2nd) call, to signal completion
 }
 
 func (f *flakySessionRunner) RunSession(ctx context.Context, sessionID, worktree, prompt string, env []string, _ string) ([]byte, error) {
 	f.calls++
 	if f.calls == 1 {
 		return nil, fmt.Errorf("resumed session boom")
+	}
+	if f.onSuccess != nil {
+		f.onSuccess()
 	}
 	return []byte("ok-round2"), nil
 }
@@ -983,6 +987,11 @@ func TestExecute_ResumeFailureRetriesFresh(t *testing.T) {
 		_, ok := d.registrations["ws-1"]
 		return ok
 	})
+
+	// Pure-tool mode: the fresh retry must explicitly complete to succeed.
+	flaky.onSuccess = func() {
+		_ = d.SignalTaskCompletion("t-resume", agent.CompletionSignal{Action: "complete", Summary: "ok"})
+	}
 
 	err := d.execute(context.Background(), workflow.TaskRunPayload{
 		TaskID: "t-resume", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
@@ -1324,9 +1333,11 @@ func (*silentlyEmptySessionRunner) RunSession(context.Context, string, string, s
 
 // This exercises the workflow subsystem through its public RunTask boundary,
 // including workspace preparation, session binding, and terminal HTTP
-// callbacks. Only the external CSC execution boundary is substituted.
+// callbacks. Only the external CSC execution boundary is substituted. Under
+// pure-tool completion, a session that ends without the agent calling the
+// complete tool fails as agent_incomplete (not a silent success).
 func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
-	d, fm := newCSCSessionTestDriver(t, time.Minute, &silentlyEmptySessionRunner{}, nil)
+	d, fm := newCSCSessionTestDriver(t, 100*time.Millisecond, &silentlyEmptySessionRunner{}, nil)
 
 	err := d.RunTask(context.Background(), workflow.TaskRunPayload{
 		TaskID:      "task-silently-empty",
@@ -1336,8 +1347,8 @@ func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
 		Agent:       "csc",
 		Prompt:      "do thing",
 	})
-	if !errors.Is(err, agent.ErrEmptySessionOutput) {
-		t.Fatalf("RunTask error = %v, want ErrEmptySessionOutput", err)
+	if !errors.Is(err, agent.ErrIncomplete) {
+		t.Fatalf("RunTask error = %v, want ErrIncomplete", err)
 	}
 	if _, ok := fm.taskCallback("/complete"); ok {
 		t.Fatal("silently empty session called complete callback")
@@ -1353,8 +1364,8 @@ func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
 	if err := json.Unmarshal(body, &failure); err != nil {
 		t.Fatalf("fail body: %v", err)
 	}
-	if failure.FailureReason != "agent_empty_output" {
-		t.Fatalf("failure reason = %q, want agent_empty_output", failure.FailureReason)
+	if failure.FailureReason != "agent_incomplete" {
+		t.Fatalf("failure reason = %q, want agent_incomplete", failure.FailureReason)
 	}
 }
 
@@ -1469,6 +1480,10 @@ func TestDriverRunsWorkflowSessionWithBypassPermissionMode(t *testing.T) {
 	sessionRunner := &fakeSessionRunner{}
 	binder := &recordingConversationBinder{}
 	d, _ := newCSCSessionTestDriver(t, time.Minute, sessionRunner, binder)
+	// Pure-tool mode: the agent must explicitly complete. Simulate it.
+	sessionRunner.onRun = func() {
+		_ = d.SignalTaskCompletion("task-perm-mode", agent.CompletionSignal{Action: "complete", Summary: "done"})
+	}
 
 	if err := d.RunTask(context.Background(), workflow.TaskRunPayload{
 		TaskID:      "task-perm-mode",
@@ -1517,5 +1532,85 @@ func TestDriverFailsBeforeRemoteBindingWhenLocalSessionBindFails(t *testing.T) {
 	}
 	if _, ok := fm.taskCallback("/fail"); !ok {
 		t.Fatal("local bind failure did not call fail callback")
+	}
+}
+
+// completingSessionRunner simulates a csc session that is "busy" (blocks until
+// aborted) and records the env/permMode it was invoked with. It implements
+// SessionAborter so the driver's abort-on-completion path can unblock it.
+type completingSessionRunner struct {
+	env       []string
+	permMode  string
+	started   chan struct{}
+	unblock   chan struct{}
+	closeOnce sync.Once
+}
+
+func (r *completingSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string, permMode string) ([]byte, error) {
+	r.env = env
+	r.permMode = permMode
+	close(r.started)
+	<-r.unblock
+	return []byte("session output"), nil
+}
+
+func (r *completingSessionRunner) AbortSession(context.Context, string) error {
+	r.closeOnce.Do(func() { close(r.unblock) })
+	return nil
+}
+
+// TestDriverCompletesOnExplicitCompletionSignal verifies that when the agent
+// invokes the "complete task" tool (SignalTaskCompletion) mid-session, the
+// driver aborts the session and completes the task with the tool's payload —
+// NOT the session stdout. This is the core of the pure-tool completion model.
+func TestDriverCompletesOnExplicitCompletionSignal(t *testing.T) {
+	runner := &completingSessionRunner{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	t.Cleanup(func() { runner.closeOnce.Do(func() { close(runner.unblock) }) })
+	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: "task-complete", WorkspaceID: "ws-1", NodeRunID: "nr-1", AgentID: "agent-1",
+		Agent: "csc", Prompt: "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	if err := d.SignalTaskCompletion("task-complete", agent.CompletionSignal{
+		Action: "complete", Summary: "all done",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		_, ok := fm.taskCallback("/complete")
+		return ok
+	})
+
+	if _, ok := fm.taskCallback("/fail"); ok {
+		t.Fatal("explicit completion triggered /fail callback")
+	}
+
+	body, ok := fm.taskCallback("/complete")
+	if !ok {
+		t.Fatal("missing /complete body")
+	}
+	var complete struct {
+		Output   string `json:"output"`
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(body, &complete); err != nil {
+		t.Fatalf("complete body: %v", err)
+	}
+	if complete.Output != "all done" {
+		t.Errorf("complete output = %q, want %q (summary, not session stdout)", complete.Output, "all done")
 	}
 }

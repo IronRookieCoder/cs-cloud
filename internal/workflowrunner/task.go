@@ -24,11 +24,25 @@ const (
 	// Environment variables injected into every agent process.
 	EnvWorkspaceID     = "CS_CLOUD_WORKSPACE_ID"
 	EnvTaskID          = "CS_CLOUD_TASK_ID"
+	EnvAgentID         = "CS_CLOUD_AGENT_ID"
 	EnvPrompt          = "CS_CLOUD_PROMPT"
 	EnvCSCloudWorktree = "CS_CLOUD_WORKTREE"
 	// For in-task CLIs (cs-cloud gitea submit) that call the server.
 	EnvServerURL = "CS_CLOUD_BACKEND_URL"
 	EnvToken     = "CS_CLOUD_TOKEN"
+	// EnvLocalServerURL is this device's localserver base URL, letting in-task
+	// CLIs (e.g. `cs-cloud workflow task complete`) call back into the driver
+	// without going through the server.
+	EnvLocalServerURL = "CS_CLOUD_LOCAL_URL"
+	// EnvLocalServerAPIKey is the localserver API key (when one is configured),
+	// attached to in-task completion callbacks so they pass the localserver's
+	// apiAuth middleware instead of 401-ing.
+	EnvLocalServerAPIKey = "CS_CLOUD_LOCAL_API_KEY"
+	// TaskEnvFileName is the file cs-cloud writes into each task workdir
+	// containing the CS_CLOUD_* task variables. In-task CLIs load it (see
+	// cli.loadTaskEnvFile) so they resolve task context from a file rather than
+	// relying on env propagation through the agent subprocess.
+	TaskEnvFileName = ".cs-cloud.env"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -44,6 +58,14 @@ type TaskRunner struct {
 	// can call the server's daemon-auth API. Set via SetServerEndpoint.
 	serverBaseURL string
 	tokenProvider func() (*provider.Credentials, error)
+	// localServerURL is this device's localserver URL, injected as
+	// CS_CLOUD_LOCAL_URL so in-task CLIs can call back into the driver (e.g.
+	// the "complete task" tool). Set via SetLocalServerURL.
+	localServerURL string
+	// localServerAPIKey is the localserver API key (empty when none configured),
+	// injected as CS_CLOUD_LOCAL_API_KEY so in-task completion callbacks can
+	// authenticate to the localserver's apiAuth middleware. Set via SetLocalAPIKey.
+	localServerAPIKey string
 }
 
 // NewTaskRunner creates a new TaskRunner.
@@ -68,6 +90,19 @@ func (tr *TaskRunner) SetAgentEnv(env map[string]string) {
 	tr.agentEnv = env
 }
 
+// SetLocalServerURL injects this device's localserver URL so buildEnv can carry
+// CS_CLOUD_LOCAL_URL for in-task CLIs that call back into the driver.
+func (tr *TaskRunner) SetLocalServerURL(url string) {
+	tr.localServerURL = url
+}
+
+// SetLocalAPIKey injects the localserver API key so buildEnv can carry
+// CS_CLOUD_LOCAL_API_KEY for in-task completion callbacks. Empty when the
+// localserver has no API key configured (auth middleware is then a no-op).
+func (tr *TaskRunner) SetLocalAPIKey(key string) {
+	tr.localServerAPIKey = key
+}
+
 // SetSessionRunner injects a runner that executes prompts inside an already
 // bound local csc session. When set and the task agent is csc, the task runs
 // in the bound session instead of a one-shot CLI process.
@@ -89,9 +124,13 @@ func (tr *TaskRunner) withAgentTimeout(ctx context.Context) (context.Context, co
 // back to the one-shot CLI if no session runner is configured.
 func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRunPayload, worktree, sessionID string) ([]byte, error) {
 	if tr.sessionRunner != nil {
+		env := tr.buildEnv(payload, worktree)
+		if err := writeTaskEnvFile(worktree, env); err != nil {
+			return nil, fmt.Errorf("write task env: %w", err)
+		}
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
-		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, tr.buildEnv(payload, worktree), SessionPermissionBypass)
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, env, SessionPermissionBypass)
 	}
 
 	agentPath, err := exec.LookPath(payload.Agent)
@@ -155,9 +194,59 @@ func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunP
 
 	cmd := exec.CommandContext(ctx, agentPath, args...)
 	cmd.Dir = worktree
-	cmd.Env = tr.buildEnv(payload, worktree)
+	env := tr.buildEnv(payload, worktree)
+	if err := writeTaskEnvFile(worktree, env); err != nil {
+		return nil, fmt.Errorf("write task env: %w", err)
+	}
+	cmd.Env = env
 
 	return cmd.CombinedOutput()
+}
+
+// writeTaskEnvFile persists the CS_CLOUD_* task variables to <workdir>/.cs-cloud.env
+// so in-task CLIs (cs-cloud workflow *) can read their target context from a
+// file. Only CS_CLOUD_* keys are written; the rest of the process env is not
+// persisted.
+//
+// The write goes to a temp file in the same dir and atomically renames onto the
+// target. If the target is a repository-controlled symlink (checked into the
+// worktree), this replaces the symlink itself instead of writing through it to
+// an arbitrary path. A failure is propagated: without this file an in-task CLI
+// that doesn't inherit the agent process env cannot resolve task context and
+// the agent could not signal completion, so it is better to fail the task up
+// front than run work that can never be reported.
+func writeTaskEnvFile(workdir string, env []string) error {
+	var lines []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "CS_CLOUD_") {
+			lines = append(lines, e)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	data := []byte(strings.Join(lines, "\n") + "\n")
+	tmp, err := os.CreateTemp(workdir, ".cs-cloud-env-*")
+	if err != nil {
+		return fmt.Errorf("create task env file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once rename succeeds
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write task env file: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod task env file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close task env file: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(workdir, TaskEnvFileName)); err != nil {
+		return fmt.Errorf("install task env file: %w", err)
+	}
+	return nil
 }
 
 func (tr *TaskRunner) buildArgs(payload workflow.TaskRunPayload) []string {
@@ -195,6 +284,7 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	}
 	env = setEnv(env, EnvWorkspaceID, payload.WorkspaceID)
 	env = setEnv(env, EnvTaskID, payload.TaskID)
+	env = setEnv(env, EnvAgentID, payload.AgentID)
 	env = setEnv(env, EnvPrompt, payload.Prompt)
 	env = setEnv(env, EnvCSCloudWorktree, worktree)
 	// CS_CLOUD_BACKEND_URL + CS_CLOUD_TOKEN so in-task CLIs (cs-cloud gitea
@@ -207,6 +297,12 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 		if creds, err := tr.tokenProvider(); err == nil && creds != nil && creds.AccessToken != "" {
 			env = setEnv(env, EnvToken, creds.AccessToken)
 		}
+	}
+	if tr.localServerURL != "" {
+		env = setEnv(env, EnvLocalServerURL, tr.localServerURL)
+	}
+	if tr.localServerAPIKey != "" {
+		env = setEnv(env, EnvLocalServerAPIKey, tr.localServerAPIKey)
 	}
 	return env
 }

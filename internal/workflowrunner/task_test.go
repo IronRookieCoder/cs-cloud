@@ -140,9 +140,16 @@ type fakeSessionRunner struct {
 	env      []string
 	permMode string
 	err      error
+	// onRun, when set, is invoked at the start of RunSession. Tests use it to
+	// simulate the agent calling the explicit "complete task" tool so the
+	// pure-tool driver treats the run as completed.
+	onRun func()
 }
 
 func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string, permMode string) ([]byte, error) {
+	if r.onRun != nil {
+		r.onRun()
+	}
 	r.env = env
 	r.permMode = permMode
 	return []byte("session runner used"), r.err
@@ -181,6 +188,89 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 	}
 	if env["CS_CLOUD_NODE_RUN_ID"] != "nr-env" {
 		t.Fatalf("CS_CLOUD_NODE_RUN_ID = %q, want nr-env", env["CS_CLOUD_NODE_RUN_ID"])
+	}
+}
+
+// TestRunCSCSession_WritesTaskEnvFile verifies a csc task run writes the
+// CS_CLOUD_* context to .cs-cloud.env in the workdir, so the in-task CLI can
+// read its target context from a file (not just process env).
+func TestRunCSCSession_WritesTaskEnvFile(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	tr.SetSessionRunner(&fakeSessionRunner{})
+	tr.SetLocalServerURL("http://127.0.0.1:9999")
+
+	workdir := t.TempDir()
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID: "task-envfile", WorkspaceID: "ws-1", Agent: "csc", Prompt: "do",
+	}, workdir, "sess-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(workdir, TaskEnvFileName))
+	if err != nil {
+		t.Fatalf(".cs-cloud.env not written to workdir: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "CS_CLOUD_TASK_ID=task-envfile") {
+		t.Errorf("env file missing CS_CLOUD_TASK_ID:\n%s", got)
+	}
+	if !strings.Contains(got, "CS_CLOUD_LOCAL_URL=http://127.0.0.1:9999") {
+		t.Errorf("env file missing CS_CLOUD_LOCAL_URL:\n%s", got)
+	}
+	if !strings.Contains(got, "CS_CLOUD_WORKSPACE_ID=ws-1") {
+		t.Errorf("env file missing CS_CLOUD_WORKSPACE_ID:\n%s", got)
+	}
+}
+
+// TestBuildEnvInjectsLocalServerURL verifies the in-task env carries the
+// localserver URL so the "complete task" CLI can call back into this device's
+// /workflow/tasks/{id}/complete endpoint.
+func TestBuildEnvInjectsLocalServerURL(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	tr.SetLocalServerURL("http://127.0.0.1:9999")
+
+	env := tr.buildEnv(workflow.TaskRunPayload{TaskID: "t1", WorkspaceID: "ws-1"}, t.TempDir())
+	got := ""
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_LOCAL_URL" {
+			got = v
+		}
+	}
+	if got != "http://127.0.0.1:9999" {
+		t.Fatalf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9999", got)
+	}
+}
+
+// TestWriteTaskEnvFile_PersistsOnlyCSCloudVars verifies the task context is
+// written to .cs-cloud.env (only CS_CLOUD_* keys), so in-task CLIs can read it
+// from a file instead of relying on env propagation.
+func TestWriteTaskEnvFile_PersistsOnlyCSCloudVars(t *testing.T) {
+	dir := t.TempDir()
+	env := []string{
+		"PATH=/usr/bin",
+		"CS_CLOUD_TASK_ID=task-xyz",
+		"CS_CLOUD_LOCAL_URL=http://127.0.0.1:5000",
+		"OTHER_VAR=skip-me",
+	}
+	writeTaskEnvFile(dir, env)
+
+	b, err := os.ReadFile(filepath.Join(dir, TaskEnvFileName))
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "CS_CLOUD_TASK_ID=task-xyz") {
+		t.Errorf("missing CS_CLOUD_TASK_ID: %s", got)
+	}
+	if !strings.Contains(got, "CS_CLOUD_LOCAL_URL=http://127.0.0.1:5000") {
+		t.Errorf("missing CS_CLOUD_LOCAL_URL: %s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if line == "" || strings.HasPrefix(line, "CS_CLOUD_") {
+			continue
+		}
+		t.Errorf("non-CS_CLOUD var leaked into env file: %q", line)
 	}
 }
 
