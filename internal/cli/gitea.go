@@ -298,13 +298,24 @@ func envOr(key, def string) string {
 	return def
 }
 
+// tokenUsername returns the git auth username for embedding a PAT into a
+// clone URL. GitHub (SaaS and Enterprise) requires "x-access-token" for
+// fine-grained PAT compatibility; GitLab and Gitea accept "oauth2".
+func tokenUsername(host string) string {
+	h := strings.ToLower(host)
+	if strings.Contains(h, "github") || strings.Contains(h, "ghe.") {
+		return "x-access-token"
+	}
+	return "oauth2"
+}
+
 // injectToken builds an HTTPS clone URL with the PAT embedded for git auth.
 func injectToken(baseURL, owner, repo, token string) string {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	u.User = url.UserPassword("oauth2", token)
+	u.User = url.UserPassword(tokenUsername(u.Host), token)
 	u.Path = fmt.Sprintf("/%s/%s.git", owner, repo)
 	return u.String()
 }
@@ -316,7 +327,7 @@ func injectTokenIntoURL(cloneURL, token string) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	u.User = url.UserPassword("oauth2", token)
+	u.User = url.UserPassword(tokenUsername(u.Host), token)
 	return u.String()
 }
 

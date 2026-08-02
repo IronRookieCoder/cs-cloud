@@ -376,6 +376,32 @@ func TestParseSubmitArgs(t *testing.T) {
 	}
 }
 
+func TestInjectTokenIntoURL_HostAwareUsername(t *testing.T) {
+	tests := []struct {
+		name         string
+		cloneURL     string
+		token        string
+		wantContains string
+	}{
+		{"gitea uses oauth2", "http://gitea:3000/t-aaa/wf-bbb.git", "tok123", "oauth2:tok123@"},
+		{"gitlab uses oauth2", "https://gitlab.test/g/r.git", "tok", "oauth2:tok@"},
+		{"github.com uses x-access-token", "https://github.com/org/repo.git", "ghp", "x-access-token:ghp@"},
+		{"github.com uppercase host", "https://GITHUB.COM/org/repo.git", "ghp", "x-access-token:ghp@"},
+		{"GHE uses x-access-token", "https://ghe.example.com/org/repo.git", "ghp", "x-access-token:ghp@"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectTokenIntoURL(tt.cloneURL, tt.token)
+			if got == "" {
+				t.Fatalf("injectTokenIntoURL(%q, %q) returned empty", tt.cloneURL, tt.token)
+			}
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("injectTokenIntoURL(%q, %q) = %q, want substring %q", tt.cloneURL, tt.token, got, tt.wantContains)
+			}
+		})
+	}
+}
+
 func TestInjectTokenIntoURL(t *testing.T) {
 	got := injectTokenIntoURL("http://gitea:3000/t-aaa/wf-bbb.git", "tok123")
 	if got != "http://oauth2:tok123@gitea:3000/t-aaa/wf-bbb.git" {
