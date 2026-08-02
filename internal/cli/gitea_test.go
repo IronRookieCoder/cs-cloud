@@ -325,6 +325,81 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+// TestSubmitDeliverable_ProviderEnvRoutesToGithub verifies CS_CLOUD_CODE_PROVIDER=github
+// routes to submitGithubPR even without --mr.
+func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
+	var submittedURL string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/submit") {
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submittedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	var gotAuthHeader string
+	githubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthHeader = r.Header.Get("Authorization")
+		jsonResponse(w, 201, map[string]any{"html_url": "https://github.com/org/repo/pull/1", "number": 1})
+	}))
+	defer githubSrv.Close()
+
+	t.Setenv("CS_CLOUD_CODE_PROVIDER", "github")
+	t.Setenv("CS_CLOUD_GITHUB_TOKEN", "ghp-test-token")
+	t.Setenv("CS_CLOUD_GITHUB_API_BASE", githubSrv.URL)
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-1")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-1")
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+
+	fake := &fakeGitOps{currentBranch: "feat/test"}
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			mrMode:        false, // no --mr — provider env drives routing
+			deliverableID: "d1",
+			repoURL:       "https://github.com/org/repo.git",
+			gitOps:        fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable (github provider): %v", err)
+		}
+	})
+	for _, want := range []string{
+		"deliverable d1: submitting GitHub PR node_run=nr-1 branch=feat/test",
+		"deliverable d1: pushing PR branch=feat/test",
+		"deliverable d1: opening PR source=feat/test target=main",
+		"deliverable d1: reporting PR",
+		"deliverable d1: submitted pr=https://github.com/org/repo/pull/1",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	if submittedURL != "https://github.com/org/repo/pull/1" {
+		t.Errorf("submitted URL = %q, want github PR html_url", submittedURL)
+	}
+	if !strings.Contains(gotAuthHeader, "token ghp-test-token") {
+		t.Errorf("Authorization header = %q, want 'token ghp-test-token'", gotAuthHeader)
+	}
+	// Assert push used the worktree dir (cwd).
+	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != repoDir {
+		t.Errorf("CurrentBranch dir = %+v, want %q", fake.currentBranchDirs, repoDir)
+	}
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "feat/test" {
+		t.Errorf("expected push of feat/test, got %+v", fake.pushCalls)
+	}
+}
+
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
 	// The failure must come from readGiteaContext detecting the missing
 	// CS_CLOUD_NODE_RUN_ID (cwd is always valid, so no worktree-dir check).

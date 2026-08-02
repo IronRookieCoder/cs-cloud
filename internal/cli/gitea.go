@@ -191,6 +191,17 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 // submitDeliverable is the testable core. Returns nil only after the PR/MR is
 // registered back to the server.
 func submitDeliverable(cfg submitConfig) error {
+	// Provider-driven dispatch: CS_CLOUD_CODE_PROVIDER env (set by multica)
+	// takes priority over the legacy --mr flag.
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("CS_CLOUD_CODE_PROVIDER")))
+	switch provider {
+	case "github":
+		return submitGithubPR(cfg)
+	case "gitlab":
+		return submitGitlabMR(cfg)
+	}
+
+	// Backward compat: --mr flag implies gitlab (pre-provider agent prompts).
 	if cfg.mrMode {
 		return submitGitlabMR(cfg)
 	}
