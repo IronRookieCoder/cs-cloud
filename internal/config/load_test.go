@@ -267,9 +267,9 @@ func TestLoad_WorkflowBackendBaseURLFromEnvOverridesBaseURL(t *testing.T) {
 	}
 }
 
-func TestLoad_WorkflowBackendBaseURLDefaultWhenNoBaseURL(t *testing.T) {
+func TestLoad_WorkflowBackendBaseURLFallsBackToBuiltinDefault(t *testing.T) {
 	isolatedConfig(t, `{}`)
-	// Ensure neither explicit env nor derivation source is present.
+	// Ensure neither explicit env nor any derivation source is present.
 	t.Setenv("COSTRICT_BASE_URL", "")
 	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
 
@@ -277,8 +277,70 @@ func TestLoad_WorkflowBackendBaseURLDefaultWhenNoBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.Workflow.BackendBaseURL != "" {
-		t.Fatalf("BackendBaseURL = %q, want empty", cfg.Workflow.BackendBaseURL)
+	want := platform.DefaultCloudBaseURL + "/workflow-backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
+	}
+}
+
+// writeAuthJSON plants a credential file under the isolated data dir so
+// Load() can derive the workflow backend URL from the logged-in environment.
+func writeAuthJSON(t *testing.T, content string) {
+	t.Helper()
+	dir := platform.CoStrictShareDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoad_WorkflowBackendBaseURLDerivedFromCredentials(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("COSTRICT_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
+	writeAuthJSON(t, `{"access_token":"tok","base_url":"https://zgsmtest.cn:30443"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://zgsmtest.cn:30443/workflow-backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
+	}
+}
+
+func TestLoad_WorkflowBackendBaseURLBaseURLWinsOverCredentials(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("COSTRICT_BASE_URL", "https://zgsmtest.cn:30443")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "")
+	writeAuthJSON(t, `{"access_token":"tok","base_url":"https://cred.example.com"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://zgsmtest.cn:30443/workflow-backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
+	}
+}
+
+func TestLoad_WorkflowBackendBaseURLExplicitEnvWinsOverCredentials(t *testing.T) {
+	isolatedConfig(t, `{}`)
+	t.Setenv("COSTRICT_BASE_URL", "")
+	t.Setenv("CS_BRIDGE_WORKFLOW_BACKEND_BASE_URL", "https://explicit.example.com/backend")
+	writeAuthJSON(t, `{"access_token":"tok","base_url":"https://cred.example.com"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := "https://explicit.example.com/backend"
+	if cfg.Workflow.BackendBaseURL != want {
+		t.Fatalf("BackendBaseURL = %q, want %q", cfg.Workflow.BackendBaseURL, want)
 	}
 }
 

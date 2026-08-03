@@ -229,11 +229,44 @@ func Load() (*Config, error) {
 	// required at config load time so that commands like stop/restart work
 	// without a network configuration; workflow components validate it when
 	// they start.
-	if cfg.Workflow.BackendBaseURL == "" && cfg.BaseURL != "" {
-		cfg.Workflow.BackendBaseURL = strings.TrimRight(cfg.BaseURL, "/") + "/workflow-backend"
+	// Derive the workflow backend base URL from the same base-URL chain the
+	// cloud client uses — config base_url, then the login credential, then
+	// the built-in default — so logging into an environment is enough for
+	// the daemon to reach that environment's workflow backend. Explicit
+	// configuration (CS_CLOUD_WORKFLOW_BACKEND_BASE_URL env or the config
+	// file's workflow.backend_base_url) always wins and never reaches this
+	// derivation.
+	if cfg.Workflow.BackendBaseURL == "" {
+		base := cfg.BaseURL
+		if base == "" {
+			base = credentialsBaseURL()
+		}
+		if base == "" {
+			base = platform.DefaultCloudBaseURL
+		}
+		cfg.Workflow.BackendBaseURL = strings.TrimRight(base, "/") + "/workflow-backend"
 	}
 
 	return cfg, nil
+}
+
+// credentialsBaseURL returns the base_url of the logged-in credential
+// (share/auth.json), or "" when the file is missing, unreadable, or has no
+// base_url. It reads the file directly instead of going through
+// internal/provider because provider imports internal/cloud, which imports
+// this package — importing provider here would create an import cycle.
+func credentialsBaseURL() string {
+	data, err := os.ReadFile(filepath.Join(platform.CoStrictShareDir(), "auth.json"))
+	if err != nil {
+		return ""
+	}
+	var cred struct {
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(data, &cred); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cred.BaseURL)
 }
 
 // parsePositiveDuration parses a non-empty duration string and returns the

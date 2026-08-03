@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -315,7 +316,32 @@ func gitShowFile(dir string, source string, path string) string {
 	}
 
 	if source == "worktree" {
-		absPath := dir + "/" + path
+		// path is an untrusted client query param; sandbox it against dir
+		// (which the caller already validated via resolvePath) on both the
+		// lexical and symlink-resolved forms, and reject high-risk secret
+		// locations. Mirrors resolvePath's defense so symlink-escape and
+		// "../" traversal can't reach arbitrary files outside dir.
+		absPath := filepath.Join(dir, path)
+		if !pathInDir(absPath, dir) {
+			return ""
+		}
+		// On Windows EvalSymlinks rewrites 8.3 short names to long names, so
+		// the resolved absPath can diverge from the lexical dir even for a
+		// totally benign workspace. Resolve dir the same way before comparing.
+		resolvedDir := dir
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			resolvedDir = real
+		}
+		resolved := absPath
+		if real, err := filepath.EvalSymlinks(absPath); err == nil {
+			resolved = real
+		}
+		if !pathInDir(resolved, resolvedDir) {
+			return ""
+		}
+		if pathIsHighRisk(absPath) || pathIsHighRisk(resolved) {
+			return ""
+		}
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			return ""

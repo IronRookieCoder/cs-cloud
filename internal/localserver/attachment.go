@@ -77,6 +77,50 @@ func extForMime(mime string) string {
 	}
 }
 
+// allowedAttachmentMimes is the upload-side whitelist. Anything outside this
+// set is rejected with 400 UNSUPPORTED_MIME. This gates the stored XSS vector
+// at the door — without it an attacker can stash text/html or image/svg+xml
+// and have it served back with that Content-Type via http.ServeFile.
+var allowedAttachmentMimes = map[string]struct{}{
+	"image/png":                {},
+	"image/jpeg":               {},
+	"image/jpg":                {},
+	"image/gif":                {},
+	"image/webp":               {},
+	"application/pdf":          {},
+	"application/octet-stream": {},
+}
+
+// isAllowedAttachmentMime reports whether mime is in the upload whitelist.
+// Comparison is case-insensitive and trims surrounding whitespace, matching
+// extForMime's normalization.
+func isAllowedAttachmentMime(mime string) bool {
+	_, ok := allowedAttachmentMimes[strings.ToLower(strings.TrimSpace(mime))]
+	return ok
+}
+
+// sanitizeDispositionFilename returns a value safe to embed inside a
+// Content-Disposition: attachment; filename="..." header. It strips control
+// characters and the double-quote delimiter so the header cannot be broken
+// out of. Empty / whitespace-only input yields "" so the caller can fall
+// back to the attachment id.
+func sanitizeDispositionFilename(name string) string {
+	name = filepath.Base(name)
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if r == '"' || r == '\\' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	return out
+}
+
 // handleAttachmentUpload accepts a multipart file upload and stores it to disk.
 // Contract v2 §I1: the response exposes abs_path as the only agent-facing
 // reference handle. The internal id is for management only.
@@ -110,6 +154,11 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	mime := header.Header.Get("Content-Type")
 	if mime == "" {
 		mime = "application/octet-stream"
+	}
+	if !isAllowedAttachmentMime(mime) {
+		writeErr(w, http.StatusBadRequest, "UNSUPPORTED_MIME",
+			"attachment mime type not allowed; use a whitelisted image, pdf, or application/octet-stream")
+		return
 	}
 	ext := extForMime(mime)
 
@@ -243,7 +292,19 @@ func (s *Server) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", meta.Mime)
+	// Defense-in-depth against stored XSS: never honor the stored meta.Mime
+	// on the wire. Force a download with a generic Content-Type and pin
+	// nosniff so the browser cannot reinterpret the bytes as HTML/SVG/etc.
+	// http.ServeFile would otherwise preserve the Content-Type we set here
+	// only when it cannot sniff one itself; setting it explicitly plus
+	// attachment disposition is the canonical safe pattern.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if fname := sanitizeDispositionFilename(meta.Filename); fname != "" {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+fname+`"`)
+	} else {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+meta.ID+`"`)
+	}
 	if meta.Sha256 != "" {
 		w.Header().Set("ETag", `"`+meta.Sha256+`"`)
 	}

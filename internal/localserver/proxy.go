@@ -114,7 +114,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// does not exist"; mkdir -p here so callers can pass a fresh path per
 	// session without pre-provisioning it.
 	if isConversationCreate {
-		ensureConversationWorkdir(r)
+		s.ensureConversationWorkdir(r)
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
@@ -166,9 +166,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 //  1. `X-Workspace-Directory` header (canonical mechanism, URL-decoded)
 //  2. body `cwd` JSON field (fallback for callers that use it)
 //
+// cwd is untrusted client input. Before creating anything it is sandboxed the
+// same way resolvePath sandboxes reads: the lexical and symlink-resolved
+// forms (via resolveForCreate, which handles the not-yet-existing case) must
+// both clear the pathIsHighRisk secret blacklist, and when
+// AllowAbsolutePaths is off they must both fall under the daemon's workspace
+// anchor (s.rootDir, or the process cwd as fallback). Without this guard the
+// endpoint could create directories in arbitrary sensitive locations such as
+// ~/.ssh/ or system paths.
+//
 // Errors are logged only — mkdir failure still lets csc surface its own
 // validation error. The request body is always restored verbatim.
-func ensureConversationWorkdir(r *http.Request) {
+func (s *Server) ensureConversationWorkdir(r *http.Request) {
 	var body []byte
 	if r.Body != nil {
 		var err error
@@ -199,6 +208,40 @@ func ensureConversationWorkdir(r *http.Request) {
 		logger.Warn("auto-mkdir: resolve %q failed: %v", cwd, err)
 		return
 	}
+
+	lexical, resolved := resolveForCreate(abs)
+	if pathIsHighRisk(lexical) || pathIsHighRisk(resolved) {
+		logger.Warn("auto-mkdir: refusing high-risk path %s", abs)
+		return
+	}
+	if !s.runtimeCfg.AllowAbsolutePaths {
+		anchor := s.rootDir
+		if anchor == "" {
+			if wd, wdErr := os.Getwd(); wdErr == nil {
+				anchor = wd
+			}
+		}
+		if anchor != "" {
+			lexicalAnchor := filepath.Clean(anchor)
+			resolvedAnchor := lexicalAnchor
+			if real, linkErr := filepath.EvalSymlinks(anchor); linkErr == nil {
+				resolvedAnchor = real
+			}
+			// Strict: the resolved cwd must live inside the (resolved) anchor.
+			// A lexical-inside-but-resolved-outside case — e.g. a symlink
+			// planted inside the anchor pointing somewhere outside — must be
+			// rejected, since os.MkdirAll follows symlinks. We also accept the
+			// lexical anchor form so the check still works when EvalSymlinks
+			// fails on the anchor itself (e.g. the anchor doesn't exist yet);
+			// in that case resolveForCreate likewise degrades to a lexical-only
+			// resolved form.
+			if !pathInDir(resolved, resolvedAnchor) && !pathInDir(resolved, lexicalAnchor) {
+				logger.Warn("auto-mkdir: %s escapes workspace anchor", abs)
+				return
+			}
+		}
+	}
+
 	if info, err := os.Stat(abs); err == nil {
 		if !info.IsDir() {
 			logger.Warn("auto-mkdir: %s exists and is not a directory", abs)
