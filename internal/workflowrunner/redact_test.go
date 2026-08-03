@@ -39,8 +39,10 @@ func TestEnvKeySummary(t *testing.T) {
 			t.Errorf("envKeySummary missing %q in %q", want, got)
 		}
 	}
-	if strings.Contains(got, "secret-token") || strings.Contains(got, "gitea-secret") {
-		t.Errorf("envKeySummary leaked a secret value: %q", got)
+	for _, value := range []string{"secret-token", "gitea-secret", "node-1", "/usr/bin"} {
+		if strings.Contains(got, value) {
+			t.Errorf("envKeySummary leaked an environment value %q: %q", value, got)
+		}
 	}
 }
 

@@ -208,8 +208,8 @@ func githubRepoFromURL(repoURL string) (owner, repo string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("parse repo URL %q: %w", repoURL, err)
 	}
-	if u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", "", fmt.Errorf("repo URL must be an absolute HTTP(S) URL, got %q", repoURL)
+	if u.Host == "" || u.Scheme != "https" {
+		return "", "", fmt.Errorf("repo URL must be an absolute HTTPS URL, got %q", repoURL)
 	}
 	project := strings.Trim(u.Path, "/")
 	project = strings.TrimSuffix(project, ".git")

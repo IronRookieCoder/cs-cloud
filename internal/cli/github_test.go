@@ -203,3 +203,25 @@ func TestSubmitGithubPRRejectsBadRepoURLBeforePush(t *testing.T) {
 		t.Fatalf("Push called for invalid repo URL: %+v", ops.pushCalls)
 	}
 }
+
+func TestSubmitGithubPRRejectsHTTPRepoURLBeforePush(t *testing.T) {
+	t.Setenv("CS_CLOUD_GITHUB_TOKEN", "ghp-test")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "node-run-1")
+	t.Setenv("CS_CLOUD_BACKEND_URL", "https://backend.test")
+
+	ops := &fakeGitOps{currentBranch: "feat/x"}
+	err := submitGithubPR(submitConfig{
+		deliverableID: "d1",
+		repoURL:       "http://github.com/org/repo.git",
+		gitOps:        ops,
+	})
+	if err == nil {
+		t.Fatal("expected invalid repo URL error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "https") {
+		t.Fatalf("error = %v, want https requirement", err)
+	}
+	if len(ops.pushCalls) != 0 {
+		t.Fatalf("Push called for HTTP repo URL: %+v", ops.pushCalls)
+	}
+}
