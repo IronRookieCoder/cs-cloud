@@ -132,8 +132,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	tmpFile := tempFile(t, "# my document body")
 
 	// currentBranch mirrors what CheckoutRepo would have left the worktree on:
-	// the env-advertised CS_CLOUD_REPO_NODE_BRANCH (here aliased as
-	// CS_CLOUD_GITEA_NODE_BRANCH = "node/dd").
+	// the env-advertised CS_CLOUD_GITEA_NODE_BRANCH.
 	fake := &fakeGitOps{currentBranch: "node/dd"}
 	stderr := captureStderr(t, func() {
 		err := submitDeliverable(submitConfig{
@@ -462,7 +461,7 @@ func TestInjectTokenIntoURL_HostAwareUsername(t *testing.T) {
 		{"gitlab uses oauth2", "https://gitlab.test/g/r.git", "tok", "oauth2:tok@"},
 		{"github.com uses x-access-token", "https://github.com/org/repo.git", "ghp", "x-access-token:ghp@"},
 		{"github.com uppercase host", "https://GITHUB.COM/org/repo.git", "ghp", "x-access-token:ghp@"},
-		{"GHE uses x-access-token", "https://ghe.example.com/org/repo.git", "ghp", "x-access-token:ghp@"},
+		{"embedded github host is not GitHub", "https://my-github-gitlab.local/g/r.git", "tok", "oauth2:tok@"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -474,6 +473,16 @@ func TestInjectTokenIntoURL_HostAwareUsername(t *testing.T) {
 				t.Errorf("injectTokenIntoURL(%q, %q) = %q, want substring %q", tt.cloneURL, tt.token, got, tt.wantContains)
 			}
 		})
+	}
+}
+
+func TestInjectGithubTokenIntoURLUsesGithubUsernameForEnterpriseHosts(t *testing.T) {
+	got := injectGithubTokenIntoURL("https://ghe.example.com/org/repo.git", "ghp")
+	if got == "" {
+		t.Fatal("injectGithubTokenIntoURL returned empty")
+	}
+	if !strings.Contains(got, "x-access-token:ghp@") {
+		t.Fatalf("injectGithubTokenIntoURL = %q, want x-access-token username", got)
 	}
 }
 

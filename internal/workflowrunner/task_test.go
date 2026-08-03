@@ -235,12 +235,12 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		Agent:       "csc",
 		Prompt:      "do",
 		Env: map[string]string{
-			"CS_CLOUD_GITLAB_TOKEN":           "gitlab-secret",
-			"CS_CLOUD_GITEA_TOKEN":            "gitea-secret",
-			"CS_CLOUD_GITEA_INST_BRANCH":      "inst-1",
-			"CS_CLOUD_GITEA_NODE_BRANCH":      "node-1",
-			"CS_CLOUD_GITEA_DELIVERABLES":     `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md"}]`,
-			"CS_CLOUD_GITEA_CLONE_URL_AUTHED": "https://bot:gitea-secret@gitea.test/t/wf.git",
+			"CS_CLOUD_GITLAB_TOKEN":       "gitlab-secret",
+			"CS_CLOUD_GITEA_TOKEN":        "gitea-secret",
+			"CS_CLOUD_GITEA_CLONE_URL":    "https://gitea.test/t/wf.git",
+			"CS_CLOUD_GITEA_INST_BRANCH":  "inst-1",
+			"CS_CLOUD_GITEA_NODE_BRANCH":  "node-1",
+			"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md"}]`,
 		},
 		Repos: []workflow.RepoSpec{
 			{URL: "https://gitlab.test/root/demo.git", Provider: "gitlab", Role: "code", Alias: "demo", BaseBranch: "main"},
@@ -277,10 +277,39 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 			t.Errorf(".cs-cloud.repos missing %q:\n%s", want, got)
 		}
 	}
-	for _, secret := range []string{"gitlab-secret", "gitea-secret", "CS_CLOUD_GITEA_CLONE_URL_AUTHED"} {
+	for _, secret := range []string{"gitlab-secret", "gitea-secret", "CLONE_URL_AUTHED"} {
 		if strings.Contains(got, secret) {
 			t.Errorf(".cs-cloud.repos leaked secret %q:\n%s", secret, got)
 		}
+	}
+}
+
+func TestRunCSCSession_WritesLegacyRepoURLToTaskReposFile(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	tr.SetSessionRunner(&fakeSessionRunner{})
+
+	workdir := t.TempDir()
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-legacy-repo",
+		WorkspaceID: "ws-1",
+		Agent:       "csc",
+		Prompt:      "do",
+		RepoURL:     "https://gitlab.test/root/legacy.git",
+	}, workdir, "sess-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(workdir, TaskReposFileName))
+	if err != nil {
+		t.Fatalf(".cs-cloud.repos not written to workdir: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "https://gitlab.test/root/legacy.git") {
+		t.Fatalf(".cs-cloud.repos missing legacy RepoURL:\n%s", got)
+	}
+	if strings.Contains(got, "- 鏃?") {
+		t.Fatalf(".cs-cloud.repos reported no code repos despite legacy RepoURL:\n%s", got)
 	}
 }
 

@@ -279,7 +279,14 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 		writeRepoBlock(&b, r, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
 	}
 	if codeCount == 0 {
-		b.WriteString("- 无\n")
+		if repoURL := strings.TrimSpace(payload.RepoURL); repoURL != "" {
+			writeRepoBlock(&b, workflow.RepoSpec{
+				URL:  repoURL,
+				Role: "code",
+			}, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
+		} else {
+			b.WriteString("- 无\n")
+		}
 	}
 
 	b.WriteString("\n交付物仓库：\n")
@@ -363,9 +370,6 @@ func repoProviderLabel(provider string) string {
 
 func taskDeliverableRefs(env map[string]string) []taskDeliverableRef {
 	raw := strings.TrimSpace(env["CS_CLOUD_GITEA_DELIVERABLES"])
-	if raw == "" {
-		raw = strings.TrimSpace(env["CS_CLOUD_REPO_DELIVERABLES"])
-	}
 	if raw == "" {
 		return nil
 	}

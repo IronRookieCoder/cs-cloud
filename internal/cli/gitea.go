@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,9 +49,10 @@ func printDeliverableUsage() {
 Usage:
   cs-cloud workflow deliverable submit --deliverable <id> --file <path>
     Push a document deliverable to the platform Gitea and open a PR.
-    Reads CS_CLOUD_GITEA_* env (set by the task payload), fetches the workspace
-    Gitea PAT, pushes the document to the node branch, opens a Gitea PR
-    (node->inst), and registers the PR URL back to the server.`)
+    Reads CS_CLOUD_GITEA_* env (set by the task payload), uses
+    CS_CLOUD_GITEA_TOKEN as the workspace bot PAT, pushes the document to the
+    node branch, opens a Gitea PR (node->inst), and registers the PR URL back
+    to the server.`)
 }
 
 // runGiteaSubmit parses flags and runs the submit flow.
@@ -313,8 +315,11 @@ func envOr(key, def string) string {
 // clone URL. GitHub (SaaS and Enterprise) requires "x-access-token" for
 // fine-grained PAT compatibility; GitLab and Gitea accept "oauth2".
 func tokenUsername(host string) string {
-	h := strings.ToLower(host)
-	if strings.Contains(h, "github") || strings.Contains(h, "ghe.") {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if splitHost, _, err := net.SplitHostPort(h); err == nil {
+		h = splitHost
+	}
+	if h == "github.com" || strings.HasSuffix(h, ".github.com") {
 		return "x-access-token"
 	}
 	return "oauth2"
@@ -334,11 +339,22 @@ func injectToken(baseURL, owner, repo, token string) string {
 // injectTokenIntoURL injects the PAT into a full clone URL (already carrying
 // owner/repo). Returns "" on an unparseable URL.
 func injectTokenIntoURL(cloneURL, token string) string {
+	return injectTokenIntoURLWithUsername(cloneURL, token, "")
+}
+
+func injectGithubTokenIntoURL(cloneURL, token string) string {
+	return injectTokenIntoURLWithUsername(cloneURL, token, "x-access-token")
+}
+
+func injectTokenIntoURLWithUsername(cloneURL, token, username string) string {
 	u, err := url.Parse(strings.TrimSpace(cloneURL))
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	u.User = url.UserPassword(tokenUsername(u.Host), token)
+	if strings.TrimSpace(username) == "" {
+		username = tokenUsername(u.Host)
+	}
+	u.User = url.UserPassword(username, token)
 	return u.String()
 }
 

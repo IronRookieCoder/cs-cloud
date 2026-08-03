@@ -46,7 +46,13 @@ func submitGithubPR(cfg submitConfig) error {
 
 	fmt.Fprintf(os.Stderr, "deliverable %s: submitting GitHub PR node_run=%s branch=%s\n", cfg.deliverableID, nodeRunID, currentBranch)
 
-	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
+	if _, _, err := githubRepoFromURL(cfg.repoURL); err != nil {
+		return fmt.Errorf("invalid GitHub repo URL: %w", err)
+	}
+	authURL := injectGithubTokenIntoURL(cfg.repoURL, cred.Token)
+	if authURL == "" {
+		return fmt.Errorf("invalid GitHub repo URL: cannot inject token into %q", cfg.repoURL)
+	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: pushing PR branch=%s\n", cfg.deliverableID, currentBranch)
 	if err := cfg.gitOps.Push(worktree, authURL, currentBranch); err != nil {
 		return fmt.Errorf("push: %w", err)
@@ -107,22 +113,18 @@ func openGithubPR(ctx context.Context, base, token, repoURL, sourceBranch, targe
 		effectiveBase = githubAPIBase(repoURL)
 	}
 
-	u, err := url.Parse(strings.TrimSpace(repoURL))
+	owner, repo, err := githubRepoFromURL(repoURL)
 	if err != nil {
-		return "", fmt.Errorf("parse repo URL %q: %w", repoURL, err)
+		return "", err
 	}
-	project := strings.Trim(u.Path, "/")
-	project = strings.TrimSuffix(project, ".git")
-	if project == "" {
-		return "", fmt.Errorf("cannot extract owner/repo from repo URL %q", repoURL)
-	}
+	project := owner + "/" + repo
 
 	body, _ := json.Marshal(map[string]string{
 		"title": title,
 		"head":  sourceBranch,
 		"base":  targetBranch,
 	})
-	endpoint := strings.TrimRight(effectiveBase, "/") + "/repos/" + url.PathEscape(project) + "/pulls"
+	endpoint := strings.TrimRight(effectiveBase, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/pulls"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("build create PR request: %w", err)
@@ -158,9 +160,14 @@ func openGithubPR(ctx context.Context, base, token, repoURL, sourceBranch, targe
 // findExistingGithubPR lists open PRs filtered by head branch and returns the
 // first match's html_url. Idempotent across retries.
 func findExistingGithubPR(ctx context.Context, base, token, project, sourceBranch, targetBranch string) (string, error) {
+	owner, repo, ok := strings.Cut(project, "/")
+	if !ok || strings.TrimSpace(owner) == "" {
+		return "", fmt.Errorf("cannot extract owner from GitHub project %q", project)
+	}
+	headFilter := owner + ":" + sourceBranch
 	endpoint := fmt.Sprintf("%s/repos/%s/pulls?state=open&head=%s&base=%s",
-		strings.TrimRight(base, "/"), url.PathEscape(project),
-		url.QueryEscape(sourceBranch), url.QueryEscape(targetBranch))
+		strings.TrimRight(base, "/"), url.PathEscape(owner)+"/"+url.PathEscape(repo),
+		url.QueryEscape(headFilter), url.QueryEscape(targetBranch))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("build list PR request: %w", err)
@@ -190,4 +197,25 @@ func findExistingGithubPR(ctx context.Context, base, token, project, sourceBranc
 		}
 	}
 	return "", fmt.Errorf("github create PR returned error but no open PR for head %q", sourceBranch)
+}
+
+func githubRepoFromURL(repoURL string) (owner, repo string, err error) {
+	raw := strings.TrimSpace(repoURL)
+	if raw == "" {
+		return "", "", fmt.Errorf("repo URL is empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("parse repo URL %q: %w", repoURL, err)
+	}
+	if u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", "", fmt.Errorf("repo URL must be an absolute HTTP(S) URL, got %q", repoURL)
+	}
+	project := strings.Trim(u.Path, "/")
+	project = strings.TrimSuffix(project, ".git")
+	parts := strings.Split(project, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", fmt.Errorf("cannot extract owner/repo from repo URL %q", repoURL)
+	}
+	return parts[0], parts[1], nil
 }

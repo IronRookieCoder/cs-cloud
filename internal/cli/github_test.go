@@ -93,6 +93,12 @@ func TestOpenGithubPR_DuplicateResolvesExisting(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pulls"):
 			jsonResponse(w, 422, map[string]any{"message": "Validation Failed"})
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			if got := r.URL.Query().Get("head"); got != "org:feat/x" {
+				t.Errorf("head query = %q, want org:feat/x", got)
+			}
+			if got := r.URL.Query().Get("base"); got != "main" {
+				t.Errorf("base query = %q, want main", got)
+			}
 			jsonResponse(w, 200, []map[string]any{{
 				"html_url": "https://github.com/org/repo/pulls/7",
 				"head":     map[string]string{"ref": "feat/x"},
@@ -119,6 +125,12 @@ func TestOpenGithubPR_DuplicateResolvesExistingOnConflict(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pulls"):
 			jsonResponse(w, 409, map[string]any{"message": "Conflict"})
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			if got := r.URL.Query().Get("head"); got != "org:feat/conflict" {
+				t.Errorf("head query = %q, want org:feat/conflict", got)
+			}
+			if got := r.URL.Query().Get("base"); got != "main" {
+				t.Errorf("base query = %q, want main", got)
+			}
 			jsonResponse(w, 200, []map[string]any{{
 				"html_url": "https://github.com/org/repo/pulls/9",
 				"head":     map[string]string{"ref": "feat/conflict"},
@@ -167,5 +179,27 @@ func TestOpenGithubPR_BadRepoURL(t *testing.T) {
 	if _, err := openGithubPR(context.Background(), "https://api.github.com", "token",
 		"", "feat/x", "main", "test PR"); err == nil {
 		t.Fatal("expected error for empty repo URL, got nil")
+	}
+}
+
+func TestSubmitGithubPRRejectsBadRepoURLBeforePush(t *testing.T) {
+	t.Setenv("CS_CLOUD_GITHUB_TOKEN", "ghp-test")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "node-run-1")
+	t.Setenv("CS_CLOUD_BACKEND_URL", "https://backend.test")
+
+	ops := &fakeGitOps{currentBranch: "feat/x"}
+	err := submitGithubPR(submitConfig{
+		deliverableID: "d1",
+		repoURL:       "not-a-url",
+		gitOps:        ops,
+	})
+	if err == nil {
+		t.Fatal("expected invalid repo URL error")
+	}
+	if !strings.Contains(err.Error(), "invalid GitHub repo URL") {
+		t.Fatalf("error = %v, want invalid GitHub repo URL", err)
+	}
+	if len(ops.pushCalls) != 0 {
+		t.Fatalf("Push called for invalid repo URL: %+v", ops.pushCalls)
 	}
 }
