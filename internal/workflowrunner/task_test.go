@@ -223,6 +223,67 @@ func TestRunCSCSession_WritesTaskEnvFile(t *testing.T) {
 	}
 }
 
+func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	tr.SetSessionRunner(&fakeSessionRunner{})
+
+	workdir := t.TempDir()
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-repos",
+		WorkspaceID: "ws-1",
+		Agent:       "csc",
+		Prompt:      "do",
+		Env: map[string]string{
+			"CS_CLOUD_GITLAB_TOKEN":           "gitlab-secret",
+			"CS_CLOUD_GITEA_TOKEN":            "gitea-secret",
+			"CS_CLOUD_GITEA_INST_BRANCH":      "inst-1",
+			"CS_CLOUD_GITEA_NODE_BRANCH":      "node-1",
+			"CS_CLOUD_GITEA_DELIVERABLES":     `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md"}]`,
+			"CS_CLOUD_GITEA_CLONE_URL_AUTHED": "https://bot:gitea-secret@gitea.test/t/wf.git",
+		},
+		Repos: []workflow.RepoSpec{
+			{URL: "https://gitlab.test/root/demo.git", Provider: "gitlab", Role: "code", Alias: "demo", BaseBranch: "main"},
+			{URL: "https://gitea.test/t/wf.git", Provider: "gitea", Role: "delivery", Alias: "delivery", BaseBranch: "inst-1", BotToken: "gitea-secret"},
+		},
+		Deliverables: []workflow.DeliverableSpec{
+			{ID: "d1"},
+		},
+	}, workdir, "sess-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(workdir, TaskReposFileName))
+	if err != nil {
+		t.Fatalf(".cs-cloud.repos not written to workdir: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"代码仓库：",
+		"- demo",
+		"地址：https://gitlab.test/root/demo.git",
+		"类型：Gitlab",
+		"用途：按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。",
+		"交付物仓库：",
+		"- delivery",
+		"类型：Gitea",
+		"node 分支：node-1",
+		"inst 分支：inst-1",
+		"交付物：",
+		"ID：d1",
+		"写入路径：nodes/design.md",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf(".cs-cloud.repos missing %q:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"gitlab-secret", "gitea-secret", "CS_CLOUD_GITEA_CLONE_URL_AUTHED"} {
+		if strings.Contains(got, secret) {
+			t.Errorf(".cs-cloud.repos leaked secret %q:\n%s", secret, got)
+		}
+	}
+}
+
 // TestBuildEnvInjectsLocalServerURL verifies the in-task env carries the
 // localserver URL so the "complete task" CLI can call back into this device's
 // /workflow/tasks/{id}/complete endpoint.
