@@ -100,7 +100,9 @@ var highRiskPathPatterns = []string{
 // pathIsHighRisk reports whether the resolved absolute path touches a known
 // credential/secret location. path must be absolute.
 func pathIsHighRisk(path string) bool {
-	n := strings.ToLower(filepath.ToSlash(path))
+	n := filepath.ToSlash(path)
+	n = strings.ReplaceAll(n, `\`, "/")
+	n = strings.ToLower(n)
 	if !strings.HasSuffix(n, "/") {
 		// Append a trailing separator so directory-style patterns (e.g.
 		// "/.ssh/") also match when the request names the directory itself
