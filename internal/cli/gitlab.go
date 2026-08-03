@@ -61,7 +61,7 @@ func submitGitlabMR(cfg submitConfig) error {
 	}
 
 	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "main")
-	title := "deliverable " + cfg.deliverableID
+	title := deliverableTitle(cfg.title, "deliverable "+cfg.deliverableID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening MR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
 	if err != nil {

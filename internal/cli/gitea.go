@@ -47,7 +47,7 @@ func printDeliverableUsage() {
 	fmt.Println(`deliverable - document deliverable operations
 
 Usage:
-  cs-cloud workflow deliverable submit --deliverable <id> --file <path>
+  cs-cloud workflow deliverable submit --deliverable <id> --file <path> [--title <title>]
     Push a document deliverable to the platform Gitea and open a PR.
     Reads CS_CLOUD_GITEA_* env (set by the task payload), uses
     CS_CLOUD_GITEA_TOKEN as the workspace bot PAT, pushes the document to the
@@ -57,7 +57,7 @@ Usage:
 
 // runGiteaSubmit parses flags and runs the submit flow.
 func runGiteaSubmit(args []string) error {
-	deliverableID, filePath, mrMode, repoURL, err := parseSubmitArgs(args)
+	deliverableID, filePath, mrMode, repoURL, title, err := parseSubmitArgs(args)
 	if err != nil {
 		return err
 	}
@@ -66,55 +66,62 @@ func runGiteaSubmit(args []string) error {
 		filePath:      filePath,
 		mrMode:        mrMode,
 		repoURL:       repoURL,
+		title:         title,
 		gitOps:        &execGitOps{},
 	})
 }
 
-// parseSubmitArgs parses `--deliverable <id> --file <path> [--mr --repo <url>]` from the flat arg
+// parseSubmitArgs parses `--deliverable <id> --file <path> [--title <title>] [--mr --repo <url>]` from the flat arg
 // slice (cs-cloud's dispatcher has no flag library, so we parse by hand).
-func parseSubmitArgs(args []string) (deliverable, file string, mrMode bool, repoURL string, err error) {
+func parseSubmitArgs(args []string) (deliverable, file string, mrMode bool, repoURL, title string, err error) {
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "--deliverable":
 			if i+1 >= len(args) {
-				return "", "", false, "", fmt.Errorf("--deliverable needs a value")
+				return "", "", false, "", "", fmt.Errorf("--deliverable needs a value")
 			}
 			deliverable = args[i+1]
 			i += 2
 		case "--file":
 			if i+1 >= len(args) {
-				return "", "", false, "", fmt.Errorf("--file needs a value")
+				return "", "", false, "", "", fmt.Errorf("--file needs a value")
 			}
 			file = args[i+1]
+			i += 2
+		case "--title":
+			if i+1 >= len(args) {
+				return "", "", false, "", "", fmt.Errorf("--title needs a value")
+			}
+			title = args[i+1]
 			i += 2
 		case "--mr":
 			mrMode = true
 			i++
 		case "--repo":
 			if i+1 >= len(args) {
-				return "", "", false, "", fmt.Errorf("--repo needs a value")
+				return "", "", false, "", "", fmt.Errorf("--repo needs a value")
 			}
 			repoURL = args[i+1]
 			i += 2
 		default:
-			return "", "", false, "", fmt.Errorf("unknown argument: %s", args[i])
+			return "", "", false, "", "", fmt.Errorf("unknown argument: %s", args[i])
 		}
 	}
 	if deliverable == "" {
-		return "", "", false, "", fmt.Errorf("--deliverable is required")
+		return "", "", false, "", "", fmt.Errorf("--deliverable is required")
 	}
-	if mrMode {
-		// --mr mode does not require --file (agent already edited in worktree).
+	if mrMode || repoURL != "" {
+		// Code PR/MR mode does not require --file: the agent already edited in worktree.
 		if repoURL == "" {
-			return "", "", false, "", fmt.Errorf("--repo is required with --mr")
+			return "", "", false, "", "", fmt.Errorf("--repo is required with --mr")
 		}
 	} else {
 		if file == "" {
-			return "", "", false, "", fmt.Errorf("--file is required")
+			return "", "", false, "", "", fmt.Errorf("--file is required")
 		}
 	}
-	return deliverable, file, mrMode, repoURL, nil
+	return deliverable, file, mrMode, repoURL, strings.TrimSpace(title), nil
 }
 
 // submitConfig parameterizes submitDeliverable for testing.
@@ -125,6 +132,7 @@ type submitConfig struct {
 	giteaBaseOverride string // test-only: override the Gitea base URL (else from credential)
 	mrMode            bool   // --mr: code MR mode
 	repoURL           string // --mr mode: code repository URL (agent worktree already checked out)
+	title             string // optional PR/MR title supplied by the agent
 }
 
 // gitOps abstracts the git operations so the submit flow is unit-testable.
@@ -291,7 +299,7 @@ func submitDeliverable(cfg submitConfig) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening PR head=%s base=%s\n", cfg.deliverableID, currentBranch, gctx.instBranch)
-	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, currentBranch, gctx.instBranch, cfg.deliverableID)
+	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, currentBranch, gctx.instBranch, deliverableTitle(cfg.title, "document deliverable "+cfg.deliverableID))
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
 	}
@@ -309,6 +317,13 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func deliverableTitle(title, fallback string) string {
+	if t := strings.TrimSpace(title); t != "" {
+		return t
+	}
+	return fallback
 }
 
 // tokenUsername returns the git auth username for embedding a PAT into a
@@ -408,11 +423,11 @@ func normalizeGiteaBase(base, owner, repo string) string {
 }
 
 // openGiteaPR POSTs /api/v1/repos/{owner}/{repo}/pulls and returns html_url.
-func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch, deliverableID string) (string, error) {
+func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch, title string) (string, error) {
 	body, _ := json.Marshal(map[string]string{
 		"head":  head,
 		"base":  baseBranch,
-		"title": "document deliverable " + deliverableID,
+		"title": deliverableTitle(title, ""),
 	})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
 		normalizeGiteaBase(base, owner, repo)+"/api/v1/repos/"+owner+"/"+repo+"/pulls", bytes.NewReader(body))

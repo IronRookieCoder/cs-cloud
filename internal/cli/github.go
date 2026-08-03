@@ -59,7 +59,7 @@ func submitGithubPR(cfg submitConfig) error {
 	}
 
 	targetBranch := envOr("CS_CLOUD_GITHUB_TARGET_BRANCH", "main")
-	title := "deliverable " + cfg.deliverableID
+	title := deliverableTitle(cfg.title, "deliverable "+cfg.deliverableID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening PR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	prURL, err := openGithubPR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
 	if err != nil {
