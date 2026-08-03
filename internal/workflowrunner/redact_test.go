@@ -11,8 +11,8 @@ func TestRedactURL(t *testing.T) {
 	cases := map[string]string{
 		"https://oauth2:glpat-abcdef@gitlab.local/root/co.git": "https://oauth2:***@gitlab.local/root/co.git",
 		"http://user:p%40ss@gitea:3000/o/r.git":                "http://user:***@gitea:3000/o/r.git",
-		"https://gitlab.local/root/co.git":                      "https://gitlab.local/root/co.git",
-		"":                                                      "",
+		"https://gitlab.local/root/co.git":                     "https://gitlab.local/root/co.git",
+		"":                                                     "",
 	}
 	for in, want := range cases {
 		if got := redactURL(in); got != want {
@@ -23,24 +23,26 @@ func TestRedactURL(t *testing.T) {
 
 func TestEnvKeySummary(t *testing.T) {
 	env := map[string]string{
-		"CS_CLOUD_GITLAB_TOKEN":          "secret-token",
-		"CS_CLOUD_REPO_CLONE_URL_AUTHED": "https://oauth2:x@g/o/r.git",
-		"CS_CLOUD_REPO_NODE_BRANCH":      "node-1",
-		"PATH":                           "/usr/bin",
+		"CS_CLOUD_GITLAB_TOKEN":      "secret-token",
+		"CS_CLOUD_GITEA_TOKEN":       "gitea-secret",
+		"CS_CLOUD_GITEA_NODE_BRANCH": "node-1",
+		"PATH":                       "/usr/bin",
 	}
 	got := envKeySummary(env)
 	for _, want := range []string{
 		"CS_CLOUD_GITLAB_TOKEN=<redacted>",
-		"CS_CLOUD_REPO_CLONE_URL_AUTHED=<redacted>",
-		"CS_CLOUD_REPO_NODE_BRANCH",
+		"CS_CLOUD_GITEA_TOKEN=<redacted>",
+		"CS_CLOUD_GITEA_NODE_BRANCH",
 		"PATH",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("envKeySummary missing %q in %q", want, got)
 		}
 	}
-	if strings.Contains(got, "secret-token") {
-		t.Errorf("envKeySummary leaked a secret value: %q", got)
+	for _, value := range []string{"secret-token", "gitea-secret", "node-1", "/usr/bin"} {
+		if strings.Contains(got, value) {
+			t.Errorf("envKeySummary leaked an environment value %q: %q", value, got)
+		}
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,45 @@ import (
 	"cs-cloud/internal/workflow"
 	"cs-cloud/internal/workflowrunner"
 )
+
+func installWorkflowHandlerFakeAgent(t *testing.T, name string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	var bin string
+	if runtime.GOOS == "windows" {
+		bin = filepath.Join(dir, name+".cmd")
+		script := `@echo off
+set first=%~1
+if /I "%first:~0,6%"=="sleep " (
+  :wait
+  goto wait
+  exit /b 0
+)
+echo %*
+`
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake agent: %v", err)
+		}
+	} else {
+		bin = filepath.Join(dir, name)
+		script := `#!/bin/sh
+case "$1" in
+  "sleep "*) exec sleep "${1#sleep }" ;;
+  *) printf '%s\n' "$@" ;;
+esac
+`
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake agent: %v", err)
+		}
+	}
+
+	path := os.Getenv("PATH")
+	if path != "" {
+		path = string(os.PathListSeparator) + path
+	}
+	t.Setenv("PATH", dir+path)
+}
 
 func TestHandleWorkflowHealthNotRegistered(t *testing.T) {
 	s := New()
@@ -222,6 +264,8 @@ func TestHandleWorkflowTaskCompleteBadBody(t *testing.T) {
 }
 
 func TestHandleWorkflowTaskAbort(t *testing.T) {
+	installWorkflowHandlerFakeAgent(t, "fakeagent")
+
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -233,7 +277,7 @@ func TestHandleWorkflowTaskAbort(t *testing.T) {
 		SyncInterval:   time.Hour,
 		GCInterval:     time.Hour,
 		AgentTimeout:   time.Minute,
-		AllowedAgents:  []string{"sh"},
+		AllowedAgents:  []string{"fakeagent"},
 	}
 	d := workflowrunner.NewDriver(cfg, &workflowrunner.Dependencies{
 		BackendBaseURL: backend.URL,
@@ -251,7 +295,7 @@ func TestHandleWorkflowTaskAbort(t *testing.T) {
 		payload := workflow.TaskRunPayload{
 			TaskID:      "task-1",
 			WorkspaceID: "ws-1",
-			Agent:       "sh",
+			Agent:       "fakeagent",
 			Prompt:      "sleep 10",
 		}
 		b, _ := json.Marshal(payload)

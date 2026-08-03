@@ -2,6 +2,7 @@ package workflowrunner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,6 +44,10 @@ const (
 	// cli.loadTaskEnvFile) so they resolve task context from a file rather than
 	// relying on env propagation through the agent subprocess.
 	TaskEnvFileName = ".cs-cloud.env"
+	// TaskReposFileName is the human-readable repository map for the task.
+	// Tokens stay in .cs-cloud.env; this file only describes repository purpose,
+	// branches, and deliverable paths for the agent to inspect.
+	TaskReposFileName = ".cs-cloud.repos"
 )
 
 // TaskRunner executes a single workflow task by preparing a worktree and
@@ -128,6 +133,9 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 		if err := writeTaskEnvFile(worktree, env); err != nil {
 			return nil, fmt.Errorf("write task env: %w", err)
 		}
+		if err := writeTaskReposFile(worktree, payload, env); err != nil {
+			return nil, fmt.Errorf("write task repos: %w", err)
+		}
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
 		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, env, SessionPermissionBypass)
@@ -198,6 +206,9 @@ func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunP
 	if err := writeTaskEnvFile(worktree, env); err != nil {
 		return nil, fmt.Errorf("write task env: %w", err)
 	}
+	if err := writeTaskReposFile(worktree, payload, env); err != nil {
+		return nil, fmt.Errorf("write task repos: %w", err)
+	}
 	cmd.Env = env
 
 	return cmd.CombinedOutput()
@@ -245,6 +256,160 @@ func writeTaskEnvFile(workdir string, env []string) error {
 	}
 	if err := os.Rename(tmpName, filepath.Join(workdir, TaskEnvFileName)); err != nil {
 		return fmt.Errorf("install task env file: %w", err)
+	}
+	return nil
+}
+
+type taskDeliverableRef struct {
+	ID    string `json:"deliverable_id"`
+	Title string `json:"title"`
+	Path  string `json:"path"`
+}
+
+func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []string) error {
+	envMap := envSliceToMap(env)
+	var b strings.Builder
+	b.WriteString("代码仓库：\n")
+	codeCount := 0
+	for _, r := range payload.Repos {
+		if strings.EqualFold(r.Role, "delivery") {
+			continue
+		}
+		codeCount++
+		writeRepoBlock(&b, r, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
+	}
+	if codeCount == 0 {
+		if repoURL := strings.TrimSpace(payload.RepoURL); repoURL != "" {
+			writeRepoBlock(&b, workflow.RepoSpec{
+				URL:  repoURL,
+				Role: "code",
+			}, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
+		} else {
+			b.WriteString("- 无\n")
+		}
+	}
+
+	b.WriteString("\n交付物仓库：\n")
+	deliveryCount := 0
+	for _, r := range payload.Repos {
+		if !strings.EqualFold(r.Role, "delivery") {
+			continue
+		}
+		deliveryCount++
+		writeRepoBlock(&b, r, "写交付文档，完成后通过 cs-cloud workflow deliverable submit 提交。", envMap)
+	}
+	if deliveryCount == 0 {
+		b.WriteString("- 无\n")
+	}
+
+	b.WriteString("\n交付物：\n")
+	refs := taskDeliverableRefs(envMap)
+	if len(refs) == 0 {
+		b.WriteString("- 无\n")
+	} else {
+		for _, d := range refs {
+			title := strings.TrimSpace(d.Title)
+			if title == "" {
+				title = d.ID
+			}
+			fmt.Fprintf(&b, "- %s\n", title)
+			if d.ID != "" {
+				fmt.Fprintf(&b, "  ID：%s\n", d.ID)
+			}
+			if d.Path != "" {
+				fmt.Fprintf(&b, "  写入路径：%s\n", d.Path)
+			}
+		}
+	}
+	b.WriteString("\n认证信息：在 .cs-cloud.env，由命令自动读取。不要把 token 写进回复、文档或提交内容。\n")
+	return writeAtomicFile(workdir, TaskReposFileName, ".cs-cloud-repos-*", []byte(b.String()), 0o600)
+}
+
+func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env map[string]string) {
+	label := strings.TrimSpace(r.Alias)
+	if label == "" {
+		label = strings.TrimSpace(r.URL)
+	}
+	if label == "" {
+		label = "repository"
+	}
+	fmt.Fprintf(b, "- %s\n", label)
+	if r.URL != "" {
+		fmt.Fprintf(b, "  地址：%s\n", r.URL)
+	}
+	if provider := repoProviderLabel(r.Provider); provider != "" {
+		fmt.Fprintf(b, "  类型：%s\n", provider)
+	}
+	if strings.EqualFold(r.Role, "delivery") {
+		if node := env["CS_CLOUD_GITEA_NODE_BRANCH"]; node != "" {
+			fmt.Fprintf(b, "  node 分支：%s\n", node)
+		}
+		if inst := env["CS_CLOUD_GITEA_INST_BRANCH"]; inst != "" {
+			fmt.Fprintf(b, "  inst 分支：%s\n", inst)
+		} else if r.BaseBranch != "" {
+			fmt.Fprintf(b, "  inst 分支：%s\n", r.BaseBranch)
+		}
+	} else if r.BaseBranch != "" {
+		fmt.Fprintf(b, "  基准分支：%s\n", r.BaseBranch)
+	}
+	fmt.Fprintf(b, "  用途：%s\n", purpose)
+}
+
+func repoProviderLabel(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "github":
+		return "Github"
+	case "gitlab":
+		return "Gitlab"
+	case "gitea":
+		return "Gitea"
+	default:
+		return strings.TrimSpace(provider)
+	}
+}
+
+func taskDeliverableRefs(env map[string]string) []taskDeliverableRef {
+	raw := strings.TrimSpace(env["CS_CLOUD_GITEA_DELIVERABLES"])
+	if raw == "" {
+		return nil
+	}
+	var refs []taskDeliverableRef
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return nil
+	}
+	return refs
+}
+
+func envSliceToMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func writeAtomicFile(workdir, filename, pattern string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(workdir, pattern)
+	if err != nil {
+		return fmt.Errorf("create file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(workdir, filename)); err != nil {
+		return fmt.Errorf("install file: %w", err)
 	}
 	return nil
 }

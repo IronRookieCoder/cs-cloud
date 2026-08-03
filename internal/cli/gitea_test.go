@@ -100,6 +100,11 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 
 	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["title"] != "document deliverable d1" {
+				t.Errorf("PR title = %q, want default title", body["title"])
+			}
 			jsonResponse(w, 201, map[string]any{"number": 7, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/7"})
 			return
 		}
@@ -132,8 +137,7 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	tmpFile := tempFile(t, "# my document body")
 
 	// currentBranch mirrors what CheckoutRepo would have left the worktree on:
-	// the env-advertised CS_CLOUD_REPO_NODE_BRANCH (here aliased as
-	// CS_CLOUD_GITEA_NODE_BRANCH = "node/dd").
+	// the env-advertised CS_CLOUD_GITEA_NODE_BRANCH.
 	fake := &fakeGitOps{currentBranch: "node/dd"}
 	stderr := captureStderr(t, func() {
 		err := submitDeliverable(submitConfig{
@@ -195,6 +199,56 @@ func TestSubmitDeliverable_HappyPath(t *testing.T) {
 	}
 	if gotTaskID != "task-uuid-222" {
 		t.Errorf("X-Task-ID = %q, want task-uuid-222", gotTaskID)
+	}
+}
+
+func TestSubmitDeliverable_UsesCustomTitle(t *testing.T) {
+	var gotTitle string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit" {
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotTitle = body["title"]
+			jsonResponse(w, 201, map[string]any{"number": 7, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/7"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	t.Chdir(t.TempDir())
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+
+	if err := submitDeliverable(submitConfig{
+		giteaBaseOverride: giteaSrv.URL,
+		deliverableID:     "d1",
+		filePath:          tempFile(t, "# body"),
+		title:             "Implement payment reconciliation",
+		gitOps:            &fakeGitOps{currentBranch: "node/dd"},
+	}); err != nil {
+		t.Fatalf("submitDeliverable: %v", err)
+	}
+	if gotTitle != "Implement payment reconciliation" {
+		t.Fatalf("PR title = %q, want custom title", gotTitle)
 	}
 }
 
@@ -291,6 +345,9 @@ func TestSubmitDeliverable_GitLabMR(t *testing.T) {
 	if gitlabReqBody["target_branch"] != "main" {
 		t.Errorf("target_branch = %v, want main", gitlabReqBody["target_branch"])
 	}
+	if gitlabReqBody["title"] != "deliverable d1" {
+		t.Errorf("title = %v, want default title", gitlabReqBody["title"])
+	}
 
 	// Assert backend submit received the MR URL
 	if submittedURL != "https://gitlab.test/group/repo/-/merge_requests/42" {
@@ -325,6 +382,89 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+// TestSubmitDeliverable_ProviderEnvRoutesToGithub verifies CS_CLOUD_CODE_PROVIDER=github
+// routes to submitGithubPR even without --mr.
+func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
+	var submittedURL string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/submit") {
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submittedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	var gotAuthHeader string
+	var gotGithubTitle string
+	githubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthHeader = r.Header.Get("Authorization")
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotGithubTitle = body["title"]
+		jsonResponse(w, 201, map[string]any{"html_url": "https://github.com/org/repo/pull/1", "number": 1})
+	}))
+	defer githubSrv.Close()
+
+	t.Setenv("CS_CLOUD_CODE_PROVIDER", "github")
+	t.Setenv("CS_CLOUD_GITHUB_TOKEN", "ghp-test-token")
+	t.Setenv("CS_CLOUD_GITHUB_API_BASE", githubSrv.URL)
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-1")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-1")
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+
+	fake := &fakeGitOps{currentBranch: "feat/test"}
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			mrMode:        false, // no --mr — provider env drives routing
+			deliverableID: "d1",
+			repoURL:       "https://github.com/org/repo.git",
+			title:         "Ship GitHub integration",
+			gitOps:        fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable (github provider): %v", err)
+		}
+	})
+	for _, want := range []string{
+		"deliverable d1: submitting GitHub PR node_run=nr-1 branch=feat/test",
+		"deliverable d1: pushing PR branch=feat/test",
+		"deliverable d1: opening PR source=feat/test target=main",
+		"deliverable d1: reporting PR",
+		"deliverable d1: submitted pr=https://github.com/org/repo/pull/1",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	if submittedURL != "https://github.com/org/repo/pull/1" {
+		t.Errorf("submitted URL = %q, want github PR html_url", submittedURL)
+	}
+	if !strings.Contains(gotAuthHeader, "token ghp-test-token") {
+		t.Errorf("Authorization header = %q, want 'token ghp-test-token'", gotAuthHeader)
+	}
+	if gotGithubTitle != "Ship GitHub integration" {
+		t.Errorf("GitHub PR title = %q, want custom title", gotGithubTitle)
+	}
+	// Assert push used the worktree dir (cwd).
+	if len(fake.currentBranchDirs) != 1 || fake.currentBranchDirs[0] != repoDir {
+		t.Errorf("CurrentBranch dir = %+v, want %q", fake.currentBranchDirs, repoDir)
+	}
+	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "feat/test" {
+		t.Errorf("expected push of feat/test, got %+v", fake.pushCalls)
+	}
+}
+
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
 	// The failure must come from readGiteaContext detecting the missing
 	// CS_CLOUD_NODE_RUN_ID (cwd is always valid, so no worktree-dir check).
@@ -342,21 +482,25 @@ func TestParseSubmitArgs(t *testing.T) {
 		wantFile    string
 		wantMR      bool
 		wantRepo    string
+		wantTitle   string
 		wantErr     bool
 		errContains string
 	}{
-		{"both flags", []string{"--deliverable", "d1", "--file", "/p/f.md"}, "d1", "/p/f.md", false, "", false, ""},
-		{"flags reversed", []string{"--file", "/p/f.md", "--deliverable", "d1"}, "d1", "/p/f.md", false, "", false, ""},
-		{"missing deliverable", []string{"--file", "/p/f.md"}, "", "", false, "", true, "--deliverable"},
-		{"missing file", []string{"--deliverable", "d1"}, "", "", false, "", true, "--file"},
-		{"deliverable no value", []string{"--deliverable"}, "", "", false, "", true, "--deliverable needs a value"},
-		{"unknown arg", []string{"--deliverable", "d1", "--bogus"}, "", "", false, "", true, "unknown argument"},
-		{"mr mode", []string{"--deliverable", "d1", "--mr", "--repo", "https://gl.test/g/r.git"}, "d1", "", true, "https://gl.test/g/r.git", false, ""},
-		{"mr without repo", []string{"--deliverable", "d1", "--mr"}, "", "", false, "", true, "--repo"},
+		{"both flags", []string{"--deliverable", "d1", "--file", "/p/f.md"}, "d1", "/p/f.md", false, "", "", false, ""},
+		{"flags reversed", []string{"--file", "/p/f.md", "--deliverable", "d1"}, "d1", "/p/f.md", false, "", "", false, ""},
+		{"custom title", []string{"--deliverable", "d1", "--file", "/p/f.md", "--title", "Fix checkout bug"}, "d1", "/p/f.md", false, "", "Fix checkout bug", false, ""},
+		{"title no value", []string{"--deliverable", "d1", "--file", "/p/f.md", "--title"}, "", "", false, "", "", true, "--title needs a value"},
+		{"missing deliverable", []string{"--file", "/p/f.md"}, "", "", false, "", "", true, "--deliverable"},
+		{"missing file", []string{"--deliverable", "d1"}, "", "", false, "", "", true, "--file"},
+		{"deliverable no value", []string{"--deliverable"}, "", "", false, "", "", true, "--deliverable needs a value"},
+		{"unknown arg", []string{"--deliverable", "d1", "--bogus"}, "", "", false, "", "", true, "unknown argument"},
+		{"mr mode", []string{"--deliverable", "d1", "--mr", "--repo", "https://gl.test/g/r.git", "--title", "Ship API"}, "d1", "", true, "https://gl.test/g/r.git", "Ship API", false, ""},
+		{"provider code mode without mr", []string{"--deliverable", "d1", "--repo", "https://github.com/o/r.git", "--title", "Ship API"}, "d1", "", false, "https://github.com/o/r.git", "Ship API", false, ""},
+		{"mr without repo", []string{"--deliverable", "d1", "--mr"}, "", "", false, "", "", true, "--repo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d, f, mr, repo, err := parseSubmitArgs(tt.args)
+			d, f, mr, repo, title, err := parseSubmitArgs(tt.args)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -369,10 +513,46 @@ func TestParseSubmitArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if d != tt.wantDeliv || f != tt.wantFile || mr != tt.wantMR || repo != tt.wantRepo {
-				t.Errorf("got (%q,%q,%v,%q), want (%q,%q,%v,%q)", d, f, mr, repo, tt.wantDeliv, tt.wantFile, tt.wantMR, tt.wantRepo)
+			if d != tt.wantDeliv || f != tt.wantFile || mr != tt.wantMR || repo != tt.wantRepo || title != tt.wantTitle {
+				t.Errorf("got (%q,%q,%v,%q,%q), want (%q,%q,%v,%q,%q)", d, f, mr, repo, title, tt.wantDeliv, tt.wantFile, tt.wantMR, tt.wantRepo, tt.wantTitle)
 			}
 		})
+	}
+}
+
+func TestInjectTokenIntoURL_HostAwareUsername(t *testing.T) {
+	tests := []struct {
+		name         string
+		cloneURL     string
+		token        string
+		wantContains string
+	}{
+		{"gitea uses oauth2", "http://gitea:3000/t-aaa/wf-bbb.git", "tok123", "oauth2:tok123@"},
+		{"gitlab uses oauth2", "https://gitlab.test/g/r.git", "tok", "oauth2:tok@"},
+		{"github.com uses x-access-token", "https://github.com/org/repo.git", "ghp", "x-access-token:ghp@"},
+		{"github.com uppercase host", "https://GITHUB.COM/org/repo.git", "ghp", "x-access-token:ghp@"},
+		{"embedded github host is not GitHub", "https://my-github-gitlab.local/g/r.git", "tok", "oauth2:tok@"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := injectTokenIntoURL(tt.cloneURL, tt.token)
+			if got == "" {
+				t.Fatalf("injectTokenIntoURL(%q, %q) returned empty", tt.cloneURL, tt.token)
+			}
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("injectTokenIntoURL(%q, %q) = %q, want substring %q", tt.cloneURL, tt.token, got, tt.wantContains)
+			}
+		})
+	}
+}
+
+func TestInjectGithubTokenIntoURLUsesGithubUsernameForEnterpriseHosts(t *testing.T) {
+	got := injectGithubTokenIntoURL("https://ghe.example.com/org/repo.git", "ghp")
+	if got == "" {
+		t.Fatal("injectGithubTokenIntoURL returned empty")
+	}
+	if !strings.Contains(got, "x-access-token:ghp@") {
+		t.Fatalf("injectGithubTokenIntoURL = %q, want x-access-token username", got)
 	}
 }
 
@@ -694,11 +874,15 @@ func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
 	gitRun(t, wt, "checkout", "-q", "-b", "node/dd")
 
 	var reportedURL string
+	var createdPRTitle string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/t-aaa/wf-bbb.git/"):
 			serveGitHTTP(t, root, w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/t-aaa/wf-bbb/pulls":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdPRTitle = body["title"]
 			jsonResponse(w, 201, map[string]any{"number": 7, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/7"})
 		case r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit":
 			var body struct {
@@ -731,14 +915,17 @@ func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
 	}
 	t.Chdir(wt)
 
-	if err := submitDeliverable(submitConfig{
-		deliverableID: "d1",
-		filePath:      doc,
-		gitOps:        &execGitOps{},
+	if err := runGiteaSubmit([]string{
+		"--deliverable", "d1",
+		"--file", doc,
+		"--title", "Finalize payment reconciliation design",
 	}); err != nil {
-		t.Fatalf("submitDeliverable E2E: %v", err)
+		t.Fatalf("runGiteaSubmit E2E: %v", err)
 	}
 
+	if createdPRTitle != "Finalize payment reconciliation design" {
+		t.Errorf("created PR title = %q, want custom CLI title", createdPRTitle)
+	}
 	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/7" {
 		t.Errorf("reported PR = %q, want the html_url", reportedURL)
 	}
