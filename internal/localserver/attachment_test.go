@@ -53,7 +53,7 @@ func textprotoHeader(mime, filename string) map[string][]string {
 func TestAttachmentUploadReturnsAbsolutePathAndSHA256(t *testing.T) {
 	s, root := newTestServer(t)
 	content := []byte("hello attachment world")
-	body, ct := writeMultipart(t, "file", "note.txt", "text/plain", content)
+	body, ct := writeMultipart(t, "file", "note.png", "image/png", content)
 
 	req := httptest.NewRequest("POST", "/api/v1/attachments", body)
 	req.Header.Set("Content-Type", ct)
@@ -84,11 +84,11 @@ func TestAttachmentUploadReturnsAbsolutePathAndSHA256(t *testing.T) {
 	if got.Size != int64(len(content)) {
 		t.Errorf("size = %d, want %d", got.Size, len(content))
 	}
-	if got.Mime != "text/plain" {
-		t.Errorf("mime = %q, want text/plain", got.Mime)
+	if got.Mime != "image/png" {
+		t.Errorf("mime = %q, want image/png", got.Mime)
 	}
-	if got.Filename != "note.txt" {
-		t.Errorf("filename = %q, want note.txt", got.Filename)
+	if got.Filename != "note.png" {
+		t.Errorf("filename = %q, want note.png", got.Filename)
 	}
 	if got.Sha256 == "" {
 		t.Fatalf("sha256 missing")
@@ -130,6 +130,31 @@ func TestAttachmentUploadRejectsOversizeFile(t *testing.T) {
 	}
 }
 
+// TestAttachmentUploadRejectsDangerousMime covers the stored XSS gate:
+// text/html, image/svg+xml, and text/plain must all be rejected at upload
+// time so they can never be served back with a renderer-friendly Content-Type.
+func TestAttachmentUploadRejectsDangerousMime(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, bad := range []string{"text/html", "image/svg+xml", "text/plain", "application/javascript"} {
+		body, ct := writeMultipart(t, "file", "evil.bin", bad, []byte("<script>alert(1)</script>"))
+		req := httptest.NewRequest("POST", "/api/v1/attachments", body)
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+		s.handleAttachmentUpload(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("mime %q: status = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
+			continue
+		}
+		var resp envelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("mime %q: unmarshal: %v", bad, err)
+		}
+		if resp.Error == nil || resp.Error.Code != "UNSUPPORTED_MIME" {
+			t.Errorf("mime %q: error code = %v, want UNSUPPORTED_MIME", bad, resp.Error)
+		}
+	}
+}
+
 func TestAttachmentGetServesStoredBytes(t *testing.T) {
 	s, _ := newTestServer(t)
 	png := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0}
@@ -164,8 +189,69 @@ func TestAttachmentGetServesStoredBytes(t *testing.T) {
 	if !bytes.Equal(getRec.Body.Bytes(), png) {
 		t.Errorf("get body mismatch: got %d bytes, want %d", len(getRec.Body.Bytes()), len(png))
 	}
-	if ct := getRec.Header().Get("Content-Type"); ct != "image/png" {
-		t.Errorf("Content-Type = %q, want image/png", ct)
+	// Stored XSS defense: download path must force octet-stream + nosniff +
+	// attachment disposition, ignoring the stored image/png MIME.
+	if ct := getRec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	if v := getRec.Header().Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", v)
+	}
+	if cd := getRec.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, `attachment; filename="`) {
+		t.Errorf("Content-Disposition = %q, want attachment; filename=...", cd)
+	}
+	if cd := getRec.Header().Get("Content-Disposition"); !strings.Contains(cd, "pixel.png") {
+		t.Errorf("Content-Disposition = %q, want filename to contain pixel.png", cd)
+	}
+}
+
+// TestSanitizeDispositionFilename pins the download-side Content-Disposition
+// sanitization contract: the returned value is always safe to embed inside a
+// double-quoted filename token, regardless of what the upload carried. The
+// upload handler applies filepath.Base before storing meta.Filename, but this
+// function is the defense-in-depth gate for the case where a quote, backslash,
+// control char, or CRLF survives into meta — CRLF in particular would be a
+// response-splitting vector if the http layer ever stopped rejecting it.
+func TestSanitizeDispositionFilename(t *testing.T) {
+	// Exact-match cases. None of these inputs contain a backslash, so
+	// filepath.Base is a no-op on every host OS and the expected output is
+	// portable.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "pixel.png", "pixel.png"},
+		{"strips unix dir", "a/b/c.png", "c.png"},
+		{"strips quote", `evil".html`, "evil.html"},
+		{"strips multiple quotes", `"a"b"c"`, "abc"},
+		{"strips control char", "x\x07y.bin", "xy.bin"},
+		{"strips DEL", "a\x7fb", "ab"},
+		{"trims surrounding space", "  pic.png  ", "pic.png"},
+		{"whitespace-only to empty", "   ", ""},
+		{"all-stripped to empty", `"""`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := sanitizeDispositionFilename(c.in)
+			if got != c.want {
+				t.Errorf("sanitizeDispositionFilename(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	// Property sweep: regardless of input or host OS, the output must never
+	// carry a rune that could break out of the quoted token or smuggle a CRLF.
+	// filepath.Base's separator handling differs across platforms (backslash
+	// is a separator on Windows, a regular char on Unix), so we assert the
+	// invariant rather than an exact string here.
+	for _, raw := range []string{`a\.txt`, "foo/bar\\baz", "\"\x00\r\n", `\path\to\x`} {
+		got := sanitizeDispositionFilename(raw)
+		for _, r := range got {
+			if r == '"' || r == '\\' || r == '/' || r < 0x20 || r == 0x7f {
+				t.Errorf("output %q from input %q contains forbidden rune %q (U+%04X)", got, raw, r, r)
+			}
+		}
 	}
 }
 

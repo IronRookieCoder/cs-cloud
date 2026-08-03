@@ -139,7 +139,15 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("GET /runtime/files", s.handleFileList)
 	api.HandleFunc("GET /runtime/files/meta", s.handleFileMeta)
 	api.HandleFunc("GET /runtime/files/content", s.handleFileContent)
-	api.HandleFunc("PUT /runtime/files/content", s.handleFileWrite)
+	// Removed 2026-08-03: PUT /runtime/files/content (handleFileWrite) was
+	// deleted due to a path-traversal vulnerability — the handler honored
+	// runtimeCfg.AllowAbsolutePaths (default true), which let any client
+	// overwrite arbitrary existing files (e.g. ~/.ssh/authorized_keys,
+	// /etc/hosts, Windows Startup folder) when the local server is exposed
+	// via --host 0.0.0.0, and apiKey defaults to "" (no auth). It had no
+	// in-tree consumers; binary uploads go through /attachment, and
+	// workspace edits go through the editor flow. See git history for the
+	// removed handler if a sandboxed replacement is ever needed.
 	api.HandleFunc("GET /runtime/find/file", s.handleFindFiles)
 	api.HandleFunc("GET /runtime/path", s.handlePath)
 	api.HandleFunc("GET /runtime/vcs", s.handleVcs)
