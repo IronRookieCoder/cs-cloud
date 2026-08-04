@@ -384,6 +384,44 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		_ = r.Close()
+	}()
+	fn()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(out)
+}
+
+func TestPrintDeliverableUsageSeparatesDocumentAndCodeMR(t *testing.T) {
+	got := captureStdout(t, printDeliverableUsage)
+	for _, want := range []string{
+		"Document/file deliverable",
+		"Code MR/PR deliverable",
+		"--mr --repo <url>",
+		"CS_CLOUD_GITLAB_TOKEN or CS_CLOUD_GITHUB_TOKEN",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("usage missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[--mr --repo <url>] opens a code MR/PR instead of a document.\n    Reads CS_CLOUD_GITEA_* env") {
+		t.Fatalf("usage mixes code MR with Gitea document env:\n%s", got)
+	}
+}
+
 // TestSubmitDeliverable_ProviderEnvRoutesToGithub verifies CS_CLOUD_CODE_PROVIDER=github
 // routes to submitGithubPR even without --mr.
 func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
@@ -473,7 +511,7 @@ func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
 // workspace — including document-only nodes. A --file submit must still take
 // the Gitea delivery path; routing it into submitGitlabMR (because the
 // provider env was checked first) left --repo empty and failed at
-// `git push --force '' <branch>`.
+// `git push --force ” <branch>`.
 func TestSubmitDeliverable_DocumentIgnoresCodeProvider(t *testing.T) {
 	// If the document submit is misrouted into submitGitlabMR, this server is
 	// hit (and the test fails loudly) instead of silently pushing to an empty

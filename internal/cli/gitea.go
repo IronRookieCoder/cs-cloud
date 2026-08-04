@@ -44,21 +44,24 @@ func deliverableCmd(a *app.App, args []string) error {
 }
 
 func printDeliverableUsage() {
-	fmt.Println(`deliverable - document deliverable operations
+	fmt.Println(`deliverable - workflow deliverable operations
 
 Usage:
   cs-cloud workflow deliverable submit --deliverable <id> --file <path> [--title <title>]
-    Submit a pre-registered deliverable by id.
+    Document/file deliverable: submit a pre-registered deliverable by id.
+    Reads CS_CLOUD_GITEA_* env, uses CS_CLOUD_GITEA_TOKEN as the workspace bot
+    PAT, pushes the document to the node branch, opens a Gitea PR (node->inst),
+    and registers the PR URL back to the server.
 
   cs-cloud workflow deliverable submit --file <path> --title "<title>"
-    Agent-defined deliverable (no pre-registered id): the command creates the
-    deliverable on the node run, then submits it.
+    Agent-defined document/file deliverable: the command creates the deliverable
+    on the node run, then submits it through the Gitea document path.
 
-  [--mr --repo <url>] opens a code MR/PR instead of a document.
-    Reads CS_CLOUD_GITEA_* env (set by the task payload), uses
-    CS_CLOUD_GITEA_TOKEN as the workspace bot PAT, pushes the document to the
-    node branch, opens a Gitea PR (node->inst), and registers the PR URL back
-    to the server.`)
+  cs-cloud workflow deliverable submit --deliverable <id> --mr --repo <url> [--title <title>]
+    Code MR/PR deliverable: run from inside the code repository after committing.
+    The provider is selected by CS_CLOUD_CODE_PROVIDER and reads
+    CS_CLOUD_GITLAB_TOKEN or CS_CLOUD_GITHUB_TOKEN to push/open the MR/PR, then
+    registers the MR/PR URL back to the server.`)
 }
 
 // runGiteaSubmit parses flags and runs the submit flow.
