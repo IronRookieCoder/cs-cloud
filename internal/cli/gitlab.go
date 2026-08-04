@@ -45,6 +45,15 @@ func submitGitlabMR(cfg submitConfig) error {
 	}
 	token := os.Getenv("CS_CLOUD_TOKEN")
 
+	// A code MR needs the repo URL the agent passed via --repo. An empty value
+	// means this path was reached without one (e.g. a document submit that the
+	// caller failed to keep on the Gitea delivery path) — fail with an
+	// actionable error instead of shelling out to `git push --force '' <branch>`
+	// and surfacing git's opaque "bad repository ''" / exit 128.
+	if strings.TrimSpace(cfg.repoURL) == "" {
+		return fmt.Errorf("code MR submit requires --repo <url> (repo URL is empty)")
+	}
+
 	// Determine current branch in the worktree.
 	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
 	if err != nil {

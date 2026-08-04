@@ -307,7 +307,7 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 	b.WriteString("\n交付物：\n")
 	refs := taskDeliverableRefs(envMap)
 	if len(refs) == 0 {
-		b.WriteString("- 无\n")
+		b.WriteString("- （未预设）由你根据任务自行定义交付物：产出文档后用 `cs-cloud workflow deliverable submit --file <路径> --title \"<交付物名>\"` 提交（无需预定义 id，命令会自动创建）。\n")
 	} else {
 		for _, d := range refs {
 			title := strings.TrimSpace(d.Title)

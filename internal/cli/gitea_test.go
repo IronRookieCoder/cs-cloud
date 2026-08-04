@@ -465,6 +465,106 @@ func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
 	}
 }
 
+// TestSubmitDeliverable_DocumentIgnoresCodeProvider is a regression test for a
+// workspace that has BOTH a code repo (GitLab) and a Gitea delivery repo.
+// multica injects CS_CLOUD_CODE_PROVIDER=gitlab into every task in such a
+// workspace — including document-only nodes. A --file submit must still take
+// the Gitea delivery path; routing it into submitGitlabMR (because the
+// provider env was checked first) left --repo empty and failed at
+// `git push --force '' <branch>`.
+func TestSubmitDeliverable_DocumentIgnoresCodeProvider(t *testing.T) {
+	// If the document submit is misrouted into submitGitlabMR, this server is
+	// hit (and the test fails loudly) instead of silently pushing to an empty
+	// repo URL like the production bug did.
+	gitlabSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitLab MR endpoint must not be called for a document deliverable: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer gitlabSrv.Close()
+
+	var reportedURL string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit" {
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			reportedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+	// The workspace has a GitLab code repo, so multica pushes its provider env
+	// into this task even though the node only produces a document.
+	t.Setenv("CS_CLOUD_CODE_PROVIDER", "gitlab")
+	t.Setenv("CS_CLOUD_GITLAB_TOKEN", "gl-pat")
+	t.Setenv("CS_CLOUD_GITLAB_BASE_URL", gitlabSrv.URL)
+	// Plus the Gitea delivery env the document path reads.
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-1")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-1")
+
+	tmpFile := tempFile(t, "# doc body")
+	fake := &fakeGitOps{currentBranch: "node/dd"}
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			giteaBaseOverride: giteaSrv.URL,
+			deliverableID:     "d1",
+			filePath:          tmpFile,
+			gitOps:            fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"deliverable d1: submitting node_run=nr-1 branch=node/dd",
+		"deliverable d1: pushing branch=node/dd",
+		"deliverable d1: opening PR head=node/dd base=inst-cc",
+		"deliverable d1: submitted pr=https://gitea.test/t-aaa/wf-bbb/pulls/9",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	// Push must target the Gitea delivery clone URL (with the PAT embedded),
+	// not an empty gitlab repo URL.
+	if len(fake.pushCalls) != 1 {
+		t.Fatalf("expected one push, got %+v", fake.pushCalls)
+	}
+	if !strings.HasPrefix(fake.pushCalls[0].authURL, "https://oauth2:pat-xyz@gitea.test/t-aaa/wf-bbb.git") {
+		t.Errorf("push authURL = %q, want Gitea delivery URL with embedded PAT", fake.pushCalls[0].authURL)
+	}
+	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/9" {
+		t.Errorf("reported URL = %q, want Gitea PR", reportedURL)
+	}
+}
+
 func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
 	// The failure must come from readGiteaContext detecting the missing
 	// CS_CLOUD_NODE_RUN_ID (cwd is always valid, so no worktree-dir check).

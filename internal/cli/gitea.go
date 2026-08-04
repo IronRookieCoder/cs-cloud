@@ -48,7 +48,13 @@ func printDeliverableUsage() {
 
 Usage:
   cs-cloud workflow deliverable submit --deliverable <id> --file <path> [--title <title>]
-    Push a document deliverable to the platform Gitea and open a PR.
+    Submit a pre-registered deliverable by id.
+
+  cs-cloud workflow deliverable submit --file <path> --title "<title>"
+    Agent-defined deliverable (no pre-registered id): the command creates the
+    deliverable on the node run, then submits it.
+
+  [--mr --repo <url>] opens a code MR/PR instead of a document.
     Reads CS_CLOUD_GITEA_* env (set by the task payload), uses
     CS_CLOUD_GITEA_TOKEN as the workspace bot PAT, pushes the document to the
     node branch, opens a Gitea PR (node->inst), and registers the PR URL back
@@ -108,17 +114,20 @@ func parseSubmitArgs(args []string) (deliverable, file string, mrMode bool, repo
 			return "", "", false, "", "", fmt.Errorf("unknown argument: %s", args[i])
 		}
 	}
-	if deliverable == "" {
-		return "", "", false, "", "", fmt.Errorf("--deliverable is required")
-	}
 	if mrMode || repoURL != "" {
 		// Code PR/MR mode does not require --file: the agent already edited in worktree.
 		if repoURL == "" {
 			return "", "", false, "", "", fmt.Errorf("--repo is required with --mr")
 		}
 	} else {
+		// Document mode: --file is required. --deliverable identifies a
+		// pre-registered deliverable; when omitted, --title drives agent-defined
+		// mode (the CLI creates the deliverable on submit).
 		if file == "" {
 			return "", "", false, "", "", fmt.Errorf("--file is required")
+		}
+		if deliverable == "" && strings.TrimSpace(title) == "" {
+			return "", "", false, "", "", fmt.Errorf("--deliverable or --title is required")
 		}
 	}
 	return deliverable, file, mrMode, repoURL, strings.TrimSpace(title), nil
@@ -201,18 +210,23 @@ func (c *giteaContext) deliverablePath(id string) (string, error) {
 // submitDeliverable is the testable core. Returns nil only after the PR/MR is
 // registered back to the server.
 func submitDeliverable(cfg submitConfig) error {
-	// Provider-driven dispatch: CS_CLOUD_CODE_PROVIDER env (set by multica)
-	// takes priority over the legacy --mr flag.
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("CS_CLOUD_CODE_PROVIDER")))
-	switch provider {
-	case "github":
-		return submitGithubPR(cfg)
-	case "gitlab":
-		return submitGitlabMR(cfg)
-	}
-
-	// Backward compat: --mr flag implies gitlab (pre-provider agent prompts).
-	if cfg.mrMode {
+	// The submit *form* — not CS_CLOUD_CODE_PROVIDER — decides document vs
+	// code. A --file submit is a Gitea document deliverable and must always
+	// take the delivery path. CS_CLOUD_CODE_PROVIDER describes the workspace's
+	// *code* repo, and multica injects it into every task in a workspace that
+	// has a code repo — including document-only nodes. Checking the provider
+	// env first rerouted a --file submit into submitGitlabMR, which then
+	// pushed to an empty --repo (`git push --force '' <branch>`). Only a code
+	// submit (--mr / --repo) honors the provider env.
+	if cfg.mrMode || cfg.repoURL != "" {
+		provider := strings.ToLower(strings.TrimSpace(os.Getenv("CS_CLOUD_CODE_PROVIDER")))
+		switch provider {
+		case "github":
+			return submitGithubPR(cfg)
+		case "gitlab":
+			return submitGitlabMR(cfg)
+		}
+		// Backward compat: --mr (or --repo) without provider env implies gitlab.
 		return submitGitlabMR(cfg)
 	}
 
@@ -231,7 +245,13 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	docPath, err := gctx.deliverablePath(cfg.deliverableID)
+	docPath, err := func() (string, error) {
+		if cfg.deliverableID == "" {
+			// Agent-defined: no pre-registered target path — use the local file's name.
+			return filepath.Base(cfg.filePath), nil
+		}
+		return gctx.deliverablePath(cfg.deliverableID)
+	}()
 	if err != nil {
 		return err
 	}
@@ -268,7 +288,11 @@ func submitDeliverable(cfg submitConfig) error {
 		return fmt.Errorf("detect changes: %w", err)
 	}
 	if hasChanges {
-		if err := cfg.gitOps.Commit(worktree, "deliverable: "+cfg.deliverableID); err != nil {
+		commitLabel := cfg.deliverableID
+		if commitLabel == "" {
+			commitLabel = cfg.title
+		}
+		if err := cfg.gitOps.Commit(worktree, "deliverable: "+commitLabel); err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "deliverable %s: committed branch=%s\n", cfg.deliverableID, currentBranch)
@@ -303,11 +327,20 @@ func submitDeliverable(cfg submitConfig) error {
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", cfg.deliverableID)
-	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.deliverableID, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
+	deliverableID := cfg.deliverableID
+	if deliverableID == "" {
+		// Agent-defined: create the deliverable now, then submit against it.
+		deliverableID, err = createAgentDefinedDeliverable(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		if err != nil {
+			return fmt.Errorf("create deliverable: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
+	}
+	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", deliverableID)
+	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, deliverableID, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
 		return fmt.Errorf("report PR: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "deliverable %s: submitted pr=%s\n", cfg.deliverableID, prURL)
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitted pr=%s\n", deliverableID, prURL)
 	fmt.Println(prURL)
 	return nil
 }
@@ -530,6 +563,44 @@ func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, work
 func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL, workspaceID, agentID, taskID string) error {
 	return reportToServer(ctx, serverURL, token,
 		serverURL+"/api/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/submit", prURL, workspaceID, agentID, taskID)
+}
+
+// createAgentDefinedDeliverable creates a run-scoped deliverable the agent
+// defined itself (no pre-registered node deliverable) and returns the new id.
+// Used by the document submit flow when --deliverable is omitted: the CLI
+// creates the deliverable then reports the PR against it, so the agent still
+// runs a single command.
+func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRunID, title, workspaceID, agentID, taskID string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"title": title})
+	endpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables"
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	if workspaceID != "" {
+		req.Header.Set("X-Workspace-ID", workspaceID)
+	}
+	if agentID != "" {
+		req.Header.Set("X-Agent-ID", agentID)
+	}
+	if taskID != "" {
+		req.Header.Set("X-Task-ID", taskID)
+	}
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("create deliverable request: %w", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("create deliverable: status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil || out.ID == "" {
+		return "", fmt.Errorf("create deliverable: parse id: %s", strings.TrimSpace(string(rb)))
+	}
+	return out.ID, nil
 }
 
 // execGitOps implements gitOps via shelled-out git.
