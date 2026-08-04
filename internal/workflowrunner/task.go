@@ -322,7 +322,7 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 				fmt.Fprintf(&b, "  写入路径：%s\n", d.Path)
 			}
 			if d.ID != "" && d.Path != "" {
-				fmt.Fprintf(&b, "  提交命令：cs-cloud workflow deliverable submit --deliverable %s --file %s\n", shellQuote(d.ID), shellQuote(d.Path))
+				fmt.Fprintf(&b, "  提交命令：在交付仓库目录内运行 cs-cloud workflow deliverable submit --deliverable %s --file %s\n", shellQuote(d.ID), shellQuote(d.Path))
 			}
 		}
 	}
@@ -360,7 +360,7 @@ func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env
 		} else {
 			b.WriteString("  仓库认证：未声明专用环境变量；不要猜 token，缺少权限时停止并请求补充。\n")
 		}
-		b.WriteString("  克隆/更新：不要手工 clone 或 fetch 交付物仓库；由 cs-cloud workflow deliverable submit 自动读取 .cs-cloud.env 并处理拉取、提交、推送。\n")
+		b.WriteString("  克隆/更新：自行 clone 该交付仓库（认证用 .cs-cloud.env 中对应的 token），切到上面的 node 分支，并在该仓库目录内运行 cs-cloud workflow deliverable submit（命令会在当前目录写入交付文档、提交、推送并开 PR）。\n")
 		b.WriteString("  提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR\n")
 	} else if r.BaseBranch != "" {
 		fmt.Fprintf(b, "  基准分支：%s\n", r.BaseBranch)
