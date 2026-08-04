@@ -264,9 +264,9 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		"地址：https://gitlab.test/root/demo.git",
 		"类型：Gitlab",
 		"拉取认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITLAB_TOKEN",
-		"克隆：git clone https://oauth2:${CS_CLOUD_GITLAB_TOKEN}@gitlab.test/root/demo.git demo",
-		"更新：cd demo && git fetch origin",
-		"代码提交：在代码仓库内 commit 后运行 cs-cloud workflow deliverable submit --deliverable d1 --mr --repo https://gitlab.test/root/demo.git",
+		"克隆：git clone https://oauth2:${CS_CLOUD_GITLAB_TOKEN}@gitlab.test/root/demo.git 'demo'",
+		"更新：cd 'demo' && git fetch origin",
+		"代码提交：在代码仓库内 commit 后运行 cs-cloud workflow deliverable submit --deliverable 'd1' --mr --repo 'https://gitlab.test/root/demo.git'",
 		"用途：按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。",
 		"交付物仓库：",
 		"- delivery",
@@ -276,7 +276,7 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		"仓库认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITEA_TOKEN 拉取并推送交付物仓库",
 		"克隆/更新：不要手工 clone 或 fetch 交付物仓库；由 cs-cloud workflow deliverable submit 自动读取 .cs-cloud.env 并处理拉取、提交、推送。",
 		"提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR",
-		"提交命令：cs-cloud workflow deliverable submit --deliverable d1 --file nodes/design.md",
+		"提交命令：cs-cloud workflow deliverable submit --deliverable 'd1' --file 'nodes/design.md'",
 		"禁止：不要猜其他 token；不要把 token 写进回复、文档或提交内容；缺少权限时停止并请求补充。",
 		"交付物：",
 		"ID：d1",
@@ -374,6 +374,48 @@ func TestWriteTaskEnvFile_PersistsOnlyCSCloudVars(t *testing.T) {
 			continue
 		}
 		t.Errorf("non-CS_CLOUD var leaked into env file: %q", line)
+	}
+}
+
+// TestProviderFromRepoURL_HostOnly locks in the host-only match: a URL whose
+// path contains a provider name must not be misclassified, while self-hosted
+// hostnames (gitea.corp, gitlab.example.com) still resolve.
+func TestProviderFromRepoURL_HostOnly(t *testing.T) {
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"https://github.com/o/r.git", "github"},
+		{"https://gitlab.example.com/g/r.git", "gitlab"},
+		{"https://gitea.corp:3000/t/r.git", "gitea"},
+		{"https://example.com/github-mirror/r.git", ""},
+		{"https://example.com/gitlab-fork/r.git", ""},
+		{"https://example.com/gitea-copy/r.git", ""},
+		{"10.20.19.101:33000/t/r.git", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := providerFromRepoURL(tc.url); got != tc.want {
+			t.Errorf("providerFromRepoURL(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}
+
+// TestShellQuote verifies POSIX single-quote escaping for task-controlled
+// values embedded into the shell commands written to the task repos file.
+func TestShellQuote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"demo", "'demo'"},
+		{"a b", "'a b'"},
+		{"a'b", "'a'\\''b'"},
+		{"$(rm -rf /)", "'$(rm -rf /)'"},
+		{"foo;bar", "'foo;bar'"},
+		{"d1", "'d1'"},
+	}
+	for _, tc := range cases {
+		if got := shellQuote(tc.in); got != tc.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

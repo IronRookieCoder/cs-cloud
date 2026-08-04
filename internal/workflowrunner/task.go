@@ -322,7 +322,7 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 				fmt.Fprintf(&b, "  写入路径：%s\n", d.Path)
 			}
 			if d.ID != "" && d.Path != "" {
-				fmt.Fprintf(&b, "  提交命令：cs-cloud workflow deliverable submit --deliverable %s --file %s\n", d.ID, d.Path)
+				fmt.Fprintf(&b, "  提交命令：cs-cloud workflow deliverable submit --deliverable %s --file %s\n", shellQuote(d.ID), shellQuote(d.Path))
 			}
 		}
 	}
@@ -375,7 +375,7 @@ func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env
 			b.WriteString("  拉取认证：未声明专用环境变量；不要猜 token，缺少权限时停止并请求补充。\n")
 		}
 		if label != "" {
-			fmt.Fprintf(b, "  更新：cd %s && git fetch origin\n", label)
+			fmt.Fprintf(b, "  更新：cd %s && git fetch origin\n", shellQuote(label))
 		}
 		if submitCmd := codeRepoSubmitCommand(r, env); submitCmd != "" {
 			fmt.Fprintf(b, "  代码提交：在代码仓库内 commit 后运行 %s\n", submitCmd)
@@ -402,13 +402,23 @@ func repoTokenEnv(r workflow.RepoSpec) string {
 }
 
 func providerFromRepoURL(rawURL string) string {
-	lower := strings.ToLower(strings.TrimSpace(rawURL))
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		// Not an absolute URL — refuse to guess; caller falls back to
+		// "no dedicated token env".
+		return ""
+	}
+	// Match on hostname only, never the path: a URL like
+	// https://example.com/github-mirror/repo must NOT be treated as
+	// GitHub. Self-hosted providers (gitea.internal, gitlab.corp:3000)
+	// still match because their hostname carries the provider name.
+	host := strings.ToLower(u.Host)
 	switch {
-	case strings.Contains(lower, "github"):
+	case strings.Contains(host, "github"):
 		return "github"
-	case strings.Contains(lower, "gitlab"):
+	case strings.Contains(host, "gitlab"):
 		return "gitlab"
-	case strings.Contains(lower, "gitea"):
+	case strings.Contains(host, "gitea"):
 		return "gitea"
 	default:
 		return ""
@@ -423,7 +433,9 @@ func repoCloneCommand(r workflow.RepoSpec, dir, tokenEnv string) string {
 	if strings.TrimSpace(dir) == "" {
 		return "git clone " + authURL
 	}
-	return fmt.Sprintf("git clone %s %s", authURL, dir)
+	// authURL keeps its ${TOKEN} shell expansion unquoted; dir is a
+	// task-controlled value (repo alias) so it gets quoted.
+	return fmt.Sprintf("git clone %s %s", authURL, shellQuote(dir))
 }
 
 func repoAuthURLTemplate(rawURL, tokenEnv string) string {
@@ -453,12 +465,20 @@ func repoTokenUsername(host string) string {
 	return "oauth2"
 }
 
+// shellQuote wraps s in POSIX single quotes so task-controlled values
+// (deliverable id/path, clone directory, repo URL) are safe to embed in
+// the shell commands written to the task repos file. Single quotes are
+// escaped via the standard '\'' sequence.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 func codeRepoSubmitCommand(r workflow.RepoSpec, env map[string]string) string {
 	refs := taskDeliverableRefs(env)
 	if len(refs) == 0 || refs[0].ID == "" || strings.TrimSpace(r.URL) == "" {
 		return ""
 	}
-	return fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", refs[0].ID, strings.TrimSpace(r.URL))
+	return fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", shellQuote(refs[0].ID), shellQuote(strings.TrimSpace(r.URL)))
 }
 
 func repoProviderLabel(provider string) string {
