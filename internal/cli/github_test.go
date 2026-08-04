@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +35,42 @@ func TestReadGithubCredential_DefaultBase(t *testing.T) {
 	}
 	if cred.BaseURL != "https://api.github.com" {
 		t.Errorf("BaseURL = %q, want default https://api.github.com", cred.BaseURL)
+	}
+}
+
+// TestFetchGithubDefaultBranch verifies the repo default branch is queried from
+// GET /repos/{owner}/{repo} when no target branch is explicitly configured.
+func TestFetchGithubDefaultBranch(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"default_branch":"develop"}`)
+	}))
+	defer srv.Close()
+
+	got := fetchGithubDefaultBranch(context.Background(), srv.URL, "ghp-x", "https://github.com/o/r.git")
+	if got != "develop" {
+		t.Errorf("default branch = %q, want develop", got)
+	}
+	if !strings.HasSuffix(gotPath, "/repos/o/r") {
+		t.Errorf("GET path = %q, want .../repos/o/r", gotPath)
+	}
+	if gotAuth != "token ghp-x" {
+		t.Errorf("Authorization = %q, want 'token ghp-x'", gotAuth)
+	}
+}
+
+// TestFetchGithubDefaultBranch_FallbackOn404 verifies a failed query returns ""
+// so the caller falls back to the hardcoded default instead of erroring.
+func TestFetchGithubDefaultBranch_FallbackOn404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	if got := fetchGithubDefaultBranch(context.Background(), srv.URL, "ghp-x", "https://github.com/o/r.git"); got != "" {
+		t.Errorf("default branch = %q, want \"\" (caller falls back)", got)
 	}
 }
 

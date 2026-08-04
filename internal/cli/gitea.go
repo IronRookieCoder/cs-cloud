@@ -149,8 +149,8 @@ type submitConfig struct {
 type gitOps interface {
 	Clone(authURL, branch, dir string) error
 	WriteFile(dir, path string, content []byte) error
-	HasChanges(dir string) (bool, error)
-	Commit(dir, message string) error
+	HasChanges(dir, path string) (bool, error)
+	Commit(dir, path, message string) error
 	Push(dir, authURL, branch string) error
 	CurrentBranch(dir string) (string, error)
 }
@@ -283,7 +283,7 @@ func submitDeliverable(cfg submitConfig) error {
 	// committed (re-run), `git commit` exits 1 and would abort the pipeline
 	// before push/PR/report. Skip commit on a clean tree so the command can be
 	// retried to success.
-	hasChanges, err := cfg.gitOps.HasChanges(worktree)
+	hasChanges, err := cfg.gitOps.HasChanges(worktree, docPath)
 	if err != nil {
 		return fmt.Errorf("detect changes: %w", err)
 	}
@@ -292,7 +292,7 @@ func submitDeliverable(cfg submitConfig) error {
 		if commitLabel == "" {
 			commitLabel = cfg.title
 		}
-		if err := cfg.gitOps.Commit(worktree, "deliverable: "+commitLabel); err != nil {
+		if err := cfg.gitOps.Commit(worktree, docPath, "deliverable: "+commitLabel); err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "deliverable %s: committed branch=%s\n", cfg.deliverableID, currentBranch)
@@ -616,14 +616,18 @@ func (execGitOps) WriteFile(dir, path string, content []byte) error {
 	}
 	return os.WriteFile(full, content, 0o644)
 }
-func (execGitOps) Commit(dir, message string) error {
-	if err := runGitInDir(dir, "add", "-A"); err != nil {
+func (execGitOps) Commit(dir, path, message string) error {
+	// Stage ONLY the deliverable path, not `add -A`. The worktree may hold
+	// unrelated files — a leaked .cs-cloud.env carrying tokens, scratch files,
+	// build output — and force-pushing those (see Push) would leak secrets and
+	// pollute the delivery PR.
+	if err := runGitInDir(dir, "add", "--", path); err != nil {
 		return err
 	}
 	return runGitInDir(dir, "-c", "user.email=bot@cs-cloud", "-c", "user.name=CS-Cloud Bot", "commit", "-m", message)
 }
-func (execGitOps) HasChanges(dir string) (bool, error) {
-	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+func (execGitOps) HasChanges(dir, path string) (bool, error) {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain", "--", path).Output()
 	if err != nil {
 		return false, err
 	}

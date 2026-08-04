@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,30 @@ func TestReadGitlabCredential_Valid(t *testing.T) {
 	}
 	if cred.BaseURL != "https://gitlab.test" {
 		t.Errorf("BaseURL = %q, want https://gitlab.test", cred.BaseURL)
+	}
+}
+
+// TestFetchGitlabDefaultBranch verifies the project default branch is queried
+// from GET /api/v4/projects/:project when no target branch is configured.
+func TestFetchGitlabDefaultBranch(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		gotAuth = r.Header.Get("PRIVATE-TOKEN")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"default_branch":"master"}`)
+	}))
+	defer srv.Close()
+
+	got := fetchGitlabDefaultBranch(context.Background(), srv.URL, "gl-x", "https://gitlab.test/g/r.git")
+	if got != "master" {
+		t.Errorf("default branch = %q, want master", got)
+	}
+	if !strings.HasSuffix(gotPath, "/api/v4/projects/g%2Fr") {
+		t.Errorf("GET path = %q, want .../api/v4/projects/g%%2Fr", gotPath)
+	}
+	if gotAuth != "gl-x" {
+		t.Errorf("PRIVATE-TOKEN = %q, want gl-x", gotAuth)
 	}
 }
 

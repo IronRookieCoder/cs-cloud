@@ -69,7 +69,13 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "main")
+	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "")
+	if targetBranch == "" {
+		targetBranch = fetchGitlabDefaultBranch(ctx, cred.BaseURL, cred.Token, cfg.repoURL)
+	}
+	if targetBranch == "" {
+		targetBranch = "main" // repo query failed — last-resort default
+	}
 	title := deliverableTitle(cfg.title, "deliverable "+cfg.deliverableID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening MR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
@@ -113,6 +119,43 @@ func readGitlabCredential() (*gitlabCredential, error) {
 		BaseURL: baseURL,
 		Token:   token,
 	}, nil
+}
+
+// fetchGitlabDefaultBranch queries the project's default branch via GET
+// /api/v4/projects/:project. Returns "" on any failure so the caller falls
+// back to a hardcoded default rather than blocking MR creation.
+func fetchGitlabDefaultBranch(ctx context.Context, base, token, repoURL string) string {
+	u, err := url.Parse(strings.TrimSpace(repoURL))
+	if err != nil {
+		return ""
+	}
+	project := strings.Trim(u.Path, "/")
+	project = strings.TrimSuffix(project, ".git")
+	if project == "" {
+		return ""
+	}
+	endpoint := strings.TrimRight(base, "/") + "/api/v4/projects/" + url.PathEscape(project)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if json.Unmarshal(body, &info) != nil {
+		return ""
+	}
+	return strings.TrimSpace(info.DefaultBranch)
 }
 
 // openGitlabMR POSTs /api/v4/projects/<urlencoded>/merge_requests and returns web_url.

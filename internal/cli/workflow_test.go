@@ -3,6 +3,7 @@ package cli
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,6 +43,41 @@ func TestLoadTaskEnvFile_PopulatesProcessEnv(t *testing.T) {
 	}
 	if got := os.Getenv("CS_CLOUD_LOCAL_URL"); got != "http://127.0.0.1:9" {
 		t.Errorf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9", got)
+	}
+}
+
+// TestLoadTaskEnvFile_WalksUpToTaskRoot verifies the env file is resolved even
+// when the agent runs in-task CLIs from a cloned repo subdir (the submit prompt
+// tells it to cd into the delivery repo). The file lives in the task root.
+func TestLoadTaskEnvFile_WalksUpToTaskRoot(t *testing.T) {
+	root := t.TempDir()
+	content := "CS_CLOUD_TASK_ID=from-root\n"
+	if err := os.WriteFile(filepath.Join(root, workflowrunner.TaskEnvFileName), []byte(content), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	// Agent is several levels deep inside a cloned repo under the task root.
+	sub := filepath.Join(root, "wf-repo", "nodes", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	t.Chdir(sub)
+	t.Setenv("CS_CLOUD_TASK_ID", "")
+
+	loadTaskEnvFile()
+
+	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "from-root" {
+		t.Errorf("CS_CLOUD_TASK_ID = %q, want from-root (loaded via upward walk from subdir)", got)
+	}
+}
+
+// TestLoadTaskEnvFile_NoFileIsNoOp verifies a missing file (e.g. cwd is outside
+// any task tree) is a silent no-op, not an error.
+func TestLoadTaskEnvFile_NoFileIsNoOp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("CS_CLOUD_TASK_ID", "")
+	loadTaskEnvFile()
+	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "" {
+		t.Errorf("CS_CLOUD_TASK_ID = %q, want empty (no env file present)", got)
 	}
 }
 

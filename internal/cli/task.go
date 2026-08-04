@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,23 @@ import (
 	"cs-cloud/internal/app"
 	"cs-cloud/internal/workflowrunner"
 )
+
+// taskCompleteAttempts caps how many times the complete signal is retried. The
+// call is the agent's only chance to signal completion, so transient failures
+// (connection blip, 5xx, driver briefly unavailable) are retried rather than
+// surfaced as fatal on the first try.
+const taskCompleteAttempts = 3
+
+// taskCompleteRetryWait paces retries. Short: completion is latency-sensitive
+// (the driver's completion grace window is seconds), so we must not back off
+// for long before the signal lands.
+const taskCompleteRetryWait = 500 * time.Millisecond
+
+// errTaskAlreadyFinished represents a 409 from localserver: the task is no
+// longer running (first complete succeeded, or it timed out / was finalized).
+// Retrying cannot change that, so the caller treats it as accepted instead of
+// trapping the agent in a "task not running" retry loop.
+var errTaskAlreadyFinished = errors.New("task already finished")
 
 // taskCmd implements `cs-cloud workflow task`, the in-task tooling an agent uses
 // to explicitly signal task completion (worker) or a review decision (critic).
@@ -82,6 +100,11 @@ func runTaskReview(args []string, decision string) error {
 // postTaskCompletion POSTs the completion payload to this device's localserver
 // endpoint, which forwards it to the driver via SignalTaskCompletion. Task id +
 // local URL come from the env (populated from .cs-cloud.env by loadTaskEnvFile).
+//
+// The call is the agent's only chance to signal completion, so transient
+// failures are retried (taskCompleteAttempts). A 409 means the task already
+// finished (first complete succeeded, or it timed out) and is treated as
+// accepted — otherwise the agent loops on "task not running" until agent_timeout.
 func postTaskCompletion(body map[string]string) error {
 	localURL := os.Getenv(workflowrunner.EnvLocalServerURL)
 	taskID := os.Getenv(workflowrunner.EnvTaskID)
@@ -92,8 +115,26 @@ func postTaskCompletion(body map[string]string) error {
 		return fmt.Errorf("%s not set (run inside a workflow task; context is in .cs-cloud.env)", workflowrunner.EnvTaskID)
 	}
 	endpoint := strings.TrimRight(localURL, "/") + "/api/v1/workflow/tasks/" + taskID + "/complete"
-
 	payload, _ := json.Marshal(body)
+
+	var lastErr error
+	for attempt := 1; attempt <= taskCompleteAttempts; attempt++ {
+		err := postCompletionOnce(endpoint, payload)
+		if err == nil || errors.Is(err, errTaskAlreadyFinished) {
+			return nil
+		}
+		lastErr = err
+		if attempt < taskCompleteAttempts {
+			time.Sleep(taskCompleteRetryWait)
+		}
+	}
+	return fmt.Errorf("complete (after %d attempts): %w", taskCompleteAttempts, lastErr)
+}
+
+// postCompletionOnce performs a single complete POST and maps the response:
+// 2xx → nil, 409 → errTaskAlreadyFinished (treated as accepted upstream),
+// anything else → a retryable error.
+func postCompletionOnce(endpoint string, payload []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -109,14 +150,17 @@ func postTaskCompletion(body map[string]string) error {
 
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("complete request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("complete: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	if resp.StatusCode == http.StatusConflict {
+		return errTaskAlreadyFinished
 	}
-	return nil
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("complete: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 }
 
 // parseStringFlag reads `--name <value>` from a flat arg slice. Returns the

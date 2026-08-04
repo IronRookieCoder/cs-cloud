@@ -58,7 +58,13 @@ func submitGithubPR(cfg submitConfig) error {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	targetBranch := envOr("CS_CLOUD_GITHUB_TARGET_BRANCH", "main")
+	targetBranch := envOr("CS_CLOUD_GITHUB_TARGET_BRANCH", "")
+	if targetBranch == "" {
+		targetBranch = fetchGithubDefaultBranch(ctx, cred.BaseURL, cred.Token, cfg.repoURL)
+	}
+	if targetBranch == "" {
+		targetBranch = "main" // repo query failed — last-resort default
+	}
 	title := deliverableTitle(cfg.title, "deliverable "+cfg.deliverableID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening PR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	prURL, err := openGithubPR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
@@ -103,6 +109,43 @@ func githubAPIBase(repoURL string) string {
 		return "https://api.github.com"
 	}
 	return fmt.Sprintf("https://%s/api/v3", u.Host)
+}
+
+// fetchGithubDefaultBranch queries the repo's default branch via GET
+// /repos/{owner}/{repo}. Returns "" on any failure so the caller falls back to
+// a hardcoded default rather than blocking PR creation.
+func fetchGithubDefaultBranch(ctx context.Context, base, token, repoURL string) string {
+	owner, repo, err := githubRepoFromURL(repoURL)
+	if err != nil {
+		return ""
+	}
+	effectiveBase := base
+	if effectiveBase == "" || effectiveBase == "https://api.github.com" {
+		effectiveBase = githubAPIBase(repoURL)
+	}
+	endpoint := strings.TrimRight(effectiveBase, "/") + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if json.Unmarshal(body, &info) != nil {
+		return ""
+	}
+	return strings.TrimSpace(info.DefaultBranch)
 }
 
 // openGithubPR POSTs /repos/{owner}/{repo}/pulls and returns html_url.

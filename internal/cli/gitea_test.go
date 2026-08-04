@@ -29,6 +29,7 @@ type fakeGitOps struct {
 		content []byte
 	}
 	commitMsgs        []string
+	commitPaths       []string
 	pushCalls         []struct{ dir, authURL, branch string }
 	currentBranchDirs []string
 	currentBranch     string // value returned by CurrentBranch
@@ -48,8 +49,9 @@ func (f *fakeGitOps) WriteFile(dir, path string, content []byte) error {
 	}{dir, path, content})
 	return nil
 }
-func (f *fakeGitOps) Commit(dir, message string) error {
+func (f *fakeGitOps) Commit(dir, path, message string) error {
 	f.commitMsgs = append(f.commitMsgs, message)
+	f.commitPaths = append(f.commitPaths, path)
 	return nil
 }
 func (f *fakeGitOps) Push(dir, authURL, branch string) error {
@@ -60,7 +62,7 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 	f.currentBranchDirs = append(f.currentBranchDirs, dir)
 	return f.currentBranch, nil
 }
-func (f *fakeGitOps) HasChanges(dir string) (bool, error) {
+func (f *fakeGitOps) HasChanges(dir, path string) (bool, error) {
 	f.hasChangesDirs = append(f.hasChangesDirs, dir)
 	if f.hasChanges != nil {
 		return *f.hasChanges, nil
@@ -856,7 +858,7 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 	}
 	dirty := func(want bool) {
 		t.Helper()
-		got, err := ops.HasChanges(repo)
+		got, err := ops.HasChanges(repo, "nodes/d1.md")
 		if err != nil {
 			t.Fatalf("HasChanges: %v", err)
 		}
@@ -867,7 +869,7 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 
 	write("body") // new file → dirty
 	dirty(true)
-	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+	if err := ops.Commit(repo, "nodes/d1.md", "deliverable: d1"); err != nil {
 		t.Fatalf("Commit #1: %v", err)
 	}
 	dirty(false)
@@ -877,10 +879,69 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 
 	write("body-v2") // real change → dirty again
 	dirty(true)
-	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+	if err := ops.Commit(repo, "nodes/d1.md", "deliverable: d1"); err != nil {
 		t.Fatalf("Commit #2: %v", err)
 	}
 	dirty(false)
+}
+
+// TestExecGitOps_CommitOnlyStagesDeliverablePath verifies the production
+// execGitOps.Commit stages ONLY the deliverable path, not `add -A`. A worktree
+// may contain sensitive leftovers (a leaked .cs-cloud.env carrying tokens) or
+// scratch files; committing + force-pushing those would leak secrets and
+// pollute the PR.
+func TestExecGitOps_CommitOnlyStagesDeliverablePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@test"},
+		{"config", "user.name", "t"},
+	} {
+		gitRun(t, repo, args...)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	gitRun(t, repo, "add", "README")
+	gitRun(t, repo, "commit", "-q", "-m", "init")
+
+	// A sensitive untracked file + a scratch file sit in the worktree.
+	if err := os.WriteFile(filepath.Join(repo, ".cs-cloud.env"), []byte("CS_CLOUD_TOKEN=secret"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "scratch.log"), []byte("noise"), 0o644); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+
+	var ops execGitOps
+	docPath := "nodes/02-plan/task.md"
+	if err := ops.WriteFile(repo, docPath, []byte("# doc body")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := ops.Commit(repo, docPath, "deliverable: d1"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	tree := gitRunOut(t, repo, "ls-tree", "-r", "--name-only", "HEAD")
+	if !strings.Contains(tree, docPath) {
+		t.Errorf("docPath should be committed, tree=\n%s", tree)
+	}
+	for _, leaked := range []string{".cs-cloud.env", "scratch.log"} {
+		if strings.Contains(tree, leaked) {
+			t.Errorf("%s must NOT be committed (only the deliverable path), tree=\n%s", leaked, tree)
+		}
+	}
+	// They must still be untracked in the worktree (not staged, not committed).
+	status := gitRunOut(t, repo, "status", "--porcelain")
+	if !strings.Contains(status, "?? .cs-cloud.env") {
+		t.Errorf(".cs-cloud.env should remain untracked, status=\n%s", status)
+	}
+	if !strings.Contains(status, "?? scratch.log") {
+		t.Errorf("scratch.log should remain untracked, status=\n%s", status)
+	}
 }
 
 // gitRun runs git -C dir and fails the test on error.
@@ -890,6 +951,16 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
 	}
+}
+
+// gitRunOut runs git -C dir and returns stdout, failing the test on error.
+func gitRunOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 // serveGitHTTP serves a local bare-repo "platform Gitea" via `git http-backend`
