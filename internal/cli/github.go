@@ -51,7 +51,7 @@ func submitGithubPR(cfg submitConfig) error {
 	}
 	deliverableID := cfg.deliverableID
 	if deliverableID == "" {
-		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, "", os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
 		if err != nil {
 			return fmt.Errorf("create deliverable: %w", err)
 		}

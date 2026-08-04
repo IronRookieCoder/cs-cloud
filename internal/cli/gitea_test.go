@@ -1231,7 +1231,7 @@ func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
 	if got, want := strings.Join(order, ","), "create,open,submit"; got != want {
 		t.Errorf("operation order = %s, want %s", got, want)
 	}
-	if idempotencyKey != "agent-defined-deliverable:nr-1:task-uuid-222:My Design Doc" {
+	if idempotencyKey != "agent-defined-deliverable:nr-1:task-uuid-222:My Design Doc:"+filepath.Base(tmpFile) {
 		t.Errorf("Idempotency-Key = %q, want stable node/task/title key", idempotencyKey)
 	}
 }
@@ -1260,8 +1260,19 @@ func TestCreateAgentDefinedDeliverableRejectsMalformedServerURLNoPanic(t *testin
 		}
 	}()
 
-	_, err := createAgentDefinedDeliverable(context.Background(), "http://127.0.0.1\nbad", "tok", "nr-1", "Doc", "ws-1", "agent-1", "task-1")
+	_, err := createAgentDefinedDeliverable(context.Background(), "http://127.0.0.1\nbad", "tok", "nr-1", "Doc", "doc.md", "ws-1", "agent-1", "task-1")
 	if err == nil {
 		t.Fatal("expected malformed request URL error")
+	}
+}
+
+func TestAgentDefinedDeliverableIdempotencyKeyIncludesDocPath(t *testing.T) {
+	keyA := agentDefinedDeliverableIdempotencyKey("nr-1", "Design", "task-1", "alpha.md")
+	keyB := agentDefinedDeliverableIdempotencyKey("nr-1", "Design", "task-1", "nested/beta.md")
+	if keyA == keyB {
+		t.Fatalf("same title with different doc paths produced identical key %q", keyA)
+	}
+	if !strings.Contains(keyA, "alpha.md") {
+		t.Fatalf("key %q does not include normalized doc path", keyA)
 	}
 }

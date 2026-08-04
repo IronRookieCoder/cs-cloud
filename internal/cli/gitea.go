@@ -314,7 +314,7 @@ func submitDeliverable(cfg submitConfig) error {
 	if deliverableID == "" {
 		// Agent-defined: create the deliverable before pushing/opening the PR so
 		// a create rejection cannot leave an external PR with no platform target.
-		deliverableID, err = createAgentDefinedDeliverable(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		deliverableID, err = createAgentDefinedDeliverable(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.title, docPath, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
 		if err != nil {
 			return fmt.Errorf("create deliverable: %w", err)
 		}
@@ -583,7 +583,7 @@ func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliv
 // Used by the document submit flow when --deliverable is omitted: the CLI
 // creates the deliverable then reports the PR against it, so the agent still
 // runs a single command.
-func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRunID, title, workspaceID, agentID, taskID string) (string, error) {
+func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRunID, title, docPath, workspaceID, agentID, taskID string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"title": title})
 	endpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -592,7 +592,7 @@ func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRu
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	if key := agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID); key != "" {
+	if key := agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID, docPath); key != "" {
 		req.Header.Set("Idempotency-Key", key)
 	}
 	if workspaceID != "" {
@@ -622,8 +622,12 @@ func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRu
 	return out.ID, nil
 }
 
-func agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID string) string {
-	parts := []string{"agent-defined-deliverable", strings.TrimSpace(nodeRunID), strings.TrimSpace(taskID), strings.TrimSpace(title)}
+func agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID, docPath string) string {
+	normalizedPath := strings.TrimSpace(docPath)
+	if normalizedPath != "" {
+		normalizedPath = filepath.ToSlash(filepath.Clean(normalizedPath))
+	}
+	parts := []string{"agent-defined-deliverable", strings.TrimSpace(nodeRunID), strings.TrimSpace(taskID), strings.TrimSpace(title), normalizedPath}
 	return strings.Join(parts, ":")
 }
 
