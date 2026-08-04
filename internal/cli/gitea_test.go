@@ -1110,3 +1110,78 @@ func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
 		t.Errorf("bare repo node/dd:nodes/dd/d1.md = %q, want deliverable body", string(got))
 	}
 }
+
+// TestSubmitDeliverable_AgentDefinedCreatesThenSubmits verifies the
+// agent-defined flow: with no --deliverable (the node has no pre-registered
+// deliverables), the CLI creates a deliverable on the server (POST
+// /deliverables {title}), gets back an id, then submits the PR against it.
+// The agent perceives one command.
+func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
+	var createdTitle string
+	var submittedDeliverableID string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/gitea/credential":
+			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
+		case "/api/node-runs/nr-1/deliverables":
+			var body struct {
+				Title string `json:"title"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdTitle = body.Title
+			jsonResponse(w, 201, map[string]any{"id": "agent-d-1", "title": body.Title, "required": false})
+		case "/api/node-runs/nr-1/deliverables/agent-d-1/submit":
+			submittedDeliverableID = "agent-d-1"
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[]`) // no pre-registered deliverables
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-111")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-222")
+
+	tmpFile := tempFile(t, "# agent-defined doc body")
+	fake := &fakeGitOps{currentBranch: "node/dd"}
+
+	err := submitDeliverable(submitConfig{
+		giteaBaseOverride: giteaSrv.URL,
+		deliverableID:     "", // agent-defined: no pre-registered id
+		filePath:          tmpFile,
+		title:             "My Design Doc",
+		gitOps:            fake,
+	})
+	if err != nil {
+		t.Fatalf("submitDeliverable agent-defined: %v", err)
+	}
+	if createdTitle != "My Design Doc" {
+		t.Errorf("create deliverable title = %q, want %q", createdTitle, "My Design Doc")
+	}
+	if submittedDeliverableID != "agent-d-1" {
+		t.Errorf("submit called with id %q, want agent-d-1 (the id create returned)", submittedDeliverableID)
+	}
+}
