@@ -263,12 +263,21 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		"- demo",
 		"地址：https://gitlab.test/root/demo.git",
 		"类型：Gitlab",
+		"拉取认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITLAB_TOKEN",
+		"克隆：git clone https://oauth2:${CS_CLOUD_GITLAB_TOKEN}@gitlab.test/root/demo.git 'demo'",
+		"更新：cd 'demo' && git fetch origin",
+		"代码提交：在代码仓库内 commit 后运行 cs-cloud workflow deliverable submit --deliverable 'd1' --mr --repo 'https://gitlab.test/root/demo.git'",
 		"用途：按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。",
 		"交付物仓库：",
 		"- delivery",
 		"类型：Gitea",
 		"node 分支：node-1",
 		"inst 分支：inst-1",
+		"仓库认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITEA_TOKEN 拉取并推送交付物仓库",
+		"克隆/更新：自行 clone 该交付仓库（认证用 .cs-cloud.env 中对应的 token），切到上面的 node 分支，并在该仓库目录内运行 cs-cloud workflow deliverable submit（命令会在当前目录写入交付文档、提交、推送并开 PR）。",
+		"提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR",
+		"提交命令：在交付仓库目录内运行 cs-cloud workflow deliverable submit --deliverable 'd1' --file 'nodes/design.md'",
+		"禁止：不要猜其他 token；不要把 token 写进回复、文档或提交内容；缺少权限时停止并请求补充。",
 		"交付物：",
 		"ID：d1",
 		"写入路径：nodes/design.md",
@@ -340,6 +349,7 @@ func TestWriteTaskEnvFile_PersistsOnlyCSCloudVars(t *testing.T) {
 	env := []string{
 		"PATH=/usr/bin",
 		"CS_CLOUD_TASK_ID=task-xyz",
+		"CS_CLOUD_PROMPT=first line\nsecond line that is prompt text",
 		"CS_CLOUD_LOCAL_URL=http://127.0.0.1:5000",
 		"OTHER_VAR=skip-me",
 	}
@@ -356,11 +366,76 @@ func TestWriteTaskEnvFile_PersistsOnlyCSCloudVars(t *testing.T) {
 	if !strings.Contains(got, "CS_CLOUD_LOCAL_URL=http://127.0.0.1:5000") {
 		t.Errorf("missing CS_CLOUD_LOCAL_URL: %s", got)
 	}
+	if strings.Contains(got, "CS_CLOUD_PROMPT=") || strings.Contains(got, "second line that is prompt text") {
+		t.Errorf("env file should not persist CS_CLOUD_PROMPT or prompt body: %s", got)
+	}
 	for _, line := range strings.Split(got, "\n") {
 		if line == "" || strings.HasPrefix(line, "CS_CLOUD_") {
 			continue
 		}
 		t.Errorf("non-CS_CLOUD var leaked into env file: %q", line)
+	}
+}
+
+// TestProviderFromRepoURL_HostOnly locks in the host-only match: a URL whose
+// path contains a provider name must not be misclassified, while self-hosted
+// hostnames (gitea.corp, gitlab.example.com) still resolve.
+func TestProviderFromRepoURL_HostOnly(t *testing.T) {
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"https://github.com/o/r.git", "github"},
+		{"https://gitlab.example.com/g/r.git", "gitlab"},
+		{"https://gitea.corp:3000/t/r.git", "gitea"},
+		{"https://example.com/github-mirror/r.git", ""},
+		{"https://example.com/gitlab-fork/r.git", ""},
+		{"https://example.com/gitea-copy/r.git", ""},
+		{"10.20.19.101:33000/t/r.git", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := providerFromRepoURL(tc.url); got != tc.want {
+			t.Errorf("providerFromRepoURL(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}
+
+// TestShellQuote verifies POSIX single-quote escaping for task-controlled
+// values embedded into the shell commands written to the task repos file.
+func TestShellQuote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"demo", "'demo'"},
+		{"a b", "'a b'"},
+		{"a'b", "'a'\\''b'"},
+		{"$(rm -rf /)", "'$(rm -rf /)'"},
+		{"foo;bar", "'foo;bar'"},
+		{"d1", "'d1'"},
+	}
+	for _, tc := range cases {
+		if got := shellQuote(tc.in); got != tc.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestCodeRepoSubmitCommand_AllDeliverables verifies a submit command is
+// emitted for every deliverable reference, not just the first.
+func TestCodeRepoSubmitCommand_AllDeliverables(t *testing.T) {
+	env := map[string]string{
+		"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","path":"a.md"},{"deliverable_id":"d2","path":"b.md"}]`,
+	}
+	got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://gitlab.test/o/r.git"}, env)
+	if !strings.Contains(got, "--deliverable 'd1'") || !strings.Contains(got, "--deliverable 'd2'") {
+		t.Errorf("expected submit commands for both deliverables, got:\n%s", got)
+	}
+	// empty repo URL -> no command
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{}, env); got != "" {
+		t.Errorf("expected empty submit command when repo URL is empty, got %q", got)
+	}
+	// no deliverables -> empty
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://x/y.git"}, map[string]string{}); got != "" {
+		t.Errorf("expected empty submit command when no deliverables, got %q", got)
 	}
 }
 

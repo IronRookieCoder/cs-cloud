@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -229,7 +231,7 @@ func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunP
 func writeTaskEnvFile(workdir string, env []string) error {
 	var lines []string
 	for _, e := range env {
-		if strings.HasPrefix(e, "CS_CLOUD_") {
+		if k, _, ok := strings.Cut(e, "="); ok && strings.HasPrefix(k, "CS_CLOUD_") && k != EnvPrompt {
 			lines = append(lines, e)
 		}
 	}
@@ -319,9 +321,13 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 			if d.Path != "" {
 				fmt.Fprintf(&b, "  写入路径：%s\n", d.Path)
 			}
+			if d.ID != "" && d.Path != "" {
+				fmt.Fprintf(&b, "  提交命令：在交付仓库目录内运行 cs-cloud workflow deliverable submit --deliverable %s --file %s\n", shellQuote(d.ID), shellQuote(d.Path))
+			}
 		}
 	}
 	b.WriteString("\n认证信息：在 .cs-cloud.env，由命令自动读取。不要把 token 写进回复、文档或提交内容。\n")
+	b.WriteString("禁止：不要猜其他 token；不要把 token 写进回复、文档或提交内容；缺少权限时停止并请求补充。\n")
 	return writeAtomicFile(workdir, TaskReposFileName, ".cs-cloud-repos-*", []byte(b.String()), 0o600)
 }
 
@@ -349,10 +355,140 @@ func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env
 		} else if r.BaseBranch != "" {
 			fmt.Fprintf(b, "  inst 分支：%s\n", r.BaseBranch)
 		}
+		if tokenEnv := repoTokenEnv(r); tokenEnv != "" {
+			fmt.Fprintf(b, "  仓库认证：使用 .cs-cloud.env 中的 %s 拉取并推送交付物仓库\n", tokenEnv)
+		} else {
+			b.WriteString("  仓库认证：未声明专用环境变量；不要猜 token，缺少权限时停止并请求补充。\n")
+		}
+		b.WriteString("  克隆/更新：自行 clone 该交付仓库（认证用 .cs-cloud.env 中对应的 token），切到上面的 node 分支，并在该仓库目录内运行 cs-cloud workflow deliverable submit（命令会在当前目录写入交付文档、提交、推送并开 PR）。\n")
+		b.WriteString("  提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR\n")
 	} else if r.BaseBranch != "" {
 		fmt.Fprintf(b, "  基准分支：%s\n", r.BaseBranch)
 	}
+	if !strings.EqualFold(r.Role, "delivery") {
+		if tokenEnv := repoTokenEnv(r); tokenEnv != "" {
+			fmt.Fprintf(b, "  拉取认证：使用 .cs-cloud.env 中的 %s\n", tokenEnv)
+			if cloneCmd := repoCloneCommand(r, label, tokenEnv); cloneCmd != "" {
+				fmt.Fprintf(b, "  克隆：%s\n", cloneCmd)
+			}
+		} else {
+			b.WriteString("  拉取认证：未声明专用环境变量；不要猜 token，缺少权限时停止并请求补充。\n")
+		}
+		if label != "" {
+			fmt.Fprintf(b, "  更新：cd %s && git fetch origin\n", shellQuote(label))
+		}
+		if submitCmd := codeRepoSubmitCommand(r, env); submitCmd != "" {
+			fmt.Fprintf(b, "  代码提交：在代码仓库内 commit 后运行 %s\n", submitCmd)
+		}
+	}
 	fmt.Fprintf(b, "  用途：%s\n", purpose)
+}
+
+func repoTokenEnv(r workflow.RepoSpec) string {
+	provider := strings.ToLower(strings.TrimSpace(r.Provider))
+	if provider == "" {
+		provider = providerFromRepoURL(r.URL)
+	}
+	switch provider {
+	case "github":
+		return "CS_CLOUD_GITHUB_TOKEN"
+	case "gitlab":
+		return "CS_CLOUD_GITLAB_TOKEN"
+	case "gitea":
+		return "CS_CLOUD_GITEA_TOKEN"
+	default:
+		return ""
+	}
+}
+
+func providerFromRepoURL(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		// Not an absolute URL — refuse to guess; caller falls back to
+		// "no dedicated token env".
+		return ""
+	}
+	// Match on hostname only, never the path: a URL like
+	// https://example.com/github-mirror/repo must NOT be treated as
+	// GitHub. Self-hosted providers (gitea.internal, gitlab.corp:3000)
+	// still match because their hostname carries the provider name.
+	host := strings.ToLower(u.Host)
+	switch {
+	case strings.Contains(host, "github"):
+		return "github"
+	case strings.Contains(host, "gitlab"):
+		return "gitlab"
+	case strings.Contains(host, "gitea"):
+		return "gitea"
+	default:
+		return ""
+	}
+}
+
+func repoCloneCommand(r workflow.RepoSpec, dir, tokenEnv string) string {
+	authURL := repoAuthURLTemplate(r.URL, tokenEnv)
+	if authURL == "" {
+		return ""
+	}
+	if strings.TrimSpace(dir) == "" {
+		return "git clone " + authURL
+	}
+	// authURL keeps its ${TOKEN} shell expansion unquoted; dir is a
+	// task-controlled value (repo alias) so it gets quoted.
+	return fmt.Sprintf("git clone %s %s", authURL, shellQuote(dir))
+}
+
+func repoAuthURLTemplate(rawURL, tokenEnv string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" || tokenEnv == "" {
+		return ""
+	}
+	username := repoTokenUsername(u.Host)
+	path := u.EscapedPath()
+	if u.RawQuery != "" {
+		path += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		path += "#" + u.EscapedFragment()
+	}
+	return fmt.Sprintf("%s://%s:${%s}@%s%s", u.Scheme, username, tokenEnv, u.Host, path)
+}
+
+func repoTokenUsername(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if splitHost, _, err := net.SplitHostPort(h); err == nil {
+		h = splitHost
+	}
+	if h == "github.com" || strings.HasSuffix(h, ".github.com") {
+		return "x-access-token"
+	}
+	return "oauth2"
+}
+
+// shellQuote wraps s in POSIX single quotes so task-controlled values
+// (deliverable id/path, clone directory, repo URL) are safe to embed in
+// the shell commands written to the task repos file. Single quotes are
+// escaped via the standard '\'' sequence.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func codeRepoSubmitCommand(r workflow.RepoSpec, env map[string]string) string {
+	if strings.TrimSpace(r.URL) == "" {
+		return ""
+	}
+	repo := shellQuote(strings.TrimSpace(r.URL))
+	refs := taskDeliverableRefs(env)
+	var cmds []string
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.ID) == "" {
+			continue
+		}
+		cmds = append(cmds, fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", shellQuote(ref.ID), repo))
+	}
+	// Join subsequent commands on an indented line so the "代码提交：" block
+	// stays readable when more than one deliverable applies to this repo.
+	return strings.Join(cmds, "\n  ")
 }
 
 func repoProviderLabel(provider string) string {
