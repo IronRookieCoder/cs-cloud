@@ -419,6 +419,26 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+// TestCodeRepoSubmitCommand_AllDeliverables verifies a submit command is
+// emitted for every deliverable reference, not just the first.
+func TestCodeRepoSubmitCommand_AllDeliverables(t *testing.T) {
+	env := map[string]string{
+		"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","path":"a.md"},{"deliverable_id":"d2","path":"b.md"}]`,
+	}
+	got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://gitlab.test/o/r.git"}, env)
+	if !strings.Contains(got, "--deliverable 'd1'") || !strings.Contains(got, "--deliverable 'd2'") {
+		t.Errorf("expected submit commands for both deliverables, got:\n%s", got)
+	}
+	// empty repo URL -> no command
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{}, env); got != "" {
+		t.Errorf("expected empty submit command when repo URL is empty, got %q", got)
+	}
+	// no deliverables -> empty
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://x/y.git"}, map[string]string{}); got != "" {
+		t.Errorf("expected empty submit command when no deliverables, got %q", got)
+	}
+}
+
 func TestPrepare_TaskRootFresh(t *testing.T) {
 	requireGit(t)
 	installFakeAgent(t, AgentCsc) // make exec.LookPath("csc") resolve

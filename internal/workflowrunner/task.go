@@ -474,11 +474,21 @@ func shellQuote(s string) string {
 }
 
 func codeRepoSubmitCommand(r workflow.RepoSpec, env map[string]string) string {
-	refs := taskDeliverableRefs(env)
-	if len(refs) == 0 || refs[0].ID == "" || strings.TrimSpace(r.URL) == "" {
+	if strings.TrimSpace(r.URL) == "" {
 		return ""
 	}
-	return fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", shellQuote(refs[0].ID), shellQuote(strings.TrimSpace(r.URL)))
+	repo := shellQuote(strings.TrimSpace(r.URL))
+	refs := taskDeliverableRefs(env)
+	var cmds []string
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.ID) == "" {
+			continue
+		}
+		cmds = append(cmds, fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", shellQuote(ref.ID), repo))
+	}
+	// Join subsequent commands on an indented line so the "代码提交：" block
+	// stays readable when more than one deliverable applies to this repo.
+	return strings.Join(cmds, "\n  ")
 }
 
 func repoProviderLabel(provider string) string {
