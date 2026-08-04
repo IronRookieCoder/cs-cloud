@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflowrunner"
 )
+
+const maxTaskEnvFileBytes = 1 << 20
 
 func workflowCmd(a *app.App, args []string) error {
 	// Resolve task context from .cs-cloud.env in the cwd (the task workdir).
@@ -111,8 +114,13 @@ func loadTaskEnvFile() {
 	if path == "" {
 		return
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxTaskEnvFileBytes+1))
+	if err != nil || len(b) > maxTaskEnvFileBytes {
 		return
 	}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -134,7 +142,7 @@ func loadTaskEnvFile() {
 func findTaskEnvFile(dir string) string {
 	for {
 		p := filepath.Join(dir, workflowrunner.TaskEnvFileName)
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
 			return p
 		}
 		parent := filepath.Dir(dir)

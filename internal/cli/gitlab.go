@@ -62,6 +62,15 @@ func submitGitlabMR(cfg submitConfig) error {
 
 	fmt.Fprintf(os.Stderr, "deliverable %s: submitting MR node_run=%s branch=%s\n", cfg.deliverableID, nodeRunID, currentBranch)
 
+	deliverableID := cfg.deliverableID
+	if deliverableID == "" {
+		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		if err != nil {
+			return fmt.Errorf("create deliverable: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
+	}
+
 	// Push current branch to the repo.
 	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
 	fmt.Fprintf(os.Stderr, "deliverable %s: pushing MR branch=%s\n", cfg.deliverableID, currentBranch)
@@ -83,15 +92,6 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
-	deliverableID := cfg.deliverableID
-	if deliverableID == "" {
-		// Agent-defined: create the deliverable now, then report against it.
-		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
-		if err != nil {
-			return fmt.Errorf("create deliverable: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
-	}
 	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting MR\n", deliverableID)
 	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {

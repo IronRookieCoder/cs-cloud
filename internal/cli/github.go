@@ -49,6 +49,14 @@ func submitGithubPR(cfg submitConfig) error {
 	if _, _, err := githubRepoFromURL(cfg.repoURL); err != nil {
 		return fmt.Errorf("invalid GitHub repo URL: %w", err)
 	}
+	deliverableID := cfg.deliverableID
+	if deliverableID == "" {
+		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		if err != nil {
+			return fmt.Errorf("create deliverable: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
+	}
 	authURL := injectGithubTokenIntoURL(cfg.repoURL, cred.Token)
 	if authURL == "" {
 		return fmt.Errorf("invalid GitHub repo URL: cannot inject token into %q", cfg.repoURL)
@@ -72,15 +80,6 @@ func submitGithubPR(cfg submitConfig) error {
 		return fmt.Errorf("open PR: %w", err)
 	}
 
-	deliverableID := cfg.deliverableID
-	if deliverableID == "" {
-		// Agent-defined: create the deliverable now, then report against it.
-		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
-		if err != nil {
-			return fmt.Errorf("create deliverable: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
-	}
 	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", deliverableID)
 	if err := reportToServer(ctx, serverURL, token, submitEndpoint, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {

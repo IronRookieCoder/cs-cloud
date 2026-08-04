@@ -377,6 +377,12 @@ func TestRunCSCSession_WritesLegacyRepoURLToTaskReposFile(t *testing.T) {
 	if strings.Contains(got, "- 鏃?") {
 		t.Fatalf(".cs-cloud.repos reported no code repos despite legacy RepoURL:\n%s", got)
 	}
+	if strings.Contains(got, "workflow deliverable submit") || strings.Contains(got, "MR/PR") {
+		t.Fatalf(".cs-cloud.repos advertised submit instructions for legacy RepoURL with no deliverables:\n%s", got)
+	}
+	if !strings.Contains(got, "不要提交代码变更") {
+		t.Fatalf(".cs-cloud.repos missing read-only purpose for legacy RepoURL with no deliverables:\n%s", got)
+	}
 }
 
 // TestBuildEnvInjectsLocalServerURL verifies the in-task env carries the

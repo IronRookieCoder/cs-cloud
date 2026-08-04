@@ -1157,11 +1157,15 @@ func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
 func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
 	var createdTitle string
 	var submittedDeliverableID string
+	var idempotencyKey string
+	var order []string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/gitea/credential":
 			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
 		case "/api/node-runs/nr-1/deliverables":
+			order = append(order, "create")
+			idempotencyKey = r.Header.Get("Idempotency-Key")
 			var body struct {
 				Title string `json:"title"`
 			}
@@ -1169,6 +1173,7 @@ func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
 			createdTitle = body.Title
 			jsonResponse(w, 201, map[string]any{"id": "agent-d-1", "title": body.Title, "required": false})
 		case "/api/node-runs/nr-1/deliverables/agent-d-1/submit":
+			order = append(order, "submit")
 			submittedDeliverableID = "agent-d-1"
 			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
 		default:
@@ -1179,6 +1184,7 @@ func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
 
 	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			order = append(order, "open")
 			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
 			return
 		}
@@ -1221,5 +1227,41 @@ func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
 	}
 	if submittedDeliverableID != "agent-d-1" {
 		t.Errorf("submit called with id %q, want agent-d-1 (the id create returned)", submittedDeliverableID)
+	}
+	if got, want := strings.Join(order, ","), "create,open,submit"; got != want {
+		t.Errorf("operation order = %s, want %s", got, want)
+	}
+	if idempotencyKey != "agent-defined-deliverable:nr-1:task-uuid-222:My Design Doc" {
+		t.Errorf("Idempotency-Key = %q, want stable node/task/title key", idempotencyKey)
+	}
+}
+
+func TestReadGiteaContextMissingDeliverablesIsEmptyList(t *testing.T) {
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", "")
+
+	ctx, err := readGiteaContext()
+	if err != nil {
+		t.Fatalf("readGiteaContext: %v", err)
+	}
+	if len(ctx.deliverables) != 0 {
+		t.Fatalf("deliverables = %+v, want empty list", ctx.deliverables)
+	}
+}
+
+func TestCreateAgentDefinedDeliverableRejectsMalformedServerURLNoPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("createAgentDefinedDeliverable panicked: %v", r)
+		}
+	}()
+
+	_, err := createAgentDefinedDeliverable(context.Background(), "http://127.0.0.1\nbad", "tok", "nr-1", "Doc", "ws-1", "agent-1", "task-1")
+	if err == nil {
+		t.Fatal("expected malformed request URL error")
 	}
 }

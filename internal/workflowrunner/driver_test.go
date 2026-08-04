@@ -1682,3 +1682,41 @@ func TestDriverFailsTaskWhenCompletionCallbackRejected(t *testing.T) {
 		t.Fatalf("failure error = %q, want completion rejected details", failure.Error)
 	}
 }
+
+func TestDriverDoesNotFailTaskWhenCompletionCallbackIsRateLimited(t *testing.T) {
+	runner := &completingSessionRunner{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	t.Cleanup(func() { runner.closeOnce.Do(func() { close(runner.unblock) }) })
+	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
+	fm.setCompleteStatus(http.StatusTooManyRequests)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: "task-complete-rate-limited", WorkspaceID: "ws-1", NodeRunID: "nr-1", AgentID: "agent-1",
+		Agent: "csc", Prompt: "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	if err := d.SignalTaskCompletion("task-complete-rate-limited", agent.CompletionSignal{
+		Action: "complete", Summary: "all done",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		_, ok := fm.taskCallback("/complete")
+		return ok
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := fm.taskCallbackCount("/fail"); got != 0 {
+		t.Fatalf("fail callback count = %d, want 0 for 429 completion callback", got)
+	}
+}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -260,5 +261,56 @@ func TestSubmitGithubPRRejectsHTTPRepoURLBeforePush(t *testing.T) {
 	}
 	if len(ops.pushCalls) != 0 {
 		t.Fatalf("Push called for HTTP repo URL: %+v", ops.pushCalls)
+	}
+}
+
+func TestSubmitGithubPRAgentDefinedCreateFailurePreventsPushAndPR(t *testing.T) {
+	var githubPRCalls int
+	githubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/pulls") {
+			githubPRCalls++
+			jsonResponse(w, 201, map[string]any{"html_url": "https://github.com/org/repo/pull/1"})
+			return
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/repos/org/repo") {
+			jsonResponse(w, 200, map[string]any{"default_branch": "main"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer githubSrv.Close()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/node-runs/nr-1/deliverables" {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			jsonResponse(w, 500, map[string]any{"error": "create failed"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	t.Setenv("CS_CLOUD_GITHUB_TOKEN", "ghp-test")
+	t.Setenv("CS_CLOUD_GITHUB_API_BASE", githubSrv.URL)
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Chdir(t.TempDir())
+
+	ops := &fakeGitOps{currentBranch: "feat/x"}
+	err := submitGithubPR(submitConfig{
+		deliverableID: "",
+		repoURL:       "https://github.com/org/repo.git",
+		title:         "Agent defined",
+		gitOps:        ops,
+	})
+	if err == nil || !strings.Contains(err.Error(), "create deliverable") {
+		t.Fatalf("submitGithubPR error = %v, want create deliverable failure", err)
+	}
+	if len(ops.pushCalls) != 0 {
+		t.Fatalf("Push called before deliverable creation succeeded: %+v", ops.pushCalls)
+	}
+	if githubPRCalls != 0 {
+		t.Fatalf("GitHub PR was opened before deliverable creation succeeded")
 	}
 }

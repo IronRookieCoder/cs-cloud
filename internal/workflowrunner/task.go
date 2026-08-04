@@ -288,10 +288,14 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 	}
 	if codeCount == 0 {
 		if repoURL := strings.TrimSpace(payload.RepoURL); repoURL != "" {
+			purpose := "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。"
+			if len(submittable) == 0 {
+				purpose = "按需克隆；仅在需要查看该仓库时拉取。用于只读审查任务上下文，不要提交代码变更。"
+			}
 			writeRepoBlock(&b, workflow.RepoSpec{
 				URL:  repoURL,
 				Role: "code",
-			}, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap, submittable)
+			}, purpose, envMap, submittable)
 		} else {
 			b.WriteString("- 无\n")
 		}

@@ -193,7 +193,7 @@ func readGiteaContext() (*giteaContext, error) {
 	}
 	raw := os.Getenv("CS_CLOUD_GITEA_DELIVERABLES")
 	if raw == "" {
-		return nil, fmt.Errorf("CS_CLOUD_GITEA_DELIVERABLES not set")
+		return c, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &c.deliverables); err != nil {
 		return nil, fmt.Errorf("parse CS_CLOUD_GITEA_DELIVERABLES: %w", err)
@@ -310,6 +310,16 @@ func submitDeliverable(cfg submitConfig) error {
 	if backendURL == "" {
 		return fmt.Errorf("CS_CLOUD_BACKEND_URL not set")
 	}
+	deliverableID := cfg.deliverableID
+	if deliverableID == "" {
+		// Agent-defined: create the deliverable before pushing/opening the PR so
+		// a create rejection cannot leave an external PR with no platform target.
+		deliverableID, err = createAgentDefinedDeliverable(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		if err != nil {
+			return fmt.Errorf("create deliverable: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
+	}
 
 	// Push URL: prefer the server-provided full clone URL; fall back to
 	// self-building from base + owner + repo.
@@ -329,15 +339,6 @@ func submitDeliverable(cfg submitConfig) error {
 	prURL, err := openGiteaPR(ctx, giteaBase, cred.Token, gctx.owner, gctx.repo, currentBranch, gctx.instBranch, deliverableTitle(cfg.title, "document deliverable "+cfg.deliverableID))
 	if err != nil {
 		return fmt.Errorf("open PR: %w", err)
-	}
-	deliverableID := cfg.deliverableID
-	if deliverableID == "" {
-		// Agent-defined: create the deliverable now, then submit against it.
-		deliverableID, err = createAgentDefinedDeliverable(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, cfg.title, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
-		if err != nil {
-			return fmt.Errorf("create deliverable: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
 	}
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", deliverableID)
 	if err := reportDeliverablePR(ctx, backendURL, os.Getenv("CS_CLOUD_TOKEN"), gctx.nodeRunID, deliverableID, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
@@ -465,8 +466,11 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 		"base":  baseBranch,
 		"title": deliverableTitle(title, ""),
 	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		normalizeGiteaBase(base, owner, repo)+"/api/v1/repos/"+owner+"/"+repo+"/pulls", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build create PR request: %w", err)
+	}
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := sharedHTTPClient.Do(req)
@@ -500,7 +504,10 @@ func openGiteaPR(ctx context.Context, base, token, owner, repo, head, baseBranch
 func findExistingGiteaPR(ctx context.Context, base, token, owner, repo, head string) (string, error) {
 	listURL := strings.TrimRight(normalizeGiteaBase(base, owner, repo), "/") +
 		"/api/v1/repos/" + owner + "/" + repo + "/pulls?state=open"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build list existing PRs request: %w", err)
+	}
 	req.Header.Set("Authorization", "token "+token)
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
@@ -532,7 +539,10 @@ func findExistingGiteaPR(ctx context.Context, base, token, owner, repo, head str
 // reportToServer POSTs a pull_request_url to the given server endpoint.
 func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, workspaceID, agentID, taskID string) error {
 	body, _ := json.Marshal(map[string]string{"pull_request_url": prURL})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build report request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	// multica's RequireWorkspaceMember middleware gates this endpoint on a
@@ -576,9 +586,15 @@ func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliv
 func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRunID, title, workspaceID, agentID, taskID string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"title": title})
 	endpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build create deliverable request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	if key := agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID); key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
 	if workspaceID != "" {
 		req.Header.Set("X-Workspace-ID", workspaceID)
 	}
@@ -604,6 +620,11 @@ func createAgentDefinedDeliverable(ctx context.Context, serverURL, token, nodeRu
 		return "", fmt.Errorf("create deliverable: parse id: %s", strings.TrimSpace(string(rb)))
 	}
 	return out.ID, nil
+}
+
+func agentDefinedDeliverableIdempotencyKey(nodeRunID, title, taskID string) string {
+	parts := []string{"agent-defined-deliverable", strings.TrimSpace(nodeRunID), strings.TrimSpace(taskID), strings.TrimSpace(title)}
+	return strings.Join(parts, ":")
 }
 
 // execGitOps implements gitOps via shelled-out git.

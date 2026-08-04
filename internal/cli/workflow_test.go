@@ -81,6 +81,35 @@ func TestLoadTaskEnvFile_NoFileIsNoOp(t *testing.T) {
 	}
 }
 
+func TestFindTaskEnvFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.env")
+	if err := os.WriteFile(target, []byte("CS_CLOUD_TASK_ID=from-symlink\n"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, workflowrunner.TaskEnvFileName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported on this host: %v", err)
+	}
+	if got := findTaskEnvFile(dir); got != "" {
+		t.Fatalf("findTaskEnvFile returned symlink %q, want empty", got)
+	}
+}
+
+func TestLoadTaskEnvFileIgnoresOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("CS_CLOUD_TASK_ID", "")
+	oversized := strings.Repeat("A", maxTaskEnvFileBytes+1)
+	if err := os.WriteFile(workflowrunner.TaskEnvFileName, []byte("CS_CLOUD_TASK_ID="+oversized+"\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	loadTaskEnvFile()
+	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "" {
+		t.Fatalf("CS_CLOUD_TASK_ID = %q, want empty for oversized env file", got)
+	}
+}
+
 func TestPrintWorkflowUsageListsImplementedResources(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {

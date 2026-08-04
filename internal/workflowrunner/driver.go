@@ -517,7 +517,7 @@ func (d *Driver) completeTaskOrFailOnRejection(ctx context.Context, taskID, outp
 		return nil
 	}
 	var statusErr *StatusError
-	if errors.As(err, &statusErr) && statusErr.StatusCode >= http.StatusBadRequest && statusErr.StatusCode < http.StatusInternalServerError {
+	if errors.As(err, &statusErr) && completionRejectionStatus(statusErr.StatusCode) {
 		reason := strings.TrimSpace(statusErr.Body)
 		if reason == "" {
 			reason = err.Error()
@@ -528,6 +528,10 @@ func (d *Driver) completeTaskOrFailOnRejection(ctx context.Context, taskID, outp
 		}
 	}
 	return err
+}
+
+func completionRejectionStatus(status int) bool {
+	return status == http.StatusBadRequest
 }
 
 type agentRunResult struct {
