@@ -263,13 +263,15 @@ func writeTaskEnvFile(workdir string, env []string) error {
 }
 
 type taskDeliverableRef struct {
-	ID    string `json:"deliverable_id"`
-	Title string `json:"title"`
-	Path  string `json:"path"`
+	ID       string `json:"deliverable_id"`
+	Title    string `json:"title"`
+	Path     string `json:"path"`
+	Required bool   `json:"required"`
 }
 
 func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []string) error {
 	envMap := envSliceToMap(env)
+	submittable := submittableDeliverableIDs(payload.Deliverables)
 	var b strings.Builder
 	b.WriteString("代码仓库：\n")
 	codeCount := 0
@@ -278,14 +280,22 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 			continue
 		}
 		codeCount++
-		writeRepoBlock(&b, r, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
+		purpose := "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。"
+		if len(submittable) == 0 {
+			purpose = "按需克隆；仅在需要查看该仓库时拉取。用于只读审查任务上下文，不要提交代码变更。"
+		}
+		writeRepoBlock(&b, r, purpose, envMap, submittable)
 	}
 	if codeCount == 0 {
 		if repoURL := strings.TrimSpace(payload.RepoURL); repoURL != "" {
+			purpose := "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。"
+			if len(submittable) == 0 {
+				purpose = "按需克隆；仅在需要查看该仓库时拉取。用于只读审查任务上下文，不要提交代码变更。"
+			}
 			writeRepoBlock(&b, workflow.RepoSpec{
 				URL:  repoURL,
 				Role: "code",
-			}, "按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。", envMap)
+			}, purpose, envMap, submittable)
 		} else {
 			b.WriteString("- 无\n")
 		}
@@ -298,7 +308,11 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 			continue
 		}
 		deliveryCount++
-		writeRepoBlock(&b, r, "写交付文档，完成后通过 cs-cloud workflow deliverable submit 提交。", envMap)
+		purpose := "写交付文档，完成后通过 cs-cloud workflow deliverable submit 提交。"
+		if len(submittable) == 0 {
+			purpose = "查看交付物仓库中的既有内容和分支上下文；当前任务不应提交交付物。"
+		}
+		writeRepoBlock(&b, r, purpose, envMap, submittable)
 	}
 	if deliveryCount == 0 {
 		b.WriteString("- 无\n")
@@ -307,7 +321,11 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 	b.WriteString("\n交付物：\n")
 	refs := taskDeliverableRefs(envMap)
 	if len(refs) == 0 {
-		b.WriteString("- 无\n")
+		if len(submittable) > 0 {
+			b.WriteString("- （未预设）由你根据任务自行定义交付物：产出文档后用 `cs-cloud workflow deliverable submit --file <路径> --title \"<交付物名>\"` 提交（无需预定义 id，命令会自动创建）。\n")
+		} else {
+			b.WriteString("- 无可提交交付物；如有交付物信息，仅作为只读审查上下文。\n")
+		}
 	} else {
 		for _, d := range refs {
 			title := strings.TrimSpace(d.Title)
@@ -318,10 +336,16 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 			if d.ID != "" {
 				fmt.Fprintf(&b, "  ID：%s\n", d.ID)
 			}
-			if d.Path != "" {
-				fmt.Fprintf(&b, "  写入路径：%s\n", d.Path)
+			if d.Required {
+				b.WriteString("  必需：是\n")
+			} else {
+				b.WriteString("  必需：否\n")
 			}
-			if d.ID != "" && d.Path != "" {
+			b.WriteString("  提交类型：按任务要求选择文档文件（--file）或代码 MR/PR（--mr --repo）\n")
+			if d.Path != "" {
+				fmt.Fprintf(&b, "  文档写入路径（仅 --file）：%s\n", d.Path)
+			}
+			if d.ID != "" && d.Path != "" && submittable[d.ID] {
 				fmt.Fprintf(&b, "  提交命令：在交付仓库目录内运行 cs-cloud workflow deliverable submit --deliverable %s --file %s\n", shellQuote(d.ID), shellQuote(d.Path))
 			}
 		}
@@ -331,7 +355,7 @@ func writeTaskReposFile(workdir string, payload workflow.TaskRunPayload, env []s
 	return writeAtomicFile(workdir, TaskReposFileName, ".cs-cloud-repos-*", []byte(b.String()), 0o600)
 }
 
-func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env map[string]string) {
+func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env map[string]string, submittable map[string]bool) {
 	label := strings.TrimSpace(r.Alias)
 	if label == "" {
 		label = strings.TrimSpace(r.URL)
@@ -357,11 +381,18 @@ func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env
 		}
 		if tokenEnv := repoTokenEnv(r); tokenEnv != "" {
 			fmt.Fprintf(b, "  仓库认证：使用 .cs-cloud.env 中的 %s 拉取并推送交付物仓库\n", tokenEnv)
+			if cloneCmd := deliveryRepoCloneCommand(r, label, tokenEnv, env["CS_CLOUD_GITEA_NODE_BRANCH"]); cloneCmd != "" {
+				fmt.Fprintf(b, "  克隆：%s\n", cloneCmd)
+			}
+			if updateCmd := deliveryRepoUpdateCommand(label, env["CS_CLOUD_GITEA_NODE_BRANCH"]); updateCmd != "" {
+				fmt.Fprintf(b, "  更新：%s\n", updateCmd)
+			}
 		} else {
 			b.WriteString("  仓库认证：未声明专用环境变量；不要猜 token，缺少权限时停止并请求补充。\n")
 		}
-		b.WriteString("  克隆/更新：自行 clone 该交付仓库（认证用 .cs-cloud.env 中对应的 token），切到上面的 node 分支，并在该仓库目录内运行 cs-cloud workflow deliverable submit（命令会在当前目录写入交付文档、提交、推送并开 PR）。\n")
-		b.WriteString("  提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR\n")
+		if len(submittable) > 0 {
+			b.WriteString("  提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR\n")
+		}
 	} else if r.BaseBranch != "" {
 		fmt.Fprintf(b, "  基准分支：%s\n", r.BaseBranch)
 	}
@@ -377,8 +408,8 @@ func writeRepoBlock(b *strings.Builder, r workflow.RepoSpec, purpose string, env
 		if label != "" {
 			fmt.Fprintf(b, "  更新：cd %s && git fetch origin\n", shellQuote(label))
 		}
-		if submitCmd := codeRepoSubmitCommand(r, env); submitCmd != "" {
-			fmt.Fprintf(b, "  代码提交：在代码仓库内 commit 后运行 %s\n", submitCmd)
+		if submitCmd := codeRepoSubmitCommand(r, env, submittable); submitCmd != "" {
+			fmt.Fprintf(b, "  代码提交：仅当该交付物要求代码 MR/PR 时，在代码仓库内 commit 后运行 %s\n", submitCmd)
 		}
 	}
 	fmt.Fprintf(b, "  用途：%s\n", purpose)
@@ -438,6 +469,26 @@ func repoCloneCommand(r workflow.RepoSpec, dir, tokenEnv string) string {
 	return fmt.Sprintf("git clone %s %s", authURL, shellQuote(dir))
 }
 
+func deliveryRepoCloneCommand(r workflow.RepoSpec, dir, tokenEnv, branch string) string {
+	authURL := repoAuthURLTemplate(r.URL, tokenEnv)
+	if authURL == "" {
+		return ""
+	}
+	if strings.TrimSpace(branch) == "" {
+		return repoCloneCommand(r, dir, tokenEnv)
+	}
+	return fmt.Sprintf("git clone --branch %s %s %s", shellQuote(branch), authURL, shellQuote(dir))
+}
+
+func deliveryRepoUpdateCommand(dir, branch string) string {
+	if strings.TrimSpace(dir) == "" || strings.TrimSpace(branch) == "" {
+		return ""
+	}
+	quotedDir := shellQuote(dir)
+	quotedBranch := shellQuote(branch)
+	return fmt.Sprintf("cd %s && git fetch origin && git checkout %s && git pull --ff-only origin %s", quotedDir, quotedBranch, quotedBranch)
+}
+
 func repoAuthURLTemplate(rawURL, tokenEnv string) string {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Scheme == "" || u.Host == "" || tokenEnv == "" {
@@ -468,23 +519,37 @@ func repoTokenUsername(host string) string {
 // shellQuote wraps s in POSIX single quotes so task-controlled values
 // (deliverable id/path, clone directory, repo URL) are safe to embed in
 // the shell commands written to the task repos file. Single quotes are
-// escaped via the standard '\'' sequence.
+// escaped via the standard '\” sequence.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func codeRepoSubmitCommand(r workflow.RepoSpec, env map[string]string) string {
+func submittableDeliverableIDs(deliverables []workflow.DeliverableSpec) map[string]bool {
+	out := make(map[string]bool, len(deliverables))
+	for _, d := range deliverables {
+		if id := strings.TrimSpace(d.ID); id != "" {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func codeRepoSubmitCommand(r workflow.RepoSpec, env map[string]string, submittable map[string]bool) string {
 	if strings.TrimSpace(r.URL) == "" {
+		return ""
+	}
+	if len(submittable) == 0 {
 		return ""
 	}
 	repo := shellQuote(strings.TrimSpace(r.URL))
 	refs := taskDeliverableRefs(env)
 	var cmds []string
 	for _, ref := range refs {
-		if strings.TrimSpace(ref.ID) == "" {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" || !submittable[id] {
 			continue
 		}
-		cmds = append(cmds, fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s", shellQuote(ref.ID), repo))
+		cmds = append(cmds, fmt.Sprintf("cs-cloud workflow deliverable submit --deliverable %s --mr --repo %s --title '<PR title>'", shellQuote(id), repo))
 	}
 	// Join subsequent commands on an indented line so the "代码提交：" block
 	// stays readable when more than one deliverable applies to this repo.

@@ -240,7 +240,7 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 			"CS_CLOUD_GITEA_CLONE_URL":    "https://gitea.test/t/wf.git",
 			"CS_CLOUD_GITEA_INST_BRANCH":  "inst-1",
 			"CS_CLOUD_GITEA_NODE_BRANCH":  "node-1",
-			"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md"}]`,
+			"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md","required":true}]`,
 		},
 		Repos: []workflow.RepoSpec{
 			{URL: "https://gitlab.test/root/demo.git", Provider: "gitlab", Role: "code", Alias: "demo", BaseBranch: "main"},
@@ -266,7 +266,7 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		"拉取认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITLAB_TOKEN",
 		"克隆：git clone https://oauth2:${CS_CLOUD_GITLAB_TOKEN}@gitlab.test/root/demo.git 'demo'",
 		"更新：cd 'demo' && git fetch origin",
-		"代码提交：在代码仓库内 commit 后运行 cs-cloud workflow deliverable submit --deliverable 'd1' --mr --repo 'https://gitlab.test/root/demo.git'",
+		"代码提交：仅当该交付物要求代码 MR/PR 时，在代码仓库内 commit 后运行 cs-cloud workflow deliverable submit --deliverable 'd1' --mr --repo 'https://gitlab.test/root/demo.git' --title '<PR title>'",
 		"用途：按需克隆；仅在需要修改或查看该仓库时拉取。用于修改任务所属项目的业务代码，完成后提交 MR/PR。",
 		"交付物仓库：",
 		"- delivery",
@@ -274,13 +274,16 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 		"node 分支：node-1",
 		"inst 分支：inst-1",
 		"仓库认证：使用 .cs-cloud.env 中的 CS_CLOUD_GITEA_TOKEN 拉取并推送交付物仓库",
-		"克隆/更新：自行 clone 该交付仓库（认证用 .cs-cloud.env 中对应的 token），切到上面的 node 分支，并在该仓库目录内运行 cs-cloud workflow deliverable submit（命令会在当前目录写入交付文档、提交、推送并开 PR）。",
+		"克隆：git clone --branch 'node-1' https://oauth2:${CS_CLOUD_GITEA_TOKEN}@gitea.test/t/wf.git 'delivery'",
+		"更新：cd 'delivery' && git fetch origin && git checkout 'node-1' && git pull --ff-only origin 'node-1'",
 		"提交上报：cs-cloud workflow deliverable submit 使用 CS_CLOUD_TOKEN 和 CS_CLOUD_BACKEND_URL 上报交付物 PR/MR",
 		"提交命令：在交付仓库目录内运行 cs-cloud workflow deliverable submit --deliverable 'd1' --file 'nodes/design.md'",
 		"禁止：不要猜其他 token；不要把 token 写进回复、文档或提交内容；缺少权限时停止并请求补充。",
 		"交付物：",
 		"ID：d1",
-		"写入路径：nodes/design.md",
+		"必需：是",
+		"提交类型：按任务要求选择文档文件（--file）或代码 MR/PR（--mr --repo）",
+		"文档写入路径（仅 --file）：nodes/design.md",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf(".cs-cloud.repos missing %q:\n%s", want, got)
@@ -289,6 +292,60 @@ func TestRunCSCSession_WritesTaskReposFile(t *testing.T) {
 	for _, secret := range []string{"gitlab-secret", "gitea-secret", "CLONE_URL_AUTHED"} {
 		if strings.Contains(got, secret) {
 			t.Errorf(".cs-cloud.repos leaked secret %q:\n%s", secret, got)
+		}
+	}
+}
+
+func TestRunCSCSession_WritesTaskReposFileReadOnlyDeliverablesDoNotAdvertiseSubmit(t *testing.T) {
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	tr.SetSessionRunner(&fakeSessionRunner{})
+
+	workdir := t.TempDir()
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID:      "task-readonly-repos",
+		WorkspaceID: "ws-1",
+		Agent:       "csc",
+		Prompt:      "review",
+		Env: map[string]string{
+			"CS_CLOUD_GITLAB_TOKEN":       "gitlab-secret",
+			"CS_CLOUD_GITEA_TOKEN":        "gitea-secret",
+			"CS_CLOUD_GITEA_CLONE_URL":    "https://gitea.test/t/wf.git",
+			"CS_CLOUD_GITEA_INST_BRANCH":  "inst-1",
+			"CS_CLOUD_GITEA_NODE_BRANCH":  "node-1",
+			"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","title":"Design","path":"nodes/design.md","required":true}]`,
+		},
+		Repos: []workflow.RepoSpec{
+			{URL: "https://gitlab.test/root/demo.git", Provider: "gitlab", Role: "code", Alias: "demo", BaseBranch: "main"},
+			{URL: "https://gitea.test/t/wf.git", Provider: "gitea", Role: "delivery", Alias: "delivery", BaseBranch: "inst-1", BotToken: "gitea-secret"},
+		},
+	}, workdir, "sess-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(workdir, TaskReposFileName))
+	if err != nil {
+		t.Fatalf(".cs-cloud.repos not written to workdir: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		"https://gitlab.test/root/demo.git",
+		"https://gitea.test/t/wf.git",
+		"d1",
+		"nodes/design.md",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf(".cs-cloud.repos missing read-only context %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"workflow deliverable submit",
+		"代码提交",
+		"提交命令",
+		"自行定义交付物",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf(".cs-cloud.repos advertised submit instruction %q for read-only deliverables:\n%s", forbidden, got)
 		}
 	}
 }
@@ -319,6 +376,12 @@ func TestRunCSCSession_WritesLegacyRepoURLToTaskReposFile(t *testing.T) {
 	}
 	if strings.Contains(got, "- 鏃?") {
 		t.Fatalf(".cs-cloud.repos reported no code repos despite legacy RepoURL:\n%s", got)
+	}
+	if strings.Contains(got, "workflow deliverable submit") || strings.Contains(got, "MR/PR") {
+		t.Fatalf(".cs-cloud.repos advertised submit instructions for legacy RepoURL with no deliverables:\n%s", got)
+	}
+	if !strings.Contains(got, "不要提交代码变更") {
+		t.Fatalf(".cs-cloud.repos missing read-only purpose for legacy RepoURL with no deliverables:\n%s", got)
 	}
 }
 
@@ -425,17 +488,26 @@ func TestCodeRepoSubmitCommand_AllDeliverables(t *testing.T) {
 	env := map[string]string{
 		"CS_CLOUD_GITEA_DELIVERABLES": `[{"deliverable_id":"d1","path":"a.md"},{"deliverable_id":"d2","path":"b.md"}]`,
 	}
-	got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://gitlab.test/o/r.git"}, env)
+	submittable := map[string]bool{"d1": true, "d2": true}
+	got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://gitlab.test/o/r.git"}, env, submittable)
 	if !strings.Contains(got, "--deliverable 'd1'") || !strings.Contains(got, "--deliverable 'd2'") {
 		t.Errorf("expected submit commands for both deliverables, got:\n%s", got)
 	}
+	if !strings.Contains(got, "--title '<PR title>'") {
+		t.Errorf("expected submit command to remind agent to provide a PR title, got:\n%s", got)
+	}
 	// empty repo URL -> no command
-	if got := codeRepoSubmitCommand(workflow.RepoSpec{}, env); got != "" {
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{}, env, submittable); got != "" {
 		t.Errorf("expected empty submit command when repo URL is empty, got %q", got)
 	}
 	// no deliverables -> empty
-	if got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://x/y.git"}, map[string]string{}); got != "" {
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://x/y.git"}, map[string]string{}, submittable); got != "" {
 		t.Errorf("expected empty submit command when no deliverables, got %q", got)
+	}
+	// read-only context: env may list deliverables, but payload did not declare
+	// submittable deliverables.
+	if got := codeRepoSubmitCommand(workflow.RepoSpec{URL: "https://x/y.git"}, env, nil); got != "" {
+		t.Errorf("expected empty submit command for read-only deliverable context, got %q", got)
 	}
 }
 

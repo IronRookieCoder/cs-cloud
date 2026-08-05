@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflowrunner"
 )
+
+const maxTaskEnvFileBytes = 1 << 20
 
 func workflowCmd(a *app.App, args []string) error {
 	// Resolve task context from .cs-cloud.env in the cwd (the task workdir).
@@ -103,8 +106,21 @@ func loadTaskEnvFile() {
 	if err != nil {
 		return
 	}
-	b, err := os.ReadFile(filepath.Join(cwd, workflowrunner.TaskEnvFileName))
+	// The file lives in the task root, but the agent often runs in-task CLIs
+	// from a cloned repo subdir (the submit prompt tells it to cd into the
+	// delivery repo). Walk up from cwd so the env context resolves regardless
+	// of where in the task tree the agent is; a missing file is still a no-op.
+	path := findTaskEnvFile(cwd)
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
 	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxTaskEnvFileBytes+1))
+	if err != nil || len(b) > maxTaskEnvFileBytes {
 		return
 	}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -117,6 +133,23 @@ func loadTaskEnvFile() {
 			continue
 		}
 		os.Setenv(strings.TrimSpace(k), stripEnvQuotes(strings.TrimSpace(v)))
+	}
+}
+
+// findTaskEnvFile searches dir then each parent directory for the task env
+// file, returning the first match. Returns "" at the filesystem root so the
+// caller can treat a missing file as a no-op.
+func findTaskEnvFile(dir string) string {
+	for {
+		p := filepath.Join(dir, workflowrunner.TaskEnvFileName)
+		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
+			return p
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
 	}
 }
 

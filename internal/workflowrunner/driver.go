@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -494,7 +495,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		logger.Info("workflow: task %s completed via tool: session=%s action=%s decision=%s",
 			payload.TaskID, finalSessionID, sig.Action, sig.Decision)
 		return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
-			return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree, sig)
+			return d.completeTaskOrFailOnRejection(callbackCtx, payload.TaskID, output, finalSessionID, worktree, sig)
 		})
 	}
 	if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
@@ -506,8 +507,31 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	logger.Info("workflow: task %s completed: session=%s output_bytes=%d", payload.TaskID, finalSessionID, len(output))
 
 	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
-		return d.client.CompleteTask(callbackCtx, payload.TaskID, output, finalSessionID, worktree, agent.CompletionSignal{})
+		return d.completeTaskOrFailOnRejection(callbackCtx, payload.TaskID, output, finalSessionID, worktree, agent.CompletionSignal{})
 	})
+}
+
+func (d *Driver) completeTaskOrFailOnRejection(ctx context.Context, taskID, output, sessionID, worktree string, sig agent.CompletionSignal) error {
+	err := d.client.CompleteTask(ctx, taskID, output, sessionID, worktree, sig)
+	if err == nil {
+		return nil
+	}
+	var statusErr *StatusError
+	if errors.As(err, &statusErr) && completionRejectionStatus(statusErr.StatusCode) {
+		reason := strings.TrimSpace(statusErr.Body)
+		if reason == "" {
+			reason = err.Error()
+		}
+		failErr := d.client.FailTask(ctx, taskID, "completion rejected by server: "+reason, "completion_rejected")
+		if failErr != nil {
+			return fmt.Errorf("%w; fail rejected completion: %v", err, failErr)
+		}
+	}
+	return err
+}
+
+func completionRejectionStatus(status int) bool {
+	return status == http.StatusBadRequest
 }
 
 type agentRunResult struct {

@@ -119,20 +119,21 @@ func TestDriverTokenProviderNilDeps(t *testing.T) {
 // /api/daemon/heartbeat, /api/daemon/deregister, /api/chat/sessions, and the
 // session-binding endpoints used by workflow task execution.
 type fakeBackend struct {
-	mu            sync.Mutex
-	workspaces    []workflow.Workspace
-	registrations []workflow.DaemonRegisterRequest
-	heartbeats    []string
-	deregistered  []string
-	pinSessions   []pinSessionCall
-	bindSessions  []bindSessionCall
-	taskCalls     []string
-	taskBodies    map[string][]byte
-	sessions      []workflow.ChatSession
-	nextRuntimeID int
-	nextSessionID int
-	runtimeAlive  map[string]bool
-	messageDelay  time.Duration
+	mu             sync.Mutex
+	workspaces     []workflow.Workspace
+	registrations  []workflow.DaemonRegisterRequest
+	heartbeats     []string
+	deregistered   []string
+	pinSessions    []pinSessionCall
+	bindSessions   []bindSessionCall
+	taskCalls      []string
+	taskBodies     map[string][]byte
+	completeStatus int
+	sessions       []workflow.ChatSession
+	nextRuntimeID  int
+	nextSessionID  int
+	runtimeAlive   map[string]bool
+	messageDelay   time.Duration
 }
 
 type pinSessionCall struct {
@@ -256,6 +257,7 @@ func (f *fakeBackend) handler() http.Handler {
 		}
 		f.mu.Lock()
 		messageDelay := f.messageDelay
+		completeStatus := f.completeStatus
 		f.mu.Unlock()
 		if strings.HasSuffix(r.URL.Path, "/messages") && messageDelay > 0 {
 			time.Sleep(messageDelay)
@@ -264,6 +266,11 @@ func (f *fakeBackend) handler() http.Handler {
 		f.taskCalls = append(f.taskCalls, r.URL.Path)
 		f.taskBodies[r.URL.Path] = body
 		f.mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/complete") && completeStatus != 0 {
+			w.WriteHeader(completeStatus)
+			_, _ = w.Write([]byte(`{"error":"completion rejected"}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/api/daemon/node-runs/", func(w http.ResponseWriter, r *http.Request) {
@@ -341,6 +348,12 @@ func (f *fakeBackend) setMessageDelay(delay time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.messageDelay = delay
+}
+
+func (f *fakeBackend) setCompleteStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completeStatus = status
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -1172,9 +1185,9 @@ func newCSCSessionTestDriver(
 }
 
 type nonCooperativeSessionRunner struct {
-	started  chan struct{}
-	unblock  chan struct{}
-	finished chan struct{}
+	started   chan struct{}
+	unblock   chan struct{}
+	finished  chan struct{}
 	closeOnce sync.Once
 }
 
@@ -1612,5 +1625,98 @@ func TestDriverCompletesOnExplicitCompletionSignal(t *testing.T) {
 	}
 	if complete.Output != "all done" {
 		t.Errorf("complete output = %q, want %q (summary, not session stdout)", complete.Output, "all done")
+	}
+}
+
+func TestDriverFailsTaskWhenCompletionCallbackRejected(t *testing.T) {
+	runner := &completingSessionRunner{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	t.Cleanup(func() { runner.closeOnce.Do(func() { close(runner.unblock) }) })
+	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
+	fm.setCompleteStatus(http.StatusBadRequest)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: "task-complete-rejected", WorkspaceID: "ws-1", NodeRunID: "nr-1", AgentID: "agent-1",
+		Agent: "csc", Prompt: "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	if err := d.SignalTaskCompletion("task-complete-rejected", agent.CompletionSignal{
+		Action: "complete", Summary: "all done",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, ok := fm.taskCallback("/fail")
+		return ok
+	})
+	if _, ok := fm.taskCallback("/complete"); !ok {
+		t.Fatal("missing /complete callback")
+	}
+
+	body, ok := fm.taskCallback("/fail")
+	if !ok {
+		t.Fatal("missing /fail body")
+	}
+	var failure struct {
+		Error         string `json:"error"`
+		FailureReason string `json:"failure_reason"`
+	}
+	if err := json.Unmarshal(body, &failure); err != nil {
+		t.Fatalf("fail body: %v", err)
+	}
+	if failure.FailureReason != "completion_rejected" {
+		t.Fatalf("failure reason = %q, want completion_rejected", failure.FailureReason)
+	}
+	if !strings.Contains(failure.Error, "completion rejected") {
+		t.Fatalf("failure error = %q, want completion rejected details", failure.Error)
+	}
+}
+
+func TestDriverDoesNotFailTaskWhenCompletionCallbackIsRateLimited(t *testing.T) {
+	runner := &completingSessionRunner{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	t.Cleanup(func() { runner.closeOnce.Do(func() { close(runner.unblock) }) })
+	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
+	fm.setCompleteStatus(http.StatusTooManyRequests)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: "task-complete-rate-limited", WorkspaceID: "ws-1", NodeRunID: "nr-1", AgentID: "agent-1",
+		Agent: "csc", Prompt: "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	if err := d.SignalTaskCompletion("task-complete-rate-limited", agent.CompletionSignal{
+		Action: "complete", Summary: "all done",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		_, ok := fm.taskCallback("/complete")
+		return ok
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := fm.taskCallbackCount("/fail"); got != 0 {
+		t.Fatalf("fail callback count = %d, want 0 for 429 completion callback", got)
 	}
 }

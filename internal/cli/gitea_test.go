@@ -29,6 +29,7 @@ type fakeGitOps struct {
 		content []byte
 	}
 	commitMsgs        []string
+	commitPaths       []string
 	pushCalls         []struct{ dir, authURL, branch string }
 	currentBranchDirs []string
 	currentBranch     string // value returned by CurrentBranch
@@ -48,8 +49,9 @@ func (f *fakeGitOps) WriteFile(dir, path string, content []byte) error {
 	}{dir, path, content})
 	return nil
 }
-func (f *fakeGitOps) Commit(dir, message string) error {
+func (f *fakeGitOps) Commit(dir, path, message string) error {
 	f.commitMsgs = append(f.commitMsgs, message)
+	f.commitPaths = append(f.commitPaths, path)
 	return nil
 }
 func (f *fakeGitOps) Push(dir, authURL, branch string) error {
@@ -60,7 +62,7 @@ func (f *fakeGitOps) CurrentBranch(dir string) (string, error) {
 	f.currentBranchDirs = append(f.currentBranchDirs, dir)
 	return f.currentBranch, nil
 }
-func (f *fakeGitOps) HasChanges(dir string) (bool, error) {
+func (f *fakeGitOps) HasChanges(dir, path string) (bool, error) {
 	f.hasChangesDirs = append(f.hasChangesDirs, dir)
 	if f.hasChanges != nil {
 		return *f.hasChanges, nil
@@ -382,6 +384,44 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		_ = r.Close()
+	}()
+	fn()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(out)
+}
+
+func TestPrintDeliverableUsageSeparatesDocumentAndCodeMR(t *testing.T) {
+	got := captureStdout(t, printDeliverableUsage)
+	for _, want := range []string{
+		"Document/file deliverable",
+		"Code MR/PR deliverable",
+		"--mr --repo <url>",
+		"CS_CLOUD_GITLAB_TOKEN or CS_CLOUD_GITHUB_TOKEN",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("usage missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[--mr --repo <url>] opens a code MR/PR instead of a document.\n    Reads CS_CLOUD_GITEA_* env") {
+		t.Fatalf("usage mixes code MR with Gitea document env:\n%s", got)
+	}
+}
+
 // TestSubmitDeliverable_ProviderEnvRoutesToGithub verifies CS_CLOUD_CODE_PROVIDER=github
 // routes to submitGithubPR even without --mr.
 func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
@@ -462,6 +502,106 @@ func TestSubmitDeliverable_ProviderEnvRoutesToGithub(t *testing.T) {
 	}
 	if len(fake.pushCalls) != 1 || fake.pushCalls[0].branch != "feat/test" {
 		t.Errorf("expected push of feat/test, got %+v", fake.pushCalls)
+	}
+}
+
+// TestSubmitDeliverable_DocumentIgnoresCodeProvider is a regression test for a
+// workspace that has BOTH a code repo (GitLab) and a Gitea delivery repo.
+// multica injects CS_CLOUD_CODE_PROVIDER=gitlab into every task in such a
+// workspace — including document-only nodes. A --file submit must still take
+// the Gitea delivery path; routing it into submitGitlabMR (because the
+// provider env was checked first) left --repo empty and failed at
+// `git push --force ” <branch>`.
+func TestSubmitDeliverable_DocumentIgnoresCodeProvider(t *testing.T) {
+	// If the document submit is misrouted into submitGitlabMR, this server is
+	// hit (and the test fails loudly) instead of silently pushing to an empty
+	// repo URL like the production bug did.
+	gitlabSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitLab MR endpoint must not be called for a document deliverable: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer gitlabSrv.Close()
+
+	var reportedURL string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/node-runs/nr-1/deliverables/d1/submit" {
+			var body struct {
+				PullRequestURL string `json:"pull_request_url"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			reportedURL = body.PullRequestURL
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer backend.Close()
+
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+	// The workspace has a GitLab code repo, so multica pushes its provider env
+	// into this task even though the node only produces a document.
+	t.Setenv("CS_CLOUD_CODE_PROVIDER", "gitlab")
+	t.Setenv("CS_CLOUD_GITLAB_TOKEN", "gl-pat")
+	t.Setenv("CS_CLOUD_GITLAB_BASE_URL", gitlabSrv.URL)
+	// Plus the Gitea delivery env the document path reads.
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[{"deliverable_id":"d1","title":"Doc","path":"nodes/dd/d1.md"}]`)
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-1")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-1")
+
+	tmpFile := tempFile(t, "# doc body")
+	fake := &fakeGitOps{currentBranch: "node/dd"}
+	stderr := captureStderr(t, func() {
+		err := submitDeliverable(submitConfig{
+			giteaBaseOverride: giteaSrv.URL,
+			deliverableID:     "d1",
+			filePath:          tmpFile,
+			gitOps:            fake,
+		})
+		if err != nil {
+			t.Fatalf("submitDeliverable: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"deliverable d1: submitting node_run=nr-1 branch=node/dd",
+		"deliverable d1: pushing branch=node/dd",
+		"deliverable d1: opening PR head=node/dd base=inst-cc",
+		"deliverable d1: submitted pr=https://gitea.test/t-aaa/wf-bbb/pulls/9",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+	// Push must target the Gitea delivery clone URL (with the PAT embedded),
+	// not an empty gitlab repo URL.
+	if len(fake.pushCalls) != 1 {
+		t.Fatalf("expected one push, got %+v", fake.pushCalls)
+	}
+	if !strings.HasPrefix(fake.pushCalls[0].authURL, "https://oauth2:pat-xyz@gitea.test/t-aaa/wf-bbb.git") {
+		t.Errorf("push authURL = %q, want Gitea delivery URL with embedded PAT", fake.pushCalls[0].authURL)
+	}
+	if reportedURL != "https://gitea.test/t-aaa/wf-bbb/pulls/9" {
+		t.Errorf("reported URL = %q, want Gitea PR", reportedURL)
 	}
 }
 
@@ -756,7 +896,7 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 	}
 	dirty := func(want bool) {
 		t.Helper()
-		got, err := ops.HasChanges(repo)
+		got, err := ops.HasChanges(repo, "nodes/d1.md")
 		if err != nil {
 			t.Fatalf("HasChanges: %v", err)
 		}
@@ -767,7 +907,7 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 
 	write("body") // new file → dirty
 	dirty(true)
-	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+	if err := ops.Commit(repo, "nodes/d1.md", "deliverable: d1"); err != nil {
 		t.Fatalf("Commit #1: %v", err)
 	}
 	dirty(false)
@@ -777,10 +917,69 @@ func TestExecGitOps_CommitIsIdempotent(t *testing.T) {
 
 	write("body-v2") // real change → dirty again
 	dirty(true)
-	if err := ops.Commit(repo, "deliverable: d1"); err != nil {
+	if err := ops.Commit(repo, "nodes/d1.md", "deliverable: d1"); err != nil {
 		t.Fatalf("Commit #2: %v", err)
 	}
 	dirty(false)
+}
+
+// TestExecGitOps_CommitOnlyStagesDeliverablePath verifies the production
+// execGitOps.Commit stages ONLY the deliverable path, not `add -A`. A worktree
+// may contain sensitive leftovers (a leaked .cs-cloud.env carrying tokens) or
+// scratch files; committing + force-pushing those would leak secrets and
+// pollute the PR.
+func TestExecGitOps_CommitOnlyStagesDeliverablePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "t@test"},
+		{"config", "user.name", "t"},
+	} {
+		gitRun(t, repo, args...)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	gitRun(t, repo, "add", "README")
+	gitRun(t, repo, "commit", "-q", "-m", "init")
+
+	// A sensitive untracked file + a scratch file sit in the worktree.
+	if err := os.WriteFile(filepath.Join(repo, ".cs-cloud.env"), []byte("CS_CLOUD_TOKEN=secret"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "scratch.log"), []byte("noise"), 0o644); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+
+	var ops execGitOps
+	docPath := "nodes/02-plan/task.md"
+	if err := ops.WriteFile(repo, docPath, []byte("# doc body")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := ops.Commit(repo, docPath, "deliverable: d1"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	tree := gitRunOut(t, repo, "ls-tree", "-r", "--name-only", "HEAD")
+	if !strings.Contains(tree, docPath) {
+		t.Errorf("docPath should be committed, tree=\n%s", tree)
+	}
+	for _, leaked := range []string{".cs-cloud.env", "scratch.log"} {
+		if strings.Contains(tree, leaked) {
+			t.Errorf("%s must NOT be committed (only the deliverable path), tree=\n%s", leaked, tree)
+		}
+	}
+	// They must still be untracked in the worktree (not staged, not committed).
+	status := gitRunOut(t, repo, "status", "--porcelain")
+	if !strings.Contains(status, "?? .cs-cloud.env") {
+		t.Errorf(".cs-cloud.env should remain untracked, status=\n%s", status)
+	}
+	if !strings.Contains(status, "?? scratch.log") {
+		t.Errorf("scratch.log should remain untracked, status=\n%s", status)
+	}
 }
 
 // gitRun runs git -C dir and fails the test on error.
@@ -790,6 +989,16 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
 	}
+}
+
+// gitRunOut runs git -C dir and returns stdout, failing the test on error.
+func gitRunOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 // serveGitHTTP serves a local bare-repo "platform Gitea" via `git http-backend`
@@ -937,5 +1146,133 @@ func TestSubmitDeliverable_E2E_RealPush(t *testing.T) {
 	}
 	if string(got) != "# real deliverable body\n" {
 		t.Errorf("bare repo node/dd:nodes/dd/d1.md = %q, want deliverable body", string(got))
+	}
+}
+
+// TestSubmitDeliverable_AgentDefinedCreatesThenSubmits verifies the
+// agent-defined flow: with no --deliverable (the node has no pre-registered
+// deliverables), the CLI creates a deliverable on the server (POST
+// /deliverables {title}), gets back an id, then submits the PR against it.
+// The agent perceives one command.
+func TestSubmitDeliverable_AgentDefinedCreatesThenSubmits(t *testing.T) {
+	var createdTitle string
+	var submittedDeliverableID string
+	var idempotencyKey string
+	var order []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/gitea/credential":
+			jsonResponse(w, 200, map[string]string{"base_url": "https://gitea.test", "token": "pat-xyz"})
+		case "/api/node-runs/nr-1/deliverables":
+			order = append(order, "create")
+			idempotencyKey = r.Header.Get("Idempotency-Key")
+			var body struct {
+				Title string `json:"title"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			createdTitle = body.Title
+			jsonResponse(w, 201, map[string]any{"id": "agent-d-1", "title": body.Title, "required": false})
+		case "/api/node-runs/nr-1/deliverables/agent-d-1/submit":
+			order = append(order, "submit")
+			submittedDeliverableID = "agent-d-1"
+			jsonResponse(w, 200, map[string]any{"id": "sub-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	giteaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls") {
+			order = append(order, "open")
+			jsonResponse(w, 201, map[string]any{"number": 9, "html_url": "https://gitea.test/t-aaa/wf-bbb/pulls/9"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer giteaSrv.Close()
+
+	repoDir := t.TempDir()
+	t.Chdir(repoDir)
+	t.Setenv("CS_CLOUD_TOKEN", "tok")
+	t.Setenv("CS_CLOUD_BACKEND_URL", backend.URL)
+	t.Setenv("CS_CLOUD_WORKSPACE_ID", "ws-1")
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_BASE_URL", "https://gitea.test")
+	t.Setenv("CS_CLOUD_GITEA_TOKEN", "pat-xyz")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_CLONE_URL", "https://gitea.test/t-aaa/wf-bbb.git")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", `[]`) // no pre-registered deliverables
+	t.Setenv("CS_CLOUD_AGENT_ID", "agent-uuid-111")
+	t.Setenv("CS_CLOUD_TASK_ID", "task-uuid-222")
+
+	tmpFile := tempFile(t, "# agent-defined doc body")
+	fake := &fakeGitOps{currentBranch: "node/dd"}
+
+	err := submitDeliverable(submitConfig{
+		giteaBaseOverride: giteaSrv.URL,
+		deliverableID:     "", // agent-defined: no pre-registered id
+		filePath:          tmpFile,
+		title:             "My Design Doc",
+		gitOps:            fake,
+	})
+	if err != nil {
+		t.Fatalf("submitDeliverable agent-defined: %v", err)
+	}
+	if createdTitle != "My Design Doc" {
+		t.Errorf("create deliverable title = %q, want %q", createdTitle, "My Design Doc")
+	}
+	if submittedDeliverableID != "agent-d-1" {
+		t.Errorf("submit called with id %q, want agent-d-1 (the id create returned)", submittedDeliverableID)
+	}
+	if got, want := strings.Join(order, ","), "create,open,submit"; got != want {
+		t.Errorf("operation order = %s, want %s", got, want)
+	}
+	if idempotencyKey != "agent-defined-deliverable:nr-1:task-uuid-222:My Design Doc:"+filepath.Base(tmpFile) {
+		t.Errorf("Idempotency-Key = %q, want stable node/task/title key", idempotencyKey)
+	}
+}
+
+func TestReadGiteaContextMissingDeliverablesIsEmptyList(t *testing.T) {
+	t.Setenv("CS_CLOUD_NODE_RUN_ID", "nr-1")
+	t.Setenv("CS_CLOUD_GITEA_OWNER", "t-aaa")
+	t.Setenv("CS_CLOUD_GITEA_REPO", "wf-bbb")
+	t.Setenv("CS_CLOUD_GITEA_INST_BRANCH", "inst-cc")
+	t.Setenv("CS_CLOUD_GITEA_NODE_BRANCH", "node/dd")
+	t.Setenv("CS_CLOUD_GITEA_DELIVERABLES", "")
+
+	ctx, err := readGiteaContext()
+	if err != nil {
+		t.Fatalf("readGiteaContext: %v", err)
+	}
+	if len(ctx.deliverables) != 0 {
+		t.Fatalf("deliverables = %+v, want empty list", ctx.deliverables)
+	}
+}
+
+func TestCreateAgentDefinedDeliverableRejectsMalformedServerURLNoPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("createAgentDefinedDeliverable panicked: %v", r)
+		}
+	}()
+
+	_, err := createAgentDefinedDeliverable(context.Background(), "http://127.0.0.1\nbad", "tok", "nr-1", "Doc", "doc.md", "ws-1", "agent-1", "task-1")
+	if err == nil {
+		t.Fatal("expected malformed request URL error")
+	}
+}
+
+func TestAgentDefinedDeliverableIdempotencyKeyIncludesDocPath(t *testing.T) {
+	keyA := agentDefinedDeliverableIdempotencyKey("nr-1", "Design", "task-1", "alpha.md")
+	keyB := agentDefinedDeliverableIdempotencyKey("nr-1", "Design", "task-1", "nested/beta.md")
+	if keyA == keyB {
+		t.Fatalf("same title with different doc paths produced identical key %q", keyA)
+	}
+	if !strings.Contains(keyA, "alpha.md") {
+		t.Fatalf("key %q does not include normalized doc path", keyA)
 	}
 }

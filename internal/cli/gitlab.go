@@ -45,6 +45,15 @@ func submitGitlabMR(cfg submitConfig) error {
 	}
 	token := os.Getenv("CS_CLOUD_TOKEN")
 
+	// A code MR needs the repo URL the agent passed via --repo. An empty value
+	// means this path was reached without one (e.g. a document submit that the
+	// caller failed to keep on the Gitea delivery path) — fail with an
+	// actionable error instead of shelling out to `git push --force '' <branch>`
+	// and surfacing git's opaque "bad repository ''" / exit 128.
+	if strings.TrimSpace(cfg.repoURL) == "" {
+		return fmt.Errorf("code MR submit requires --repo <url> (repo URL is empty)")
+	}
+
 	// Determine current branch in the worktree.
 	currentBranch, err := cfg.gitOps.CurrentBranch(worktree)
 	if err != nil {
@@ -53,6 +62,15 @@ func submitGitlabMR(cfg submitConfig) error {
 
 	fmt.Fprintf(os.Stderr, "deliverable %s: submitting MR node_run=%s branch=%s\n", cfg.deliverableID, nodeRunID, currentBranch)
 
+	deliverableID := cfg.deliverableID
+	if deliverableID == "" {
+		deliverableID, err = createAgentDefinedDeliverable(ctx, serverURL, token, nodeRunID, cfg.title, "", os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"))
+		if err != nil {
+			return fmt.Errorf("create deliverable: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "deliverable: created agent-defined id=%s title=%q\n", deliverableID, cfg.title)
+	}
+
 	// Push current branch to the repo.
 	authURL := injectTokenIntoURL(cfg.repoURL, cred.Token)
 	fmt.Fprintf(os.Stderr, "deliverable %s: pushing MR branch=%s\n", cfg.deliverableID, currentBranch)
@@ -60,7 +78,13 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "main")
+	targetBranch := envOr("CS_CLOUD_GITLAB_TARGET_BRANCH", "")
+	if targetBranch == "" {
+		targetBranch = fetchGitlabDefaultBranch(ctx, cred.BaseURL, cred.Token, cfg.repoURL)
+	}
+	if targetBranch == "" {
+		targetBranch = "main" // repo query failed — last-resort default
+	}
 	title := deliverableTitle(cfg.title, "deliverable "+cfg.deliverableID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: opening MR source=%s target=%s\n", cfg.deliverableID, currentBranch, targetBranch)
 	mrURL, err := openGitlabMR(ctx, cred.BaseURL, cred.Token, cfg.repoURL, currentBranch, targetBranch, title)
@@ -68,13 +92,13 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
-	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + cfg.deliverableID + "/submit"
-	fmt.Fprintf(os.Stderr, "deliverable %s: reporting MR\n", cfg.deliverableID)
+	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
+	fmt.Fprintf(os.Stderr, "deliverable %s: reporting MR\n", deliverableID)
 	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
 		return fmt.Errorf("report submit: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "deliverable %s: submitted mr=%s\n", cfg.deliverableID, mrURL)
+	fmt.Fprintf(os.Stderr, "deliverable %s: submitted mr=%s\n", deliverableID, mrURL)
 	fmt.Println(mrURL)
 	return nil
 }
@@ -104,6 +128,43 @@ func readGitlabCredential() (*gitlabCredential, error) {
 		BaseURL: baseURL,
 		Token:   token,
 	}, nil
+}
+
+// fetchGitlabDefaultBranch queries the project's default branch via GET
+// /api/v4/projects/:project. Returns "" on any failure so the caller falls
+// back to a hardcoded default rather than blocking MR creation.
+func fetchGitlabDefaultBranch(ctx context.Context, base, token, repoURL string) string {
+	u, err := url.Parse(strings.TrimSpace(repoURL))
+	if err != nil {
+		return ""
+	}
+	project := strings.Trim(u.Path, "/")
+	project = strings.TrimSuffix(project, ".git")
+	if project == "" {
+		return ""
+	}
+	endpoint := strings.TrimRight(base, "/") + "/api/v4/projects/" + url.PathEscape(project)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := sharedHTTPClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if json.Unmarshal(body, &info) != nil {
+		return ""
+	}
+	return strings.TrimSpace(info.DefaultBranch)
 }
 
 // openGitlabMR POSTs /api/v4/projects/<urlencoded>/merge_requests and returns web_url.
