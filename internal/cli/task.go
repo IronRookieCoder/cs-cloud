@@ -58,8 +58,8 @@ func taskCmd(a *app.App, args []string) error {
 		printTaskUsage()
 		return nil
 	default:
-		printTaskUsage()
-		return fmt.Errorf("unknown workflow task command: %s", args[0])
+		fmt.Println("Unknown workflow task command: " + args[0] + ". Valid actions: complete, approve, reject.")
+		return nil
 	}
 }
 

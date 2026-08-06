@@ -247,6 +247,25 @@ func TestLoadTaskEnvFileFrom_ExplicitDir(t *testing.T) {
 	}
 }
 
+// captureStdout lives in gitea_test.go (same package).
+
+// TestWorkflowCmd_UnknownCommandExitsZero verifies an unknown workflow command
+// never surfaces a non-zero exit; it prints non-empty corrective guidance that
+// names the bad command so the agent can correct.
+func TestWorkflowCmd_UnknownCommandExitsZero(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := workflowCmd(nil, []string{"bogus-cmd"}); err != nil {
+			t.Fatalf("workflowCmd unknown = %v, want nil (always exit 0)", err)
+		}
+	})
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("unknown command must print non-empty corrective guidance")
+	}
+	if !strings.Contains(out, "bogus-cmd") {
+		t.Fatalf("output must name the unknown command; got:\n%s", out)
+	}
+}
+
 // TestWorkflowCmd_ConsumesTaskFlag verifies workflowCmd consumes `--task <id>`
 // at the workflow level so it never reaches subcommand dispatch (where it would
 // be treated as an unknown command). Uses a real app because the --task path

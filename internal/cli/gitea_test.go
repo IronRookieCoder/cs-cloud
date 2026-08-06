@@ -635,6 +635,20 @@ func TestSubmitGuidance(t *testing.T) {
 	}
 }
 
+// TestDeliverableCmd_UnknownActionExitsZero verifies an unknown deliverable
+// action never surfaces a non-zero exit; it prints non-empty corrective
+// guidance naming the bad action so the agent can correct.
+func TestDeliverableCmd_UnknownActionExitsZero(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := deliverableCmd(nil, []string{"bogus"}); err != nil {
+			t.Fatalf("deliverableCmd unknown = %v, want nil (always exit 0)", err)
+		}
+	})
+	if strings.TrimSpace(out) == "" || !strings.Contains(out, "bogus") {
+		t.Fatalf("unknown deliverable action must print non-empty guidance naming it; got:\n%s", out)
+	}
+}
+
 // TestRunGiteaSubmit_NeverExitsNonZero verifies runGiteaSubmit returns nil
 // (exit 0) even when arg parsing fails — the failure is communicated as text,
 // not an error exit code, matching the task-complete CLI's contract.

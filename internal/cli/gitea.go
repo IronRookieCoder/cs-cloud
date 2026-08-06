@@ -38,8 +38,8 @@ func deliverableCmd(a *app.App, args []string) error {
 		printDeliverableUsage()
 		return nil
 	default:
-		printDeliverableUsage()
-		return fmt.Errorf("unknown gitea command: %s", args[0])
+		fmt.Println("Unknown workflow deliverable command: " + args[0] + ". Valid action: submit.")
+		return nil
 	}
 }
 

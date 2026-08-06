@@ -144,6 +144,20 @@ func TestPostTaskCompletion_RetriesTransientFailures(t *testing.T) {
 	}
 }
 
+// TestTaskCmd_UnknownActionExitsZero verifies an unknown task action never
+// surfaces a non-zero exit; it prints non-empty corrective guidance naming the
+// bad action so the agent can correct.
+func TestTaskCmd_UnknownActionExitsZero(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := taskCmd(nil, []string{"bogus-action"}); err != nil {
+			t.Fatalf("taskCmd unknown = %v, want nil (always exit 0)", err)
+		}
+	})
+	if strings.TrimSpace(out) == "" || !strings.Contains(out, "bogus-action") {
+		t.Fatalf("unknown task action must print non-empty guidance naming it; got:\n%s", out)
+	}
+}
+
 // TestCompletionMessage verifies the complete/review CLI never surfaces a
 // non-zero exit to the agent: success confirms delivery, and failure renders
 // guidance text (cd to task root + retry) so the agent reads it and recovers

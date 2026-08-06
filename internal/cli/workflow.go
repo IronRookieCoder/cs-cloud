@@ -56,8 +56,8 @@ func workflowCmd(a *app.App, args []string) error {
 		printWorkflowUsage()
 		return nil
 	default:
-		printWorkflowUsage()
-		return fmt.Errorf("unknown workflow command: %s", args[0])
+		fmt.Println("Unknown workflow command: " + args[0] + ". Valid commands: workspace, project, deliverable, task.")
+		return nil
 	}
 }
 
@@ -83,7 +83,8 @@ func workflowProjectCmd(a *app.App, args []string) error {
 	case "list":
 		return workflowProjectList(a)
 	default:
-		return fmt.Errorf("unknown workflow project command: %s", args[0])
+		fmt.Println("Unknown workflow project action: " + args[0] + ". Valid action: list.")
+		return nil
 	}
 }
 
@@ -91,11 +92,13 @@ func workflowProjectList(a *app.App) error {
 	cfg := a.Config()
 	creds, err := a.Credentials()
 	if err != nil {
-		return err
+		fmt.Println("Could not list projects (no credentials): " + err.Error() + ". Run `cs-cloud login` first.")
+		return nil
 	}
 	wsID := os.Getenv("CS_CLOUD_WORKSPACE_ID")
 	if wsID == "" {
-		return fmt.Errorf("CS_CLOUD_WORKSPACE_ID not set (run inside a workflow task; context is in .cs-cloud.env)")
+		fmt.Println("Could not list projects: CS_CLOUD_WORKSPACE_ID is not set. Run inside a workflow task, or pass it in .cs-cloud.env.")
+		return nil
 	}
 	client := workflowrunner.NewClient(cfg.Workflow.BackendBaseURL, "", func() (*provider.Credentials, error) {
 		return creds, nil
@@ -104,7 +107,12 @@ func workflowProjectList(a *app.App) error {
 	defer cancel()
 	projects, err := client.GetProjects(ctx, wsID)
 	if err != nil {
-		return err
+		fmt.Println("Could not list projects from the server: " + err.Error() + ". Check connectivity and CS_CLOUD_WORKFLOW_BACKEND_BASE_URL.")
+		return nil
+	}
+	if len(projects) == 0 {
+		fmt.Println("No projects in this workspace.")
+		return nil
 	}
 	for _, p := range projects {
 		fmt.Printf("%s  %s\n", p.ID, p.Name)
