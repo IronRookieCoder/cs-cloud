@@ -426,7 +426,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		// Enable the explicit "complete task" tool path for bound csc sessions:
 		// the localserver handler signals completion via this registry while
 		// runAgent waits on the session.
-		d.registerCompletion(payload.TaskID)
+		d.registerCompletion(payload.TaskID, sessionID, worktree)
 		defer d.unregisterCompletion(payload.TaskID)
 	}
 	out, runErr := d.runAgent(ctx, payload, worktree, agentPath, sessionID)
@@ -663,10 +663,19 @@ func (d *Driver) postTaskMessages(taskID, output string) {
 
 func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
 	logger.Warn("workflow: task %s failed: reason=%s err=%v", taskID, failureReason, taskErr)
+	// The failure path never pops the completion registry, and the failure can
+	// be a misjudgment (the agent may still be alive and finish its work):
+	// forward any completion signal from here on instead of latching it
+	// forever. The server arbitrates the fail/complete race.
+	d.markCompletionLate(taskID)
 	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
 		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
 	})
 	if callbackErr != nil {
+		// Log here, not just in the returned error: RunTaskAsync discards
+		// execute's return value, so an unlogged callback failure would leave
+		// the server thinking the task is still running with no trace.
+		logger.Warn("workflow: task %s fail callback failed: %v", taskID, callbackErr)
 		return errors.Join(taskErr, fmt.Errorf("fail task callback: %w", callbackErr))
 	}
 	return taskErr
