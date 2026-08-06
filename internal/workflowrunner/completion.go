@@ -1,9 +1,11 @@
 package workflowrunner
 
 import (
+	"context"
 	"fmt"
 
 	"cs-cloud/internal/agent"
+	"cs-cloud/internal/logger"
 )
 
 // completionState tracks an explicit "complete task" signal for a running csc
@@ -14,18 +16,34 @@ type completionState struct {
 	notify  chan struct{}
 	payload agent.CompletionSignal
 	set     bool
+	// Late mode: execute has entered a terminal-failure path, which never
+	// consumes the registry (popCompletionSignal only runs on the success
+	// path). A failure can be a misjudgment — the agent may still be alive
+	// and finish its work — so signals arriving in late mode, and a signal
+	// latched just before the mark, are forwarded to the server directly
+	// instead of disappearing into the registry.
+	late      bool
+	forwarded bool
+	sessionID string
+	workDir   string
 }
 
 // registerCompletion creates the completion state for a task (csc only). It is
 // called by execute before runAgent so the localserver handler can signal the
-// agent's explicit completion while the session is still busy.
-func (d *Driver) registerCompletion(taskID string) {
+// agent's explicit completion while the session is still busy. sessionID and
+// workDir are kept so a late completion can be forwarded with the same resume
+// pointer the normal path would report.
+func (d *Driver) registerCompletion(taskID, sessionID, workDir string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.completion == nil {
 		d.completion = make(map[string]*completionState)
 	}
-	d.completion[taskID] = &completionState{notify: make(chan struct{})}
+	d.completion[taskID] = &completionState{
+		notify:    make(chan struct{}),
+		sessionID: sessionID,
+		workDir:   workDir,
+	}
 }
 
 // unregisterCompletion removes the completion state for a task. Called by
@@ -34,6 +52,44 @@ func (d *Driver) unregisterCompletion(taskID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.completion, taskID)
+}
+
+// markCompletionLate switches the task's completion state to late mode: from
+// here on, completion signals are forwarded to the server directly because
+// execute's failure path will never pop them. A signal already latched is
+// flushed immediately. No-op when the task has no completion state.
+func (d *Driver) markCompletionLate(taskID string) {
+	d.mu.Lock()
+	cs, ok := d.completion[taskID]
+	if !ok || cs.late {
+		d.mu.Unlock()
+		return
+	}
+	cs.late = true
+	if cs.set && !cs.forwarded {
+		cs.forwarded = true
+		payload := cs.payload
+		sessionID, workDir := cs.sessionID, cs.workDir
+		d.mu.Unlock()
+		go d.forwardLateCompletion(taskID, sessionID, workDir, payload)
+		return
+	}
+	d.mu.Unlock()
+}
+
+// forwardLateCompletion reports a completion signal that arrived after execute
+// entered the terminal-failure path. The server arbitrates the resulting race
+// (fail-then-complete / complete-then-fail) — the driver's job is only to
+// report honestly and log the outcome.
+func (d *Driver) forwardLateCompletion(taskID, sessionID, workDir string, sig agent.CompletionSignal) {
+	logger.Info("workflow: task %s forwarding late completion: action=%s decision=%s", taskID, sig.Action, sig.Decision)
+	output := truncateOutput(sig.Summary)
+	err := d.withTaskCallbackContext(func(ctx context.Context) error {
+		return d.completeTaskOrFailOnRejection(ctx, taskID, output, sessionID, workDir, sig)
+	})
+	if err != nil {
+		logger.Warn("workflow: task %s late completion forward failed: %v", taskID, err)
+	}
 }
 
 // completionNotify returns the notify channel for runAgent's select, or nil if
@@ -64,14 +120,26 @@ func (d *Driver) popCompletionSignal(taskID string) (agent.CompletionSignal, boo
 // wakes runAgent so it can stop the session. Called by the localserver
 // "complete task" endpoint. It is idempotent: a second call for an already
 // completed task is a no-op (the task is completing via the first signal).
-// Returns an error if the task is not running (already finished / unknown) so
-// the handler can respond 409.
+// In late mode (execute is already failing the task) the signal is forwarded
+// to the server directly, exactly once. Returns an error if the task is not
+// running (already finished / unknown) so the handler can respond 409.
 func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal) error {
 	d.mu.Lock()
 	cs, ok := d.completion[taskID]
 	if !ok {
 		d.mu.Unlock()
 		return fmt.Errorf("task %s is not running", taskID)
+	}
+	if cs.late {
+		if cs.forwarded {
+			d.mu.Unlock()
+			return nil
+		}
+		cs.forwarded = true
+		sessionID, workDir := cs.sessionID, cs.workDir
+		d.mu.Unlock()
+		go d.forwardLateCompletion(taskID, sessionID, workDir, sig)
+		return nil
 	}
 	if cs.set {
 		d.mu.Unlock()

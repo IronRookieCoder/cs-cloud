@@ -134,6 +134,9 @@ type fakeBackend struct {
 	nextSessionID  int
 	runtimeAlive   map[string]bool
 	messageDelay   time.Duration
+	failGate       chan struct{}
+	failStarted    chan struct{}
+	failStartOnce  sync.Once
 }
 
 type pinSessionCall struct {
@@ -258,9 +261,20 @@ func (f *fakeBackend) handler() http.Handler {
 		f.mu.Lock()
 		messageDelay := f.messageDelay
 		completeStatus := f.completeStatus
+		failGate := f.failGate
+		failStarted := f.failStarted
 		f.mu.Unlock()
 		if strings.HasSuffix(r.URL.Path, "/messages") && messageDelay > 0 {
 			time.Sleep(messageDelay)
+		}
+		if strings.HasSuffix(r.URL.Path, "/fail") && failGate != nil {
+			// Simulate a wedged fail callback: hold the HTTP response open so
+			// the caller's execute goroutine stays inside failTask.
+			f.failStartOnce.Do(func() { close(failStarted) })
+			select {
+			case <-failGate:
+			case <-time.After(10 * time.Second):
+			}
 		}
 		f.mu.Lock()
 		f.taskCalls = append(f.taskCalls, r.URL.Path)
@@ -354,6 +368,34 @@ func (f *fakeBackend) setCompleteStatus(status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.completeStatus = status
+}
+
+// gateFailCallbacks makes subsequent /fail callbacks block until
+// releaseFailCallbacks, simulating a wedged terminal callback that leaves
+// execute stuck inside failTask.
+func (f *fakeBackend) gateFailCallbacks() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failGate = make(chan struct{})
+	f.failStarted = make(chan struct{})
+	f.failStartOnce = sync.Once{}
+}
+
+// failCallbackStarted closes once a /fail callback is in flight (blocked on
+// the gate).
+func (f *fakeBackend) failCallbackStarted() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.failStarted
+}
+
+func (f *fakeBackend) releaseFailCallbacks() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failGate != nil {
+		close(f.failGate)
+		f.failGate = nil
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
