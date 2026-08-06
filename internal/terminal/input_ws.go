@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,18 +28,15 @@ func NewInputWsHandler(mgr *TerminalManager) *InputWsHandler {
 }
 
 func (h *InputWsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Terminal input is a sensitive sink (raw bytes written into a PTY), so
-	// reject non-localhost Origin. The previous OriginPatterns: ["*"] let any
-	// website the victim visits open a WebSocket against their localserver
-	// and inject shell commands. Browsers always send Origin on cross-origin
-	// WS handshakes, so a missing Origin (non-browser clients) is allowed.
-	if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostWsOrigin(origin) {
-		http.Error(w, "origin not allowed", http.StatusForbidden)
-		return
-	}
-
+	// InsecureSkipVerify disables the library's Origin check. This endpoint
+	// is reached both from local dev (http://localhost:*) and via the cloud
+	// tunnel, whose browser-side Origin is the production domain — neither
+	// fits a static allowlist, so Origin filtering breaks legitimate traffic
+	// while buying nothing: the real CSRF barrier is that auth credentials
+	// are not carried in cookies (Authorization header / WS subprotocol),
+	// so a cross-site page cannot forge an authenticated request regardless.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"localhost", "127.0.0.1", "::1"},
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		logger.Error("terminal: ws accept error: %v", err)
@@ -150,18 +145,6 @@ func (c *inputWsConn) sendPong() {
 	defer cancel()
 
 	wsjson.Write(ctx, c.conn, wsControlMsg{Type: "po", Version: 1})
-}
-
-// isLocalhostWsOrigin reports whether the WebSocket request Origin is a
-// localhost variant (http://localhost, http://127.0.0.1, or http://[::1] on
-// any port).
-func isLocalhostWsOrigin(origin string) bool {
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func (c *inputWsConn) pingLoop() {

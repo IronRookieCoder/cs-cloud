@@ -126,7 +126,7 @@ func New(opts ...Option) *Server {
 
 	// CORS-friendly 404 for paths outside /api/v1/ (e.g. wrong baseUrl)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w.Header(), r.Header.Get("Origin"))
+		setCORSHeaders(w.Header())
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

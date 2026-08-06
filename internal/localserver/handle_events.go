@@ -39,7 +39,7 @@ func (s *Server) handleEventsSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SSE headers
-	setCORSHeaders(w.Header(), r.Header.Get("Origin"))
+	setCORSHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
