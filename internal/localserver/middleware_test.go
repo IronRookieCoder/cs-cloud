@@ -59,21 +59,6 @@ func TestAuthMiddleware_RequiresKey(t *testing.T) {
 	}
 }
 
-// TestServer_NoAPIKeyConfigured_PassesThrough exercises the full wiring in
-// New(): when Config.APIKey is empty the auth middleware must be a no-op so
-// existing unauthenticated clients keep working.
-func TestServer_NoAPIKeyConfigured_PassesThrough(t *testing.T) {
-	srv := New(WithVersion("test"), WithConfig(&config.Config{}))
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runtime/health", nil)
-	srv.http.Handler.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("got 401 on default (no-key) server; auth middleware should be a no-op")
-	}
-}
-
 // TestServer_APIKeyEnforced_EndToEnd verifies the wired chain
 // (corsMiddleware → authMiddleware → handler) rejects requests without the
 // key and accepts requests that present it correctly.

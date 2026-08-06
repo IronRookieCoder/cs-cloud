@@ -704,7 +704,45 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	if tr.localServerAPIKey != "" {
 		env = setEnv(env, EnvLocalServerAPIKey, tr.localServerAPIKey)
 	}
+	// Per-deliverable Report contracts (endpoint/body field) from the payload,
+	// so the in-task CLI honors multica's Report instead of hardcoding the
+	// submit path (R4). Empty when no deliverable carries a Report.
+	if raw := deliverableReportTargetsJSON(payload.Deliverables); raw != "" {
+		env = setEnv(env, "CS_CLOUD_DELIVERABLE_REPORTS", raw)
+	}
 	return env
+}
+
+// deliverableReportTargetsJSON serializes payload.Deliverables[].Report into
+// the JSON the in-task CLI reads via CS_CLOUD_DELIVERABLE_REPORTS, so it can
+// honor a non-default submit endpoint / body field per deliverable (R4).
+// Returns "" when no deliverable carries a Report contract, keeping the env
+// unset so the CLI falls back to its hardcoded defaults.
+func deliverableReportTargetsJSON(deliverables []workflow.DeliverableSpec) string {
+	type target struct {
+		ID        string `json:"deliverable_id"`
+		Endpoint  string `json:"endpoint"`
+		BodyField string `json:"body_field"`
+	}
+	var targets []target
+	for _, d := range deliverables {
+		if d.ID == "" {
+			continue
+		}
+		if d.Report.Endpoint == "" && d.Report.BodyField == "" {
+			continue
+		}
+		targets = append(targets, target{
+			ID:        d.ID,
+			Endpoint:  d.Report.Endpoint,
+			BodyField: d.Report.BodyField,
+		})
+	}
+	if len(targets) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(targets)
+	return string(b)
 }
 
 func setEnv(env []string, key, value string) []string {
