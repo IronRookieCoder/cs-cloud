@@ -68,16 +68,34 @@ Usage:
 func runGiteaSubmit(args []string) error {
 	deliverableID, filePath, mrMode, repoURL, title, err := parseSubmitArgs(args)
 	if err != nil {
-		return err
+		fmt.Println(submitGuidance(err))
+		return nil
 	}
-	return submitDeliverable(submitConfig{
+	if err := submitDeliverable(submitConfig{
 		deliverableID: deliverableID,
 		filePath:      filePath,
 		mrMode:        mrMode,
 		repoURL:       repoURL,
 		title:         title,
 		gitOps:        &execGitOps{},
-	})
+	}); err != nil {
+		fmt.Println(submitGuidance(err))
+		return nil
+	}
+	return nil
+}
+
+// submitGuidance renders a deliverable-submit failure as loud agent-facing
+// text. The submit CLI never surfaces a non-zero exit: on failure it prints
+// this guidance instead, so the agent reads the text and recovers rather than
+// being derailed by an error exit code. Because a submit failure means the
+// deliverable was NOT submitted, the text says so explicitly and loudly — a
+// failed submit must never read like success, or the agent will move on and
+// the deliverable silently goes missing. submit is idempotent, so re-running
+// is always safe.
+func submitGuidance(err error) string {
+	return "DELIVERABLE SUBMIT FAILED: " + err.Error() + "\n" +
+		"The deliverable was NOT submitted. Fix the issue described above and re-run `cs-cloud workflow deliverable submit ...` from the task root. Submit is idempotent, so re-running is safe. Do not signal task completion until a submit prints a pull-request URL."
 }
 
 // parseSubmitArgs parses `--deliverable <id> --file <path> [--title <title>] [--mr --repo <url>]` from the flat arg

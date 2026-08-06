@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -611,6 +612,36 @@ func TestSubmitDeliverable_MissingNodeRunID(t *testing.T) {
 	t.Setenv("CS_CLOUD_NODE_RUN_ID", "")
 	if err := submitDeliverable(submitConfig{deliverableID: "d1", filePath: "x", gitOps: &fakeGitOps{}}); err == nil {
 		t.Fatal("expected error when CS_CLOUD_NODE_RUN_ID missing")
+	}
+}
+
+// TestSubmitGuidance verifies a failed deliverable submit renders loud
+// agent-facing text: the CLI never surfaces a non-zero exit, so the failure
+// must be unambiguous in the text to stop the agent mistaking a failed submit
+// for success (which would silently lose the deliverable).
+func TestSubmitGuidance(t *testing.T) {
+	msg := submitGuidance(errors.New("push: auth error"))
+	if !strings.Contains(msg, "SUBMIT FAILED") {
+		t.Fatalf("should say submit failed; got %q", msg)
+	}
+	if !strings.Contains(msg, "NOT submitted") {
+		t.Fatalf("should state the deliverable was NOT submitted; got %q", msg)
+	}
+	if !strings.Contains(msg, "push: auth error") {
+		t.Fatalf("should include the underlying error; got %q", msg)
+	}
+	if !strings.Contains(msg, "re-run") {
+		t.Fatalf("should tell the agent to re-run; got %q", msg)
+	}
+}
+
+// TestRunGiteaSubmit_NeverExitsNonZero verifies runGiteaSubmit returns nil
+// (exit 0) even when arg parsing fails — the failure is communicated as text,
+// not an error exit code, matching the task-complete CLI's contract.
+func TestRunGiteaSubmit_NeverExitsNonZero(t *testing.T) {
+	// No args: document mode requires --file, so parseSubmitArgs errors.
+	if err := runGiteaSubmit(nil); err != nil {
+		t.Fatalf("runGiteaSubmit with bad args = %v, want nil (never non-zero)", err)
 	}
 }
 

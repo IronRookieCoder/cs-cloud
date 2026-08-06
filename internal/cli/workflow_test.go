@@ -96,6 +96,174 @@ func TestFindTaskEnvFileRejectsSymlink(t *testing.T) {
 	}
 }
 
+// TestPopTaskFlag verifies --task <id> is extracted from any position in the
+// args (both `--task <id>` and `--task=<id>`) and removed so it does not leak
+// into subcommand parsing. Absent → "".
+func TestPopTaskFlag(t *testing.T) {
+	// --task <id> form, mid-args.
+	rem, id := popTaskFlag([]string{"task", "--task", "T-123", "complete", "--summary", "x"})
+	if id != "T-123" {
+		t.Fatalf("id = %q, want T-123", id)
+	}
+	if got, want := strings.Join(rem, " "), "task complete --summary x"; got != want {
+		t.Fatalf("remaining = %q, want %q", got, want)
+	}
+
+	// --task=<id> form, leading.
+	rem, id = popTaskFlag([]string{"--task=T-456", "task", "complete"})
+	if id != "T-456" {
+		t.Fatalf("id = %q, want T-456", id)
+	}
+	if got, want := strings.Join(rem, " "), "task complete"; got != want {
+		t.Fatalf("remaining = %q, want %q", got, want)
+	}
+
+	// Absent — args untouched, id empty.
+	rem, id = popTaskFlag([]string{"task", "complete"})
+	if id != "" {
+		t.Fatalf("id = %q, want empty", id)
+	}
+	if got, want := strings.Join(rem, " "), "task complete"; got != want {
+		t.Fatalf("remaining = %q, want %q", got, want)
+	}
+}
+
+// TestTaskIDFromEnvFile verifies CS_CLOUD_TASK_ID is read from a .cs-cloud.env
+// file; a missing key or unreadable file yields "".
+func TestTaskIDFromEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, workflowrunner.TaskEnvFileName)
+	if err := os.WriteFile(path, []byte("# comment\nCS_CLOUD_TASK_ID=T-999\nCS_CLOUD_LOCAL_URL=http://x\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := taskIDFromEnvFile(path); got != "T-999" {
+		t.Fatalf("taskIDFromEnvFile = %q, want T-999", got)
+	}
+	// File without the key.
+	other := filepath.Join(dir, "other.env")
+	if err := os.WriteFile(other, []byte("CS_CLOUD_LOCAL_URL=http://x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskIDFromEnvFile(other); got != "" {
+		t.Fatalf("taskIDFromEnvFile = %q, want empty (no task id)", got)
+	}
+	// Missing file.
+	if got := taskIDFromEnvFile(filepath.Join(dir, "nope.env")); got != "" {
+		t.Fatalf("taskIDFromEnvFile = %q, want empty (missing file)", got)
+	}
+}
+
+// TestFindTaskRootByTaskID verifies the scan locates the task root whose
+// .cs-cloud.env carries the given CS_CLOUD_TASK_ID — even when the directory
+// name is NOT the task ID. That is the rework/resume case: the runner reuses a
+// prior round's directory but writes the CURRENT task id into .cs-cloud.env, so
+// locating by content (not by dir name) is what makes --task <id> sound.
+func TestFindTaskRootByTaskID(t *testing.T) {
+	root := t.TempDir()
+	// Rework simulation: dir named after a PREVIOUS task id; env carries CURRENT.
+	dir := filepath.Join(root, "ws-1", "tasks", "prev-task-id")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=curr-task-id\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A decoy task dir with a different id.
+	decoy := filepath.Join(root, "ws-1", "tasks", "other")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=someone-else\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findTaskRootByTaskID(root, "curr-task-id"); got != dir {
+		t.Fatalf("findTaskRootByTaskID = %q, want %q", got, dir)
+	}
+	if got := findTaskRootByTaskID(root, "missing"); got != "" {
+		t.Fatalf("findTaskRootByTaskID = %q, want empty (no match)", got)
+	}
+}
+
+// TestFindTaskRootByTaskID_PrefersPointer verifies the O(1) runner-written
+// pointer wins over the scan when present and its .cs-cloud.env still exists.
+func TestFindTaskRootByTaskID_PrefersPointer(t *testing.T) {
+	root := t.TempDir()
+	// Real task root with .cs-cloud.env carrying the task id.
+	realDir := filepath.Join(root, "ws-1", "tasks", "any-name")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=T-1\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	// Runner writes the pointer → realDir.
+	if err := workflowrunner.WriteTaskPointer(root, "T-1", realDir); err != nil {
+		t.Fatalf("write pointer: %v", err)
+	}
+	if got := findTaskRootByTaskID(root, "T-1"); got != realDir {
+		t.Fatalf("findTaskRootByTaskID = %q, want %q (pointer should win)", got, realDir)
+	}
+}
+
+// TestFindTaskRootByTaskID_StalePointerFallsBackToScan verifies a stale pointer
+// (target dir has no .cs-cloud.env, e.g. workdir GC'd but pointer leaked from a
+// crash) falls through to the scan.
+func TestFindTaskRootByTaskID_StalePointerFallsBackToScan(t *testing.T) {
+	root := t.TempDir()
+	// Stale pointer → a dir with no .cs-cloud.env.
+	if err := workflowrunner.WriteTaskPointer(root, "T-2", filepath.Join(root, "gone")); err != nil {
+		t.Fatalf("write pointer: %v", err)
+	}
+	// The real dir the scan should find.
+	realDir := filepath.Join(root, "ws-1", "tasks", "live")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=T-2\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if got := findTaskRootByTaskID(root, "T-2"); got != realDir {
+		t.Fatalf("findTaskRootByTaskID = %q, want %q (scan fallback after stale pointer)", got, realDir)
+	}
+}
+
+// TestLoadTaskEnvFileFrom_ExplicitDir verifies that when the agent passes an
+// explicit task-root path, cs-cloud reads .cs-cloud.env from there even though
+// the process cwd is somewhere else entirely (no upward walk needed).
+func TestLoadTaskEnvFileFrom_ExplicitDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=from-explicit\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	// cwd is an unrelated dir with no .cs-cloud.env.
+	t.Chdir(t.TempDir())
+	t.Setenv("CS_CLOUD_TASK_ID", "")
+
+	loadTaskEnvFileFrom(root)
+
+	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "from-explicit" {
+		t.Errorf("CS_CLOUD_TASK_ID = %q, want from-explicit (loaded from the passed dir)", got)
+	}
+}
+
+// TestWorkflowCmd_ConsumesTaskFlag verifies workflowCmd consumes `--task <id>`
+// at the workflow level so it never reaches subcommand dispatch (where it would
+// be treated as an unknown command). Uses a real app because the --task path
+// reads config to drive the scan; the id matches no dir, so the scan whiffs,
+// falls back to cwd walk-up, and dispatch reaches the task subcommand.
+func TestWorkflowCmd_ConsumesTaskFlag(t *testing.T) {
+	platform.SetDataDir(t.TempDir())
+	t.Setenv("COSTRICT_BASE_URL", "https://example.costrict.local")
+	a, err := app.New()
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	if err := workflowCmd(a, []string{"--task", "no-such-id", "task", "--help"}); err != nil {
+		t.Fatalf("workflowCmd leaked --task into subcommand dispatch or failed: %v", err)
+	}
+}
+
 func TestLoadTaskEnvFileIgnoresOversizedFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

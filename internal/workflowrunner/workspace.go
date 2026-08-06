@@ -20,6 +20,9 @@ func NewWorkspaceManager(root string) *WorkspaceManager {
 	return &WorkspaceManager{root: root}
 }
 
+// Root returns the workspaces root directory.
+func (wm *WorkspaceManager) Root() string { return wm.root }
+
 // validateID rejects IDs that could escape wm.root via path traversal. IDs must
 // be a single safe path component: no separators, no "."/"..".
 func validateID(id string) error {

@@ -135,12 +135,26 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 		if err := writeTaskEnvFile(worktree, env); err != nil {
 			return nil, fmt.Errorf("write task env: %w", err)
 		}
+		// Record a pointer (<runs>/<taskID> → worktree) so the in-task CLI can
+		// locate .cs-cloud.env in O(1) by task id. Best-effort: the CLI's scan
+		// fallback covers a missing/stale pointer. Removed when the session
+		// returns (defer); orphan pointers from a crash are tiny and age out
+		// with the workdir via GC.
+		if tr.workspaceManager != nil {
+			_ = WriteTaskPointer(tr.workspaceManager.Root(), payload.TaskID, worktree)
+			defer RemoveTaskPointer(tr.workspaceManager.Root(), payload.TaskID)
+		}
 		if err := writeTaskReposFile(worktree, payload, env); err != nil {
 			return nil, fmt.Errorf("write task repos: %w", err)
 		}
+		// Deterministically clone/update the delivery repo (fetch → inst → node)
+		// so the agent starts on node with upstream deliverables readable via
+		// inst. Best-effort: on failure the agent can still clone manually from
+		// .cs-cloud.repos, so a transient git error does not fail the task.
+		logDeliveryRepoPrepare(prepareDeliveryRepo(ctx, worktree, payload, env))
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
-		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, payload.Prompt, env, SessionPermissionBypass)
+		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, injectTaskEnvGuidance(payload.Prompt, payload.TaskID), env, SessionPermissionBypass)
 	}
 
 	agentPath, err := exec.LookPath(payload.Agent)
@@ -148,6 +162,25 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 		return nil, fmt.Errorf("resolve agent %q: %w", payload.Agent, err)
 	}
 	return tr.RunPrepared(ctx, payload, worktree, agentPath)
+}
+
+// injectTaskEnvGuidance prepends a short "Task Environment" section to the
+// agent prompt naming the task id, so the agent passes `--task <id>` to in-task
+// `cs-cloud workflow` commands and cs-cloud locates `.cs-cloud.env` by scanning
+// for that id — independent of the process cwd and robust to rework/resume
+// (where the task root directory is reused from a prior round but carries the
+// current task id in .cs-cloud.env). The id is short; multica does not know the
+// device-local path, so this is injected cs-cloud-side.
+func injectTaskEnvGuidance(prompt, taskID string) string {
+	var b strings.Builder
+	b.WriteString("---\n## Task Environment\n\n")
+	fmt.Fprintf(&b, "Your task id: %s\n", taskID)
+	b.WriteString("`cs-cloud workflow` commands read task context from `.cs-cloud.env`. Pass your task id so they locate it regardless of your current directory — add `--task` to the command:\n")
+	fmt.Fprintf(&b, "  cs-cloud workflow --task %s task complete --summary \"...\"\n", taskID)
+	fmt.Fprintf(&b, "\nRun `cs-cloud workflow --task %s task complete --summary \"<one-line summary>\"` as your LAST action.\n", taskID)
+	b.WriteString("If its output says completion was NOT delivered, re-run it with `--task`. That is not a final failure — the completion signal must be sent. If it still fails after 3 retries, report the output verbatim instead of looping.\n")
+	b.WriteString("\n---\n\n")
+	return b.String() + prompt
 }
 
 // Run prepares the worktree and runs the agent. It returns the combined
@@ -211,6 +244,7 @@ func (tr *TaskRunner) RunPrepared(ctx context.Context, payload workflow.TaskRunP
 	if err := writeTaskReposFile(worktree, payload, env); err != nil {
 		return nil, fmt.Errorf("write task repos: %w", err)
 	}
+	logDeliveryRepoPrepare(prepareDeliveryRepo(ctx, worktree, payload, env))
 	cmd.Env = env
 
 	return cmd.CombinedOutput()
