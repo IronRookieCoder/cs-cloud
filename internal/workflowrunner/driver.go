@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -372,6 +373,7 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 	if err != nil {
 		return d.failTask(payload.TaskID, err, "")
 	}
+	worktree = d.alignResumedSessionWorkdir(ctx, payload, worktree)
 	// Record payload + taskRoot on the running task so the localserver's
 	// repo-checkout RPC can serve the task's context without the CLI
 	// re-sending it. worktree is the task root after Task 6's Prepare change.
@@ -748,6 +750,49 @@ func (d *Driver) bindSession(ctx context.Context, payload workflow.TaskRunPayloa
 
 	logger.Info("workflow: bound session %s to task %s node_run %s", sessionID, payload.TaskID, payload.NodeRunID)
 	return sessionID, nil
+}
+
+// alignResumedSessionWorkdir points the task workdir at the resumed session's
+// actual cwd. A resumed csc session keeps the cwd of the task that created it
+// (typically the previous phase's task dir), while the server does not always
+// send prior_work_dir for the new task — Prepare then returns a fresh dir and
+// the in-task CLI, which resolves CS_CLOUD_TASK_ID from <cwd>/.cs-cloud.env,
+// would signal the previous, already-finished task (observed as a critic's
+// approve 409ing against the completed worker task, after which the run was
+// failed as agent_incomplete/agent_empty_output). Aligning the workdir makes
+// writeTaskEnvFile refresh the env file where the session actually runs.
+//
+// The session's cwd is the ground truth, so this runs even when
+// prior_work_dir is set: a pin recorded during a mismatched run would
+// otherwise perpetuate the wrong dir into every retry. Unknown sessions (csc
+// serve restarted and dropped its store) keep the prepared workdir — the run
+// recreates the session there with the current env.
+func (d *Driver) alignResumedSessionWorkdir(ctx context.Context, payload workflow.TaskRunPayload, worktree string) string {
+	if payload.Agent != AgentCsc || payload.PriorSessionID == "" {
+		return worktree
+	}
+	if d.deps == nil || d.deps.SessionRunner == nil {
+		return worktree
+	}
+	resolver, ok := d.deps.SessionRunner.(SessionDirectoryResolver)
+	if !ok {
+		return worktree
+	}
+	dir, err := resolver.SessionDirectory(ctx, payload.PriorSessionID)
+	if err != nil {
+		logger.Warn("workflow: task %s resume: resolve session %s cwd failed, keeping prepared workdir: %v",
+			payload.TaskID, payload.PriorSessionID, err)
+		return worktree
+	}
+	if dir == "" || !dirExists(dir) {
+		return worktree
+	}
+	if filepath.Clean(dir) == filepath.Clean(worktree) {
+		return worktree
+	}
+	logger.Info("workflow: task %s resume: aligning workdir to session %s cwd %s (prepared %s)",
+		payload.TaskID, payload.PriorSessionID, dir, worktree)
+	return dir
 }
 
 func chatSessionTitle(payload workflow.TaskRunPayload) string {

@@ -30,6 +30,13 @@ type SessionAborter interface {
 	AbortSession(ctx context.Context, sessionID string) error
 }
 
+// SessionDirectoryResolver reports the actual working directory of a bound
+// conversation session. A resumed session keeps the cwd it was created with,
+// which can differ from the current task's prepared workdir.
+type SessionDirectoryResolver interface {
+	SessionDirectory(ctx context.Context, sessionID string) (string, error)
+}
+
 // Dependencies holds the external dependencies required by the workflow driver.
 type Dependencies struct {
 	BackendBaseURL string

@@ -426,25 +426,49 @@ func (a *Agent) createSessionWithEnv(ctx context.Context, sessionID, cwd string,
 	return a.waitForSessionReady(ctx, sessionID)
 }
 
-func (a *Agent) getSessionLifecycle(ctx context.Context, sessionID string) (status string, found bool, err error) {
+// getSession fetches a session by id. found=false (with nil error) means the
+// csc serve store has no such session — e.g. after a serve restart — so the
+// caller should fall back to creating it fresh.
+func (a *Agent) getSession(ctx context.Context, sessionID string) (session *cscSession, found bool, err error) {
 	resp, err := a.doRawGet(ctx, "/session/"+sessionID)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		body, _ := io.ReadAll(resp.Body)
-		return "", false, fmt.Errorf("get session status: HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, false, fmt.Errorf("get session: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var session cscSession
-	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
-		return "", false, fmt.Errorf("parse session status: %w", err)
+	var parsed cscSession
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, false, fmt.Errorf("parse session: %w", err)
+	}
+	return &parsed, true, nil
+}
+
+func (a *Agent) getSessionLifecycle(ctx context.Context, sessionID string) (status string, found bool, err error) {
+	session, found, err := a.getSession(ctx, sessionID)
+	if err != nil || !found {
+		return "", found, err
 	}
 	return session.Status, true, nil
+}
+
+// SessionDirectory returns the working directory of an existing csc session.
+// A resumed session keeps the cwd it was created with — typically a previous
+// task's workdir — which can differ from the current task's prepared workdir.
+// It returns ("", nil) when the session is unknown so callers can fall back
+// to creating the session fresh in the new workdir.
+func (a *Agent) SessionDirectory(ctx context.Context, sessionID string) (string, error) {
+	session, found, err := a.getSession(ctx, sessionID)
+	if err != nil || !found {
+		return "", err
+	}
+	return session.Directory, nil
 }
 
 func (a *Agent) waitForSessionReady(ctx context.Context, sessionID string) error {
