@@ -494,6 +494,53 @@ func TestBuildEnvInjectsLocalServerURL(t *testing.T) {
 	}
 }
 
+// TestBuildEnv_InjectsDeliverableReports verifies payload.Deliverables[].Report
+// is serialized into CS_CLOUD_DELIVERABLE_REPORTS so the in-task CLI can honor
+// a non-default submit endpoint/body field per deliverable (R4). Deliverables
+// without a Report are omitted; the CLI falls back to its hardcoded defaults.
+func TestBuildEnv_InjectsDeliverableReports(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Deliverables: []workflow.DeliverableSpec{
+			{ID: "d1", Report: workflow.ReportSpec{Endpoint: "/api/v2/d1/submit", BodyField: "merge_request_url"}},
+			{ID: "d2"}, // no Report → omitted
+		},
+	}, t.TempDir())
+	var reports string
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			reports = v
+		}
+	}
+	if reports == "" {
+		t.Fatal("CS_CLOUD_DELIVERABLE_REPORTS not injected despite a deliverable with a Report")
+	}
+	for _, want := range []string{`"deliverable_id":"d1"`, `"endpoint":"/api/v2/d1/submit"`, `"body_field":"merge_request_url"`} {
+		if !strings.Contains(reports, want) {
+			t.Errorf("reports missing %q: %s", want, reports)
+		}
+	}
+	if strings.Contains(reports, `"deliverable_id":"d2"`) {
+		t.Errorf("d2 (no Report) should be omitted: %s", reports)
+	}
+}
+
+// TestBuildEnv_OmitsDeliverableReportsWhenNoneHasReport verifies the env var
+// stays absent when no deliverable carries a Report, so the CLI falls back.
+func TestBuildEnv_OmitsDeliverableReportsWhenNoneHasReport(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Deliverables: []workflow.DeliverableSpec{{ID: "d1"}}, // no Report
+	}, t.TempDir())
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			t.Fatalf("CS_CLOUD_DELIVERABLE_REPORTS should be absent when no deliverable has a Report: %s", e)
+		}
+	}
+}
+
 // TestWriteTaskEnvFile_PersistsOnlyCSCloudVars verifies the task context is
 // written to .cs-cloud.env (only CS_CLOUD_* keys), so in-task CLIs can read it
 // from a file instead of relying on env propagation.

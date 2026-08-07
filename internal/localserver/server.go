@@ -109,9 +109,6 @@ func New(opts ...Option) *Server {
 	for _, o := range opts {
 		o(s)
 	}
-	// Default to a process-local random API key when none is configured so the
-	// localserver is never an unauthenticated passthrough. See ensureLocalAPIKey.
-	ensureLocalAPIKey(s.cfg)
 	s.ringBuffer = NewRingBuffer(s.eventBus)
 
 	// Initialize host event watchers
