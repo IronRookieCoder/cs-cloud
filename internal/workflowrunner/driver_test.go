@@ -1067,6 +1067,181 @@ func TestExecute_ResumeFailureRetriesFresh(t *testing.T) {
 	}
 }
 
+// cwdAwareSessionRunner is a SessionRunner that also reports the resumed
+// session's actual cwd (SessionDirectoryResolver), simulating a session whose
+// cwd still points at the previous task's workdir.
+type cwdAwareSessionRunner struct {
+	dir   string // resumed session's actual cwd
+	ranIn string
+	onRun func()
+}
+
+func (f *cwdAwareSessionRunner) RunSession(_ context.Context, _, worktree, _ string, _ []string, _ string) ([]byte, error) {
+	f.ranIn = worktree
+	if f.onRun != nil {
+		f.onRun()
+	}
+	return []byte("ok"), nil
+}
+
+func (f *cwdAwareSessionRunner) SessionDirectory(_ context.Context, _ string) (string, error) {
+	return f.dir, nil
+}
+
+// TestExecute_ResumeAlignsWorkdirToSessionCwd verifies that a resumed csc run
+// uses the session's actual cwd as the task workdir, so writeTaskEnvFile
+// refreshes .cs-cloud.env where the in-task CLI reads it. Regression test for
+// the incident where a critic task resumed the worker's session: the session
+// cwd still held the worker's .cs-cloud.env with the worker's task id, the
+// approve signal 409ed against the finished worker task, and the critic task
+// was failed as agent_incomplete/agent_empty_output.
+func TestExecute_ResumeAlignsWorkdirToSessionCwd(t *testing.T) {
+	installFakeAgent(t, AgentCsc)
+
+	sessionDir := t.TempDir() // stands in for the prior task's workdir
+	runner := &cwdAwareSessionRunner{dir: sessionDir}
+	fm := newFakeBackend(workflow.Workspace{ID: "ws-1", Name: "one"})
+	ts := httptest.NewServer(fm.handler())
+	defer ts.Close()
+
+	cfg := workflow.Config{
+		WorkspacesRoot:    t.TempDir(),
+		CacheDir:          t.TempDir(),
+		SyncInterval:      time.Hour,
+		GCInterval:        time.Hour,
+		HeartbeatInterval: time.Hour,
+		AgentTimeout:      time.Minute,
+		AllowedAgents:     []string{AgentCsc},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		BackendBaseURL: ts.URL,
+		UserBaseURL:    ts.URL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "x"}, nil },
+		DeviceID:       func() (string, error) { return "dev-1", nil },
+		SessionRunner:  runner,
+	})
+	if err := d.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer d.Stop()
+
+	waitFor(t, "registration", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, ok := d.registrations["ws-1"]
+		return ok
+	})
+
+	runner.onRun = func() {
+		_ = d.SignalTaskCompletion("t-critic", agent.CompletionSignal{Action: "complete", Summary: "ok"})
+	}
+
+	err := d.execute(context.Background(), workflow.TaskRunPayload{
+		TaskID: "t-critic", WorkspaceID: "ws-1", AgentID: "a1", NodeRunID: "nr1",
+		Agent: AgentCsc, Prompt: "review work", PriorSessionID: "sess-prior",
+	}, &taskRecord{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if runner.ranIn != sessionDir {
+		t.Errorf("RunSession worktree = %q, want session cwd %q", runner.ranIn, sessionDir)
+	}
+	// The env file must land in the session's actual cwd with the CURRENT
+	// task id — this is what the in-task CLI resolves its target task from.
+	b, err := os.ReadFile(filepath.Join(sessionDir, TaskEnvFileName))
+	if err != nil {
+		t.Fatalf("read env file in session cwd: %v", err)
+	}
+	if !strings.Contains(string(b), EnvTaskID+"=t-critic") {
+		t.Errorf("env file missing current task id, got:\n%s", string(b))
+	}
+	// The pinned work_dir feeds the next round's prior_work_dir; it must
+	// record the aligned dir so retries stay on the session cwd.
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.pinSessions) != 1 || fm.pinSessions[0].WorkDir != sessionDir {
+		t.Errorf("pin work_dir = %+v, want %q", fm.pinSessions, sessionDir)
+	}
+}
+
+func TestAlignResumedSessionWorkdir(t *testing.T) {
+	existing := t.TempDir()
+
+	run := func(payload workflow.TaskRunPayload, resolver SessionRunner, prepared string) string {
+		d := &Driver{deps: &Dependencies{SessionRunner: resolver}}
+		return d.alignResumedSessionWorkdir(context.Background(), payload, prepared)
+	}
+	resumePayload := workflow.TaskRunPayload{TaskID: "t1", Agent: AgentCsc, PriorSessionID: "sess-1"}
+
+	t.Run("non-csc agent keeps prepared workdir", func(t *testing.T) {
+		p := resumePayload
+		p.Agent = "fakeagent"
+		if got := run(p, &cwdAwareSessionRunner{dir: existing}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("no prior session keeps prepared workdir", func(t *testing.T) {
+		p := resumePayload
+		p.PriorSessionID = ""
+		if got := run(p, &cwdAwareSessionRunner{dir: existing}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("runner without resolver keeps prepared workdir", func(t *testing.T) {
+		if got := run(resumePayload, &flakySessionRunner{}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("unknown session keeps prepared workdir", func(t *testing.T) {
+		if got := run(resumePayload, &cwdAwareSessionRunner{dir: ""}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("missing session dir keeps prepared workdir", func(t *testing.T) {
+		gone := filepath.Join(t.TempDir(), "deleted")
+		if got := run(resumePayload, &cwdAwareSessionRunner{dir: gone}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("resolver error keeps prepared workdir", func(t *testing.T) {
+		if got := run(resumePayload, &errDirResolver{err: errors.New("boom")}, "/prepared"); got != "/prepared" {
+			t.Errorf("got %q, want /prepared", got)
+		}
+	})
+	t.Run("same dir is a no-op", func(t *testing.T) {
+		if got := run(resumePayload, &cwdAwareSessionRunner{dir: existing}, existing); got != existing {
+			t.Errorf("got %q, want %q", got, existing)
+		}
+	})
+	t.Run("different session cwd wins", func(t *testing.T) {
+		if got := run(resumePayload, &cwdAwareSessionRunner{dir: existing}, "/prepared"); got != existing {
+			t.Errorf("got %q, want %q", got, existing)
+		}
+	})
+	t.Run("aligns even when prior workdir was provided", func(t *testing.T) {
+		prepared := t.TempDir()
+		p := resumePayload
+		p.PriorWorkDir = prepared // a stale pin must not beat the session cwd
+		if got := run(p, &cwdAwareSessionRunner{dir: existing}, prepared); got != existing {
+			t.Errorf("got %q, want %q", got, existing)
+		}
+	})
+}
+
+// errDirResolver reports a resolver failure (e.g. csc serve unreachable).
+type errDirResolver struct {
+	err error
+}
+
+func (f *errDirResolver) RunSession(_ context.Context, _, _, _ string, _ []string, _ string) ([]byte, error) {
+	return []byte("ok"), nil
+}
+
+func (f *errDirResolver) SessionDirectory(_ context.Context, _ string) (string, error) {
+	return "", f.err
+}
+
 // TestExecute_NonResumeFailureDoesNotRetry verifies that when there is no prior
 // session to resume (first round), a RunCSCSession failure does NOT trigger the
 // fresh-session retry — the retry path is gated on PriorSessionID != "".
