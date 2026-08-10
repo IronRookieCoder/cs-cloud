@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -66,6 +65,27 @@ func TestGetSessionBinding(t *testing.T) {
 		_, err := c.GetSessionBinding(context.Background(), "sess-missing")
 		if !errors.Is(err, ErrSessionNotBound) {
 			t.Fatalf("expected ErrSessionNotBound, got %v", err)
+		}
+	})
+
+	t.Run("500 returns non-sentinel error", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"boom"}`))
+		}))
+		defer ts.Close()
+
+		c := NewClient(ts.URL, "", tokenProvider("token-123"))
+		_, err := c.GetSessionBinding(context.Background(), "sess-broken")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if errors.Is(err, ErrSessionNotBound) {
+			t.Fatal("unexpected ErrSessionNotBound")
+		}
+		var stErr *StatusError
+		if !errors.As(err, &stErr) || stErr.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("expected *StatusError with 500, got %v", err)
 		}
 	})
 }
@@ -134,8 +154,9 @@ func TestResumeBeginTask(t *testing.T) {
 		if errors.Is(err, ErrTaskNotResumable) {
 			t.Fatal("unexpected ErrTaskNotResumable")
 		}
-		if !strings.Contains(err.Error(), "500") {
-			t.Fatalf("expected 500 in error, got %v", err)
+		var stErr *StatusError
+		if !errors.As(err, &stErr) || stErr.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("expected *StatusError with 500, got %v", err)
 		}
 	})
 }
