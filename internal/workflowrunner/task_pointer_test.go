@@ -68,3 +68,39 @@ func TestWriteTaskPointerRejectsTraversal(t *testing.T) {
 		t.Fatal("expected error for path-traversal task id")
 	}
 }
+
+// TestWriteTaskPointerDoesNotFollowSymlink verifies the atomic temp+rename write
+// replaces a pre-existing symlink at the pointer path instead of following it.
+// A direct os.WriteFile would follow the link and overwrite the target's bytes;
+// the write path must match ReadTaskPointer's symlink defense so a symlink planted
+// at <runs>/<taskID> cannot redirect the pointer write at an outside file.
+func TestWriteTaskPointerDoesNotFollowSymlink(t *testing.T) {
+	root := t.TempDir()
+	runsDir := RunsDir(root)
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatalf("mkdir runs: %v", err)
+	}
+	target := filepath.Join(root, "outside-target")
+	const targetContent = "do-not-touch"
+	if err := os.WriteFile(target, []byte(targetContent), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(runsDir, "task-symlink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported on this host: %v", err)
+	}
+	if err := WriteTaskPointer(root, "task-symlink", "/real/worktree"); err != nil {
+		t.Fatalf("WriteTaskPointer: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != targetContent {
+		t.Fatalf("symlink target was modified: %q, want %q", string(got), targetContent)
+	}
+	// The pointer path is now a regular file ReadTaskPointer accepts.
+	if g := ReadTaskPointer(root, "task-symlink"); g != "/real/worktree" {
+		t.Fatalf("ReadTaskPointer = %q, want /real/worktree", g)
+	}
+}

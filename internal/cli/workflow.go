@@ -212,7 +212,14 @@ func findTaskRootByTaskID(workspacesRoot, taskID string) string {
 	// root). Confirm .cs-cloud.env is actually present so a stale pointer (workdir
 	// GC'd but pointer leaked from a crash) falls through to the scan.
 	if ptr := workflowrunner.ReadTaskPointer(workspacesRoot, taskID); ptr != "" {
-		if info, err := os.Lstat(filepath.Join(ptr, workflowrunner.TaskEnvFileName)); err == nil && info.Mode().IsRegular() {
+		// Confirm the pointer's env file actually carries THIS task id. A stale
+		// pointer leaked from a crash may point at a directory whose env file now
+		// identifies a different task; without this check the CLI would load that
+		// task's context and signal completion for the wrong task. A mismatch
+		// falls through to the scan, exactly like a missing pointer.
+		envPath := filepath.Join(ptr, workflowrunner.TaskEnvFileName)
+		if info, err := os.Lstat(envPath); err == nil && info.Mode().IsRegular() &&
+			taskIDFromEnvFile(envPath) == taskID {
 			return ptr
 		}
 	}

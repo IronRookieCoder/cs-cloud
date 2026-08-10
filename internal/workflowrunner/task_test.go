@@ -2,6 +2,7 @@ package workflowrunner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -498,31 +499,45 @@ func TestBuildEnvInjectsLocalServerURL(t *testing.T) {
 // is serialized into CS_CLOUD_DELIVERABLE_REPORTS so the in-task CLI can honor
 // a non-default submit endpoint/body field per deliverable (R4). Deliverables
 // without a Report are omitted; the CLI falls back to its hardcoded defaults.
+//
+// The contract is decoded (not string-matched) so a missing or renamed field is
+// caught. ReportSpec.Method is set on the fixture but NOT asserted: the runner
+// serializes only id/endpoint/body_field today (Method is not yet plumbed end to
+// end — reportToServer always POSTs), so the test pins the wired fields only.
 func TestBuildEnv_InjectsDeliverableReports(t *testing.T) {
 	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
 	env := tr.buildEnv(workflow.TaskRunPayload{
 		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
 		Deliverables: []workflow.DeliverableSpec{
-			{ID: "d1", Report: workflow.ReportSpec{Endpoint: "/api/v2/d1/submit", BodyField: "merge_request_url"}},
+			{ID: "d1", Report: workflow.ReportSpec{Endpoint: "/api/v2/d1/submit", Method: "POST", BodyField: "merge_request_url"}},
 			{ID: "d2"}, // no Report → omitted
 		},
 	}, t.TempDir())
-	var reports string
+	var raw string
 	for _, e := range env {
 		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
-			reports = v
+			raw = v
 		}
 	}
-	if reports == "" {
+	if raw == "" {
 		t.Fatal("CS_CLOUD_DELIVERABLE_REPORTS not injected despite a deliverable with a Report")
 	}
-	for _, want := range []string{`"deliverable_id":"d1"`, `"endpoint":"/api/v2/d1/submit"`, `"body_field":"merge_request_url"`} {
-		if !strings.Contains(reports, want) {
-			t.Errorf("reports missing %q: %s", want, reports)
-		}
+	var targets []struct {
+		ID        string `json:"deliverable_id"`
+		Endpoint  string `json:"endpoint"`
+		BodyField string `json:"body_field"`
 	}
-	if strings.Contains(reports, `"deliverable_id":"d2"`) {
-		t.Errorf("d2 (no Report) should be omitted: %s", reports)
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		t.Fatalf("decode CS_CLOUD_DELIVERABLE_REPORTS: %v: %s", err, raw)
+	}
+	if len(targets) != 1 || targets[0].ID != "d1" {
+		t.Fatalf("targets = %+v, want exactly one entry for d1", targets)
+	}
+	if targets[0].Endpoint != "/api/v2/d1/submit" {
+		t.Errorf("endpoint = %q, want /api/v2/d1/submit", targets[0].Endpoint)
+	}
+	if targets[0].BodyField != "merge_request_url" {
+		t.Errorf("body_field = %q, want merge_request_url", targets[0].BodyField)
 	}
 }
 
@@ -537,6 +552,25 @@ func TestBuildEnv_OmitsDeliverableReportsWhenNoneHasReport(t *testing.T) {
 	for _, e := range env {
 		if k, _, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
 			t.Fatalf("CS_CLOUD_DELIVERABLE_REPORTS should be absent when no deliverable has a Report: %s", e)
+		}
+	}
+}
+
+// TestBuildEnv_ClearsStaleDeliverableReports verifies a stale
+// CS_CLOUD_DELIVERABLE_REPORTS inherited from the parent process env or
+// payload.Env is dropped when the current task has no Report contract, so the
+// in-task CLI cannot accidentally report to a prior task's endpoint.
+func TestBuildEnv_ClearsStaleDeliverableReports(t *testing.T) {
+	t.Setenv("CS_CLOUD_DELIVERABLE_REPORTS", "stale-from-parent")
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Env:          map[string]string{"CS_CLOUD_DELIVERABLE_REPORTS": "stale-from-payload"},
+		Deliverables: []workflow.DeliverableSpec{{ID: "d1"}}, // no Report
+	}, t.TempDir())
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			t.Fatalf("stale CS_CLOUD_DELIVERABLE_REPORTS should be cleared when the task has no Report: %s", v)
 		}
 	}
 }

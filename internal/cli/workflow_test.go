@@ -228,6 +228,37 @@ func TestFindTaskRootByTaskID_StalePointerFallsBackToScan(t *testing.T) {
 	}
 }
 
+// TestFindTaskRootByTaskID_PointerEnvMismatchFallsBackToScan verifies a pointer
+// whose target carries a .cs-cloud.env for a DIFFERENT task id (a leaked pointer
+// whose directory was reused and now identifies another task) does not
+// short-circuit on the pointer. It falls through to the scan so the CLI cannot
+// load another task's context and signal completion for the wrong task.
+func TestFindTaskRootByTaskID_PointerEnvMismatchFallsBackToScan(t *testing.T) {
+	root := t.TempDir()
+	// Pointer → a dir whose .cs-cloud.env carries a DIFFERENT task id.
+	mismatchDir := filepath.Join(root, "reused")
+	if err := os.MkdirAll(mismatchDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mismatchDir, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=some-other-task\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if err := workflowrunner.WriteTaskPointer(root, "T-3", mismatchDir); err != nil {
+		t.Fatalf("write pointer: %v", err)
+	}
+	// Real dir the scan should find, carrying the matching id.
+	realDir := filepath.Join(root, "ws-1", "tasks", "live")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, workflowrunner.TaskEnvFileName), []byte("CS_CLOUD_TASK_ID=T-3\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if got := findTaskRootByTaskID(root, "T-3"); got != realDir {
+		t.Fatalf("findTaskRootByTaskID = %q, want %q (scan fallback when pointer env carries a different task id)", got, realDir)
+	}
+}
+
 // TestLoadTaskEnvFileFrom_ExplicitDir verifies that when the agent passes an
 // explicit task-root path, cs-cloud reads .cs-cloud.env from there even though
 // the process cwd is somewhere else entirely (no upward walk needed).

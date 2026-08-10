@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,15 +15,26 @@ import (
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	out, err := gitCmdErr(t, dir, args...)
+	if err != nil {
+		t.Fatalf("git %v in %s: %v", args, dir, err)
+	}
+	return out
+}
+
+// gitCmdErr runs git and returns its stdout and error without failing the
+// test, for assertions where a non-zero exit is the expected outcome.
+func gitCmdErr(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, stderr.String())
+		return string(out), fmt.Errorf("%s: %s", err, bytes.TrimSpace(stderr.Bytes()))
 	}
-	return string(out)
+	return string(out), nil
 }
 
 func gitCommit(t *testing.T, dir, path, content string) {
@@ -127,6 +139,12 @@ func TestPrepareDeliveryRepo_NoDeliveryRepo(t *testing.T) {
 // the local node to the server's node even when the worker force-pushed (rewrote
 // node history) so the local and remote diverged — a plain `pull --ff-only`
 // would fail non-ff here. This is the rework scenario the -B sequence exists for.
+//
+// To exercise a real force-push (not just a fast-forward append), origin's node
+// starts with a "round 0" commit that the first clone observes; the worker then
+// resets node back to base and commits a different file, so origin/node's history
+// is rewritten (the round-0 commit is no longer an ancestor) — exactly what the
+// worker does each rework round.
 func TestPrepareDeliveryRepo_ForcePushDivergence(t *testing.T) {
 	origin := t.TempDir()
 	gitCmd(t, origin, "init")
@@ -136,6 +154,10 @@ func TestPrepareDeliveryRepo_ForcePushDivergence(t *testing.T) {
 	gitCmd(t, origin, "branch", "-m", "main")
 	gitCmd(t, origin, "branch", "inst")
 	gitCmd(t, origin, "branch", "node", "inst")
+	// Round 0: origin's node carries seed.md, which the first clone observes.
+	gitCmd(t, origin, "checkout", "node")
+	gitCommit(t, origin, "seed.md", "seed\n")
+	gitCmd(t, origin, "checkout", "main")
 
 	worktree := t.TempDir()
 	payload := workflow.TaskRunPayload{
@@ -150,10 +172,12 @@ func TestPrepareDeliveryRepo_ForcePushDivergence(t *testing.T) {
 	gitCmd(t, cloneDir, "config", "user.email", "t@t")
 	gitCmd(t, cloneDir, "config", "user.name", "T")
 
-	// Worker round 1: local node advances to base+worker.md.
+	// Worker round 1: local node advances on top of seed.
 	gitCommit(t, cloneDir, "worker.md", "round 1\n")
-	// Meanwhile origin's node is rewritten to a DIFFERENT commit (force-push).
+	// Meanwhile origin REWRITES node: reset it back to base (dropping seed) and
+	// commit a different file — a non-fast-forward force-push, not an append.
 	gitCmd(t, origin, "checkout", "node")
+	gitCmd(t, origin, "reset", "--hard", "main")
 	gitCommit(t, origin, "origin.md", "origin rewrite\n")
 	gitCmd(t, origin, "checkout", "main")
 
@@ -171,5 +195,27 @@ func TestPrepareDeliveryRepo_ForcePushDivergence(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitCmd(t, cloneDir, "show", "node:origin.md")); got != "origin rewrite" {
 		t.Fatalf("node:origin.md = %q, want origin rewrite", got)
+	}
+	// The rewritten node no longer carries the round-0 seed the worker discarded.
+	if _, err := gitCmdErr(t, cloneDir, "show", "node:seed.md"); err == nil {
+		t.Fatalf("node:seed.md should be absent after the force-push rewrite")
+	}
+}
+
+// TestPrepareDeliveryRepo_RejectsTraversalAlias verifies a delivery repo alias
+// that would escape the worktree (e.g. "../escape") is rejected before any git
+// operation runs, so a malformed alias cannot clone outside the task workdir.
+func TestPrepareDeliveryRepo_RejectsTraversalAlias(t *testing.T) {
+	worktree := t.TempDir()
+	payload := workflow.TaskRunPayload{
+		Repos: []workflow.RepoSpec{{Role: "delivery", URL: "file:///unused", Alias: "../escape"}},
+	}
+	env := []string{"CS_CLOUD_GITEA_INST_BRANCH=inst", "CS_CLOUD_GITEA_NODE_BRANCH=node"}
+	if err := prepareDeliveryRepo(context.Background(), worktree, payload, env); err == nil {
+		t.Fatal("expected error for path-traversal alias, got nil")
+	}
+	escapeDir := filepath.Join(worktree, "..", "escape")
+	if dirExists(escapeDir) {
+		t.Fatalf("traversal alias escaped worktree: %s was created", escapeDir)
 	}
 }

@@ -41,6 +41,12 @@ const (
 	// attached to in-task completion callbacks so they pass the localserver's
 	// apiAuth middleware instead of 401-ing.
 	EnvLocalServerAPIKey = "CS_CLOUD_LOCAL_API_KEY"
+	// deliveryRepoPrepareTimeout bounds delivery repo clone/fetch so a stalled
+	// Git operation cannot block session startup indefinitely when the caller
+	// context has no deadline. Generous because delivery repos can be large and
+	// preparation is best-effort: a timeout only logs a warning, and the agent
+	// can still clone manually from .cs-cloud.repos.
+	deliveryRepoPrepareTimeout = 2 * time.Minute
 	// TaskEnvFileName is the file cs-cloud writes into each task workdir
 	// containing the CS_CLOUD_* task variables. In-task CLIs load it (see
 	// cli.loadTaskEnvFile) so they resolve task context from a file rather than
@@ -150,8 +156,14 @@ func (tr *TaskRunner) RunCSCSession(ctx context.Context, payload workflow.TaskRu
 		// Deterministically clone/update the delivery repo (fetch → inst → node)
 		// so the agent starts on node with upstream deliverables readable via
 		// inst. Best-effort: on failure the agent can still clone manually from
-		// .cs-cloud.repos, so a transient git error does not fail the task.
-		logDeliveryRepoPrepare(prepareDeliveryRepo(ctx, worktree, payload, env))
+		// .cs-cloud.repos, so a transient git error does not fail the task. Run
+		// it under a dedicated bounded context so a stalled clone/fetch cannot
+		// block session startup indefinitely (the caller ctx may have no
+		// deadline); the agent session ctx below is derived from the original
+		// ctx, so a prepare timeout does not shorten the session itself.
+		prepareCtx, prepareCancel := context.WithTimeout(ctx, deliveryRepoPrepareTimeout)
+		logDeliveryRepoPrepare(prepareDeliveryRepo(prepareCtx, worktree, payload, env))
+		prepareCancel()
 		ctx, cancel := tr.withAgentTimeout(ctx)
 		defer cancel()
 		return tr.sessionRunner.RunSession(ctx, sessionID, worktree, injectTaskEnvGuidance(payload.Prompt, payload.TaskID), env, SessionPermissionBypass)
@@ -706,7 +718,10 @@ func (tr *TaskRunner) buildEnv(payload workflow.TaskRunPayload, worktree string)
 	}
 	// Per-deliverable Report contracts (endpoint/body field) from the payload,
 	// so the in-task CLI honors multica's Report instead of hardcoding the
-	// submit path (R4). Empty when no deliverable carries a Report.
+	// submit path (R4). Drop any value inherited from the parent process env or
+	// payload.Env first: a task with no Report contract must NOT keep a stale
+	// value from a prior task, which would send reports to the wrong endpoint.
+	env = unsetEnv(env, "CS_CLOUD_DELIVERABLE_REPORTS")
 	if raw := deliverableReportTargetsJSON(payload.Deliverables); raw != "" {
 		env = setEnv(env, "CS_CLOUD_DELIVERABLE_REPORTS", raw)
 	}
@@ -754,4 +769,19 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+// unsetEnv removes every entry for key from env (there is normally one, but a
+// caller may have appended duplicates). Used to drop task-scoped values that
+// must not leak from the parent process env or payload.Env into a task that has
+// no such contract — e.g. CS_CLOUD_DELIVERABLE_REPORTS.
+func unsetEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
 }

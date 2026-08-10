@@ -20,6 +20,12 @@ func RunsDir(workspacesRoot string) string {
 // RemoveTaskPointer when the session ends; orphan pointers left by a process
 // crash are tiny, ignored by the scan fallback, and age out with the workdir.
 // taskID is validated (single path component) so it cannot escape RunsDir.
+//
+// The write goes through a temp file in RunsDir and atomically renames onto the
+// final path. A direct os.WriteFile would follow a pre-existing symlink at
+// <runs>/<taskID> and truncate its target; ReadTaskPointer already rejects
+// symlinks on read, and this makes the write path match that defense — a symlink
+// at the pointer path is replaced, not followed.
 func WriteTaskPointer(workspacesRoot, taskID, taskRoot string) error {
 	if err := validateID(taskID); err != nil {
 		return err
@@ -28,7 +34,7 @@ func WriteTaskPointer(workspacesRoot, taskID, taskRoot string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, taskID), []byte(taskRoot+"\n"), 0o600)
+	return writeAtomicFile(dir, taskID, ".task-pointer-*", []byte(taskRoot+"\n"), 0o600)
 }
 
 // RemoveTaskPointer deletes the pointer for taskID. Best-effort: a missing file

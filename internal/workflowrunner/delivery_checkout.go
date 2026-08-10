@@ -49,6 +49,13 @@ func prepareDeliveryRepo(ctx context.Context, worktree string, payload workflow.
 	if alias == "" {
 		alias = "delivery"
 	}
+	// Validate the alias is a single path component so a value like "../other"
+	// (server misconfiguration, or a future caller that lets the agent influence
+	// the alias) cannot make git clone/fetch operate outside the task worktree.
+	// Same rule the task id already enforces via validateID.
+	if err := validateID(alias); err != nil {
+		return fmt.Errorf("delivery repo alias %q invalid: %w", alias, err)
+	}
 	cloneDir := filepath.Join(worktree, alias)
 
 	if !dirExists(cloneDir) {
