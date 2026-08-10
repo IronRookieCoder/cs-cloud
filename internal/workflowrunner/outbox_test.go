@@ -64,6 +64,30 @@ func TestOutbox_MarkDoneRemovesFromPending(t *testing.T) {
 	}
 }
 
+func TestOutbox_MarkDoneNeverAddedNoOp(t *testing.T) {
+	o := newTestOutbox(t)
+
+	if err := o.MarkDone("never-added"); err != nil {
+		t.Fatalf("MarkDone on unknown fact_id should succeed, got: %v", err)
+	}
+
+	pending, err := o.Pending()
+	if err != nil {
+		t.Fatalf("Pending failed: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected 0 pending facts, got %d", len(pending))
+	}
+
+	doneEntries, err := os.ReadDir(o.doneDir())
+	if err != nil {
+		t.Fatalf("read done dir: %v", err)
+	}
+	if len(doneEntries) != 0 {
+		t.Fatalf("expected done dir to remain empty, got %d entries", len(doneEntries))
+	}
+}
+
 func TestOutbox_SurvivesRestart(t *testing.T) {
 	appDir := t.TempDir()
 	o1 := NewOutbox(appDir)

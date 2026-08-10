@@ -18,13 +18,13 @@ type OutboxFact struct {
 	TaskID        string    `json:"task_id"`
 	Kind          string    `json:"kind"`
 	OccurredAt    time.Time `json:"occurred_at"`
-	Output        string    `json:"output,omitempty"`
-	SessionID     string    `json:"session_id,omitempty"`
-	WorkDir       string    `json:"work_dir,omitempty"`
-	Decision      string    `json:"decision,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	FailureReason string    `json:"failure_reason,omitempty"`
+	Output        string    `json:"output"`
+	SessionID     string    `json:"session_id"`
+	WorkDir       string    `json:"work_dir"`
+	Decision      string    `json:"decision"`
+	Reason        string    `json:"reason"`
+	Error         string    `json:"error"`
+	FailureReason string    `json:"failure_reason"`
 	Attempts      int       `json:"attempts"`
 }
 
