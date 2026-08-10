@@ -183,3 +183,30 @@ func TestMaybeAdoptSilencesAlreadyRunning(t *testing.T) {
 		t.Fatalf("AdoptUserTurn calls = %d, want 1", len(driver.calls))
 	}
 }
+
+func TestMaybeAdoptResolveFailsBeforeResume(t *testing.T) {
+	bindings := &fakeBindingClient{
+		binding: &workflowrunner.SessionBinding{
+			TaskID:    "task-123",
+			Resumable: true,
+		},
+	}
+	driver := &fakeTurnAdopter{}
+	resolve := func(sessionID string) (*csc.Agent, error) {
+		return nil, errors.New("agent gone")
+	}
+	adopter := &sessionAdopter{
+		bindings: bindings,
+		driver:   driver,
+		resolve:  resolve,
+	}
+
+	adopter.maybeAdopt(context.Background(), "session-456")
+
+	if bindings.resumeCalls != 0 {
+		t.Fatalf("ResumeBeginTask calls = %d, want 0", bindings.resumeCalls)
+	}
+	if len(driver.calls) != 0 {
+		t.Fatalf("AdoptUserTurn calls = %d, want 0", len(driver.calls))
+	}
+}

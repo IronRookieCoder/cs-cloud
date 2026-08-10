@@ -46,17 +46,17 @@ func (s *sessionAdopter) maybeAdopt(ctx context.Context, sessionID string) {
 		return
 	}
 
+	agent, err := s.resolve(sessionID)
+	if err != nil {
+		slog.Warn("session adopt: resolve agent failed", "session_id", sessionID, "error", err)
+		return
+	}
+
 	if err := s.bindings.ResumeBeginTask(ctx, binding.TaskID, sessionID); err != nil {
 		if !errors.Is(err, workflowrunner.ErrTaskNotResumable) {
 			slog.Warn("session adopt: resume-begin failed", "session_id", sessionID, "error", err)
 		}
 		s.invalidate(sessionID)
-		return
-	}
-
-	agent, err := s.resolve(sessionID)
-	if err != nil {
-		slog.Warn("session adopt: resolve agent failed", "session_id", sessionID, "error", err)
 		return
 	}
 

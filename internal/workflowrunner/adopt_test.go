@@ -122,6 +122,7 @@ type fakeCSCServer struct {
 	events          []cscEvent
 	subscribed      chan struct{}
 	eventStatusCode int
+	hangEvent       bool
 }
 
 type cscEvent struct {
@@ -152,16 +153,28 @@ func newFakeCSCServerWithEventFailure(statusCode int) *fakeCSCServer {
 	}
 }
 
+func newFakeCSCServerWithHangingEvent() *fakeCSCServer {
+	return &fakeCSCServer{
+		hangEvent: true,
+	}
+}
+
 func (f *fakeCSCServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		statusCode := f.eventStatusCode
 		subscribed := f.subscribed
+		hangEvent := f.hangEvent
 		f.mu.Unlock()
 
 		if subscribed != nil {
 			close(subscribed)
+		}
+
+		if hangEvent {
+			<-r.Context().Done()
+			return
 		}
 
 		if statusCode != 0 {
@@ -456,6 +469,44 @@ func TestAdoptUserTurnSubscribeFailureReportsFailure(t *testing.T) {
 	}
 	if !strings.Contains(fail[0].Reason, "event stream unavailable") {
 		t.Errorf("fail reason = %q, want it to contain %q", fail[0].Reason, "event stream unavailable")
+	}
+}
+
+// TestAdoptUserTurnSubscribeEstablishmentTimeout verifies that a hanging SSE
+// subscription establishment is bounded and reported to the backend as a failed
+// task. Returning an error lets the proxy forward the prompt normally.
+func TestAdoptUserTurnSubscribeEstablishmentTimeout(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServerWithHangingEvent().handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	d.adoptEstablishmentTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error on establishment timeout")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("AdoptUserTurn took %s, want under 1s", elapsed)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	_, fail, _ := backend.snapshot()
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "agent_error" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "agent_error")
 	}
 }
 

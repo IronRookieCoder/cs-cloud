@@ -102,7 +102,11 @@ type Driver struct {
 	// authenticate to the localserver's apiAuth middleware. Set by the
 	// localserver alongside SetLocalBaseURL.
 	localAPIKey string
-	mu          sync.Mutex
+	// adoptEstablishmentTimeout bounds the SSE subscription setup phase in
+	// AdoptUserTurn. It defaults to defaultAdoptEstablishmentTimeout and is
+	// exposed only for tests.
+	adoptEstablishmentTimeout time.Duration
+	mu                        sync.Mutex
 }
 
 // NewDriver creates a new workflow driver.
@@ -143,6 +147,9 @@ func (d *Driver) Start() error {
 	}
 	if d.cfg.AgentTimeout <= 0 {
 		d.cfg.AgentTimeout = workflow.DefaultConfig().AgentTimeout
+	}
+	if d.adoptEstablishmentTimeout <= 0 {
+		d.adoptEstablishmentTimeout = defaultAdoptEstablishmentTimeout
 	}
 
 	d.workspaceManager = NewWorkspaceManager(d.cfg.WorkspacesRoot)

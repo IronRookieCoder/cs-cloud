@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
+	"time"
 
 	csagent "cs-cloud/internal/agent"
 	"cs-cloud/internal/agent/csc"
 )
+
+// adoptEstablishmentTimeout bounds only the SSE subscription setup phase in
+// AdoptUserTurn. The full watch context still lasts for the configured
+// AgentTimeout so the stream is not torn down prematurely.
+const defaultAdoptEstablishmentTimeout = 15 * time.Second
 
 // ErrTaskAlreadyRunning is returned by AdoptUserTurn when the task is already
 // being executed or watched by this driver.
@@ -31,8 +38,30 @@ func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, ag
 	}
 
 	watchCtx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
-	events, err := agent.SubscribeSessionEvents(watchCtx, sessionID)
+
+	// Bound only the SSE subscription establishment; the long-lived watchCtx
+	// remains valid for the full agent timeout once the stream is connected.
+	// This prevents a csc that accepts TCP but never writes /event headers from
+	// stalling the proxy handler for the entire AgentTimeout.
+	establishCtx, establishCancel := context.WithCancel(watchCtx)
+	var establishMu sync.Mutex
+	establishDone := false
+	go func() {
+		select {
+		case <-time.After(d.adoptEstablishmentTimeout):
+			establishMu.Lock()
+			if !establishDone {
+				establishCancel()
+			}
+			establishMu.Unlock()
+		}
+	}()
+	events, err := agent.SubscribeSessionEvents(establishCtx, sessionID)
+	establishMu.Lock()
+	establishDone = true
+	establishMu.Unlock()
 	if err != nil {
+		establishCancel()
 		cancel()
 		d.release(taskID, rec)
 		slog.Warn("adopted turn: subscribe failed", "task_id", taskID, "error", err)
