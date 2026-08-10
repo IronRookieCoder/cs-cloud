@@ -194,11 +194,11 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 	}
 }
 
-// TestRunCSCSession_InjectsTaskIDIntoPrompt verifies RunCSCSession passes the
-// session runner a prompt carrying the task id, so the agent can pass
-// `--task <id>` to cs-cloud workflow commands and have them locate .cs-cloud.env
-// regardless of cwd.
-func TestRunCSCSession_InjectsTaskIDIntoPrompt(t *testing.T) {
+// TestRunCSCSession_PassesPromptUnchanged verifies RunCSCSession forwards
+// payload.Prompt to the session runner verbatim. cs-cloud no longer injects
+// task-id / signaling guidance — all prompt content (role, commands, --task,
+// retry hints) is owned by multica and arrives already baked into the prompt.
+func TestRunCSCSession_PassesPromptUnchanged(t *testing.T) {
 	installFakeAgent(t, "csc")
 
 	wm := NewWorkspaceManager(t.TempDir())
@@ -207,17 +207,14 @@ func TestRunCSCSession_InjectsTaskIDIntoPrompt(t *testing.T) {
 	tr.SetSessionRunner(runner)
 
 	workdir := t.TempDir()
-	const taskID = "task-prompt"
+	const body = "do thing"
 	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
-		TaskID: taskID, WorkspaceID: "ws-1", Agent: "csc", Prompt: "do thing",
+		TaskID: "task-prompt", WorkspaceID: "ws-1", Agent: "csc", Prompt: body,
 	}, workdir, "session-1"); err != nil {
 		t.Fatalf("RunCSCSession: %v", err)
 	}
-	if !strings.Contains(runner.prompt, taskID) {
-		t.Fatalf("session prompt must carry the task id %q so the agent can pass --task; got:\n%s", taskID, runner.prompt)
-	}
-	if !strings.Contains(runner.prompt, "do thing") {
-		t.Fatalf("session prompt must preserve the original body; got:\n%s", runner.prompt)
+	if runner.prompt != body {
+		t.Fatalf("session prompt must be payload.Prompt unchanged; got:\n%s", runner.prompt)
 	}
 }
 
@@ -248,37 +245,6 @@ func TestRunCSCSession_WritesAndRemovesTaskPointer(t *testing.T) {
 	}
 	if got := ReadTaskPointer(wm.Root(), "task-ptr"); got != "" {
 		t.Fatalf("pointer after session = %q, want empty (removed by defer)", got)
-	}
-}
-
-// TestInjectTaskEnvGuidance verifies cs-cloud prepends a "Task Environment"
-// section naming the task id and telling the agent to pass `--task <id>` (a
-// short id, not a long path), and to retry when the output says not delivered.
-func TestInjectTaskEnvGuidance(t *testing.T) {
-	const taskID = "task-9"
-	const body = "Issue: ship the thing\n\nDo work."
-	got := injectTaskEnvGuidance(body, taskID)
-
-	// Guidance is prepended before the original prompt body.
-	idxGuide := strings.Index(got, "Task Environment")
-	idxBody := strings.Index(got, body)
-	if idxGuide < 0 || idxBody < 0 || idxGuide >= idxBody {
-		t.Fatalf("guidance must be prepended before the original body; got:\n%s", got)
-	}
-	// Names the task id.
-	if !strings.Contains(got, taskID) {
-		t.Fatalf("guidance must name the task id %q; got:\n%s", taskID, got)
-	}
-	// Tells the agent to pass --task <id> (NOT --task-root / a path).
-	if !strings.Contains(got, "--task") || strings.Contains(got, "--task-root") {
-		t.Fatalf("guidance must use `--task <id>`, not --task-root; got:\n%s", got)
-	}
-	// References the completion signal and retry-when-not-delivered.
-	if !strings.Contains(got, "task complete") {
-		t.Fatalf("guidance must reference `task complete`; got:\n%s", got)
-	}
-	if !strings.Contains(got, "NOT delivered") && !strings.Contains(got, "not delivered") {
-		t.Fatalf("guidance must tell the agent to retry when the output says not delivered; got:\n%s", got)
 	}
 }
 
