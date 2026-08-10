@@ -333,6 +333,13 @@ func (d *Driver) RunTaskAsync(payload workflow.TaskRunPayload) error {
 // task as running. It also rejects tasks whose abort arrived before the run
 // request (cancel raced the server-side push).
 func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
+	return d.reserveTaskID(payload.TaskID)
+}
+
+// reserveTaskID is the taskID-only variant used by AdoptUserTurn, which does
+// not have a full task payload. The semaphore, running map, and abort
+// tombstone logic match reserve exactly.
+func (d *Driver) reserveTaskID(taskID string) (*taskRecord, error) {
 	if err := d.Health(); err != nil {
 		return nil, err
 	}
@@ -345,17 +352,17 @@ func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, exists := d.running[payload.TaskID]; exists {
+	if _, exists := d.running[taskID]; exists {
 		<-d.sem
-		return nil, fmt.Errorf("task %s is already running", payload.TaskID)
+		return nil, fmt.Errorf("task %s is already running", taskID)
 	}
-	if ts, wasAborted := d.abortedIDs[payload.TaskID]; wasAborted {
+	if ts, wasAborted := d.abortedIDs[taskID]; wasAborted {
 		<-d.sem
 		if time.Since(ts) <= abortTombstoneTTL {
-			delete(d.abortedIDs, payload.TaskID)
-			return nil, fmt.Errorf("task %s was aborted before it started", payload.TaskID)
+			delete(d.abortedIDs, taskID)
+			return nil, fmt.Errorf("task %s was aborted before it started", taskID)
 		}
-		delete(d.abortedIDs, payload.TaskID)
+		delete(d.abortedIDs, taskID)
 	}
 	// GC expired tombstones while we hold the lock.
 	for id, ts := range d.abortedIDs {
@@ -365,7 +372,7 @@ func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
 	}
 
 	rec := &taskRecord{}
-	d.running[payload.TaskID] = rec
+	d.running[taskID] = rec
 	return rec, nil
 }
 

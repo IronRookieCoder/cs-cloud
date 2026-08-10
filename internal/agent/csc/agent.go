@@ -61,6 +61,17 @@ func NewAgent(cfg agent.AgentConfig) *Agent {
 	}
 }
 
+// NewAgentWithEndpoint creates an Agent wired directly to the given raw HTTP
+// endpoint. It is intended for tests that bypass process spawning and only
+// exercise the HTTP-bound session methods.
+func NewAgentWithEndpoint(rawEndpoint string) *Agent {
+	return &Agent{
+		rawEndpoint: rawEndpoint,
+		endpoint:    rawEndpoint,
+		httpClient:  &http.Client{},
+	}
+}
+
 func (a *Agent) ID() string      { return a.id }
 func (a *Agent) Backend() string { return "csc" }
 func (a *Agent) Driver() string  { return "http" }
@@ -508,16 +519,16 @@ func (a *Agent) PromptSession(ctx context.Context, sessionID, content string) er
 	return err
 }
 
-// sessionEvent is one parsed SSE event from the csc event stream.
-type sessionEvent struct {
-	name string
-	data map[string]any
+// SessionEvent is one parsed SSE event from the csc event stream.
+type SessionEvent struct {
+	Name string
+	Data map[string]any
 }
 
 // subscribeSessionEvents opens the csc event stream filtered to the session
 // and returns only after the HTTP connection is established. Callers can then
 // send a prompt without missing the busy/idle events it produces.
-func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<-chan sessionEvent, error) {
+func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<-chan SessionEvent, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
@@ -539,7 +550,7 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 		return nil, fmt.Errorf("event stream returned status %d", resp.StatusCode)
 	}
 
-	ch := make(chan sessionEvent, 64)
+	ch := make(chan SessionEvent, 64)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
@@ -563,7 +574,7 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 			if line == "" {
 				if event != "" {
 					select {
-					case ch <- sessionEvent{name: event, data: data}:
+					case ch <- SessionEvent{Name: event, Data: data}:
 					case <-ctx.Done():
 						return
 					}
@@ -576,10 +587,18 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 	return ch, nil
 }
 
-// waitForSessionDone consumes session events until the prompt finishes. It
+// SubscribeSessionEvents opens the csc event stream filtered to the session
+// and returns only after the HTTP connection is established. It is the public
+// entry used by the workflow driver to watch user-initiated turns on bound
+// sessions.
+func (a *Agent) SubscribeSessionEvents(ctx context.Context, sessionID string) (<-chan SessionEvent, error) {
+	return a.subscribeSessionEvents(ctx, sessionID)
+}
+
+// WaitForSessionDone consumes session events until the prompt finishes. It
 // gates completion on having seen the session go busy first, so an idle event
 // emitted before our prompt starts cannot end the wait early.
-func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
+func WaitForSessionDone(ctx context.Context, events <-chan SessionEvent) error {
 	busy := false
 	awaitingContinuation := false
 	terminalFailure := false
@@ -606,9 +625,9 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 			if !ok {
 				return fmt.Errorf("event stream closed before the session finished")
 			}
-			switch ev.name {
+			switch ev.Name {
 			case "session.status":
-				if status, ok := ev.data["status"].(map[string]any); ok {
+				if status, ok := ev.Data["status"].(map[string]any); ok {
 					if t, _ := status["type"].(string); t == "busy" {
 						if !busy {
 							busy = true
@@ -627,25 +646,25 @@ func waitForSessionDone(ctx context.Context, events <-chan sessionEvent) error {
 				if !busy {
 					continue
 				}
-				terminalSubtype, _ = ev.data["subtype"].(string)
-				isError, _ := ev.data["isError"].(bool)
-				if snakeCaseError, _ := ev.data["is_error"].(bool); snakeCaseError {
+				terminalSubtype, _ = ev.Data["subtype"].(string)
+				isError, _ := ev.Data["isError"].(bool)
+				if snakeCaseError, _ := ev.Data["is_error"].(bool); snakeCaseError {
 					isError = true
 				}
 				terminalFailure = isError || (terminalSubtype != "" && terminalSubtype != "success")
-				stopReason, _ := ev.data["stopReason"].(string)
+				stopReason, _ := ev.Data["stopReason"].(string)
 				if stopReason == "" {
-					stopReason, _ = ev.data["stop_reason"].(string)
+					stopReason, _ = ev.Data["stop_reason"].(string)
 				}
 				awaitingContinuation = stopReason == "tool_use" || stopReason == "max_tokens"
-				if message := sessionResultErrorMessage(ev.data); message != "" {
+				if message := sessionResultErrorMessage(ev.Data); message != "" {
 					terminalMessage = message
 				}
 			case "session.error":
 				if !busy {
 					continue
 				}
-				errorData, _ := ev.data["error"].(map[string]any)
+				errorData, _ := ev.Data["error"].(map[string]any)
 				if subtype, _ := errorData["subtype"].(string); subtype != "api_retry" {
 					if message, _ := errorData["message"].(string); message != "" {
 						terminalMessage = message
@@ -772,7 +791,7 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, e
 	if err := a.PromptSession(ctx, sessionID, prompt); err != nil {
 		return nil, fmt.Errorf("send prompt: %w", err)
 	}
-	if err := waitForSessionDone(subCtx, events); err != nil {
+	if err := WaitForSessionDone(subCtx, events); err != nil {
 		abortCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = a.abortSession(abortCtx, sessionID)
 		cancel()
@@ -806,6 +825,12 @@ func envSliceToMap(env []string) map[string]string {
 }
 
 func extractLastAssistantText(body json.RawMessage) (string, error) {
+	return ExtractLastAssistantText(body)
+}
+
+// ExtractLastAssistantText returns the most recent non-empty assistant text
+// from a csc session message list.
+func ExtractLastAssistantText(body json.RawMessage) (string, error) {
 	var envelope struct {
 		Messages []map[string]any `json:"messages"`
 	}
