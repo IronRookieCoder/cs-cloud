@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"cs-cloud/internal/agent/csc"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/filewatcher"
 	"cs-cloud/internal/gitwatcher"
@@ -94,6 +95,11 @@ type Server struct {
 	// the agent has been restarted in-place. Optional; when nil, restart
 	// paths skip persistence (used in tests).
 	agentPIDWriter func(pid int)
+
+	// adopter intercepts prompts sent to workflow-bound sessions and reopens
+	// the associated task so the user's turn drives the workflow. Nil when the
+	// workflow subsystem is unavailable.
+	adopter *sessionAdopter
 }
 
 func New(opts ...Option) *Server {
@@ -330,6 +336,12 @@ func (s *Server) Start(addr string) error {
 			// disabled" instead of failing the whole server.
 			logger.Warn("workflow driver disabled: %v", err)
 			s.workflowErr = err
+		} else {
+			s.adopter = &sessionAdopter{
+				bindings: s.workflow.Client(),
+				driver:   s.workflow,
+				resolve:  s.resolveCSCAgent,
+			}
 		}
 	}
 
@@ -388,6 +400,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.manager.KillAll()
 	s.termMgr.CloseAll()
 	return s.http.Shutdown(ctx)
+}
+
+// resolveCSCAgent returns the csc agent instance the proxy is currently
+// forwarding to. It first tries a per-session agent lookup, then falls back
+// to the default backend agent so the single default csc process used by the
+// proxy is the same one that watches adopted turns.
+func (s *Server) resolveCSCAgent(sessionID string) (*csc.Agent, error) {
+	if a, ok := s.manager.GetAgent(sessionID); ok {
+		if cscAgent, ok := a.(*csc.Agent); ok {
+			return cscAgent, nil
+		}
+	}
+	backend := s.manager.DefaultBackend()
+	for _, a := range s.manager.ListAgents() {
+		if a.Backend() != backend {
+			continue
+		}
+		if cscAgent, ok := a.(*csc.Agent); ok {
+			return cscAgent, nil
+		}
+	}
+	return nil, fmt.Errorf("no csc agent available for session %s", sessionID)
 }
 
 func (s *Server) TerminalManager() *terminal.TerminalManager {

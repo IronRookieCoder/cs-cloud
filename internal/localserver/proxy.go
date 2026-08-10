@@ -54,6 +54,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Adopt workflow-bound session prompts before forwarding. This is
+	// best-effort: any failure inside maybeAdopt leaves the original prompt
+	// untouched and the request still proxies to csc.
+	if id, ok := conversationPromptSessionID(r); ok && s.adopter != nil {
+		s.adopter.maybeAdopt(r.Context(), id)
+	}
+
 	pathValues := extractPathValues(r)
 	target := rewriteFunc(pathValues)
 
@@ -298,4 +305,19 @@ func matchRoute(path, pattern string) bool {
 	}
 
 	return len(pathParts) == len(patternParts)
+}
+
+// conversationPromptSessionID extracts the session ID from a proxied prompt
+// request. It recognises both sync and async prompt paths and returns false
+// for any other route.
+func conversationPromptSessionID(r *http.Request) (string, bool) {
+	cleanPath := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	if !isPromptRoute(cleanPath) {
+		return "", false
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		return "", false
+	}
+	return id, true
 }

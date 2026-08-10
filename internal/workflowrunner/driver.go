@@ -113,6 +113,14 @@ func NewDriver(cfg workflow.Config, deps *Dependencies) *Driver {
 // Name returns the driver name.
 func (d *Driver) Name() string { return "workflow" }
 
+// Client returns the multica REST client used by the driver. Available after
+// Start has succeeded; nil before that.
+func (d *Driver) Client() *Client {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.client
+}
+
 // Start initializes the workflow driver components and starts the runtime loop.
 func (d *Driver) Start() error {
 	d.mu.Lock()
