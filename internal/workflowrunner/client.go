@@ -362,3 +362,53 @@ func (c *Client) GetWorkflowNodeRunGCCheck(ctx context.Context, nodeRunID string
 	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, nodeRunID), nil, &out)
 	return out, err
 }
+
+// SessionBinding resolves which workflow task owns a CSC session.
+type SessionBinding struct {
+	TaskID        string `json:"task_id"`
+	TaskStatus    string `json:"task_status"`
+	NodeRunID     string `json:"node_run_id"`
+	NodeRunStatus string `json:"node_run_status"`
+	Resumable     bool   `json:"resumable"`
+}
+
+// ErrSessionNotBound is returned by GetSessionBinding when the server reports
+// the session has no associated workflow binding.
+var ErrSessionNotBound = errors.New("session has no workflow binding")
+
+// ErrTaskNotResumable is returned by ResumeBeginTask when the server reports
+// the task cannot be resumed.
+var ErrTaskNotResumable = errors.New("task not resumable")
+
+// GetSessionBinding resolves which workflow task (if any) owns a CSC session.
+// A 404 response maps to ErrSessionNotBound so the proxy layer can fall
+// through to a plain conversation.
+func (c *Client) GetSessionBinding(ctx context.Context, sessionID string) (*SessionBinding, error) {
+	path := fmt.Sprintf("/api/daemon/sessions/%s/binding", sessionID)
+	var binding SessionBinding
+	err := c.request(ctx, http.MethodGet, path, nil, &binding)
+	if err != nil {
+		var stErr *StatusError
+		if errors.As(err, &stErr) && stErr.StatusCode == http.StatusNotFound {
+			return nil, ErrSessionNotBound
+		}
+		return nil, err
+	}
+	return &binding, nil
+}
+
+// ResumeBeginTask asks multica to reopen a failed task for a user-driven turn.
+// A 409 response maps to ErrTaskNotResumable; callers treat it as a plain
+// conversation.
+func (c *Client) ResumeBeginTask(ctx context.Context, taskID, sessionID string) error {
+	path := fmt.Sprintf("/api/daemon/tasks/%s/resume-begin", taskID)
+	err := c.request(ctx, http.MethodPost, path, map[string]string{"session_id": sessionID}, nil)
+	if err != nil {
+		var stErr *StatusError
+		if errors.As(err, &stErr) && stErr.StatusCode == http.StatusConflict {
+			return ErrTaskNotResumable
+		}
+		return err
+	}
+	return nil
+}
