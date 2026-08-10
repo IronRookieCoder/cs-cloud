@@ -123,6 +123,7 @@ type fakeCSCServer struct {
 	subscribed      chan struct{}
 	eventStatusCode int
 	hangEvent       bool
+	holdOpen        bool
 }
 
 type cscEvent struct {
@@ -156,6 +157,16 @@ func newFakeCSCServerWithEventFailure(statusCode int) *fakeCSCServer {
 func newFakeCSCServerWithHangingEvent() *fakeCSCServer {
 	return &fakeCSCServer{
 		hangEvent: true,
+	}
+}
+
+// newFakeCSCServerHoldOpen serves the given events and then holds the SSE
+// stream open until the client disconnects, simulating an in-flight turn.
+func newFakeCSCServerHoldOpen(messages json.RawMessage, events []cscEvent) *fakeCSCServer {
+	return &fakeCSCServer{
+		messages: messages,
+		events:   events,
+		holdOpen: true,
 	}
 }
 
@@ -197,6 +208,12 @@ func (f *fakeCSCServer) handler() http.Handler {
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
+		}
+		f.mu.Lock()
+		holdOpen := f.holdOpen
+		f.mu.Unlock()
+		if holdOpen {
+			<-r.Context().Done()
 		}
 	})
 	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
@@ -533,5 +550,46 @@ func TestAdoptUserTurnReserveErrorsAreNotDuplicate(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("AdoptUserTurn returned nil error when driver was stopped")
+	}
+}
+
+// TestAdoptUserTurnAbortReportsCancelled verifies that AbortTask cancels an
+// adopted turn's watch and that the abort is reported with failure_reason
+// "cancelled", mirroring the dispatched-run path.
+func TestAdoptUserTurnAbortReportsCancelled(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	// The turn goes busy and then stays in flight until the watch is cancelled.
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServerHoldOpen(json.RawMessage(`{"messages":[]}`), events).handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	if err := d.AbortTask("task-1"); err != nil {
+		t.Fatalf("AbortTask: %v", err)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	complete, fail, _ := backend.snapshot()
+	if len(complete) != 0 {
+		t.Fatalf("expected no complete calls, got %+v", complete)
+	}
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "cancelled" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "cancelled")
 	}
 }

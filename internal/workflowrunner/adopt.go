@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -38,6 +39,9 @@ func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, ag
 	}
 
 	watchCtx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+	// Wire the cancel into the task record so AbortTask and Stop can end the
+	// watch, exactly like a dispatched run.
+	d.armCancel(rec, cancel)
 
 	// Bound only the SSE subscription establishment; the long-lived watchCtx
 	// remains valid for the full agent timeout once the stream is connected.
@@ -82,6 +86,12 @@ func (d *Driver) watchAdoptedTurn(ctx context.Context, cancel context.CancelFunc
 
 	waitErr := csc.WaitForSessionDone(ctx, events)
 	if waitErr != nil {
+		if d.aborted(taskID) {
+			// Mirror the dispatched-run path: a user abort is reported as
+			// cancelled, not as an agent failure.
+			_ = d.failAdoptedTurn(taskID, fmt.Sprintf("aborted: %v", waitErr), "cancelled")
+			return
+		}
 		if errors.Is(waitErr, context.DeadlineExceeded) {
 			_ = d.failAdoptedTurn(taskID, "adopted turn timed out", "agent_timeout")
 			return
