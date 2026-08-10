@@ -231,6 +231,14 @@ func checkCredentials(ctx context.Context, a *app.App) *checkResult {
 		}
 	}
 
+	if provider.IsRefreshTokenExpired(cred.RefreshToken) {
+		return &checkResult{
+			name: "credentials expired",
+			err:  "refresh token expired",
+			hint: "Run 'login' to re-authenticate",
+		}
+	}
+
 	return &checkResult{
 		name: "credentials expired",
 		err:  "access token expired",

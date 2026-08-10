@@ -190,6 +190,11 @@ func RefreshCoStrictToken(baseURL, refreshToken, state string) (*RefreshTokenRes
 		return nil, fmt.Errorf("refresh token is invalid or expired")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return nil, fmt.Errorf("token refresh failed: %d (%s)", resp.StatusCode, msg)
+		}
 		return nil, fmt.Errorf("token refresh failed: %d", resp.StatusCode)
 	}
 
