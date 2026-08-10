@@ -1845,6 +1845,69 @@ func TestDriverCompletesOnExplicitCompletionSignal(t *testing.T) {
 	}
 }
 
+// TestDriverCompletesCriticReviewWithoutSessionOutput verifies that a critic's
+// review signal (decision/reason, no summary) completes the task instead of
+// being misjudged as agent_empty_output. Review signals carry no Summary and
+// the abort path discards session stdout, so without a reason fallback the
+// driver used to fail the task and drop the decision entirely.
+func TestDriverCompletesCriticReviewWithoutSessionOutput(t *testing.T) {
+	runner := &completingSessionRunner{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	t.Cleanup(func() { runner.closeOnce.Do(func() { close(runner.unblock) }) })
+	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID: "task-review", WorkspaceID: "ws-1", NodeRunID: "nr-1", AgentID: "agent-1",
+		Agent: "csc", Prompt: "review work",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("session runner did not start")
+	}
+
+	if err := d.SignalTaskCompletion("task-review", agent.CompletionSignal{
+		Action: "review", Decision: "approve", Reason: "deliverables meet the bar",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		_, ok := fm.taskCallback("/complete")
+		return ok
+	})
+
+	// Give a misjudged fail a chance to land before asserting its absence.
+	time.Sleep(100 * time.Millisecond)
+	if _, ok := fm.taskCallback("/fail"); ok {
+		t.Fatal("critic review signal triggered /fail callback")
+	}
+
+	body, ok := fm.taskCallback("/complete")
+	if !ok {
+		t.Fatal("missing /complete body")
+	}
+	var complete struct {
+		Output   string `json:"output"`
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &complete); err != nil {
+		t.Fatalf("complete body: %v", err)
+	}
+	if complete.Decision != "approve" {
+		t.Errorf("complete decision = %q, want approve", complete.Decision)
+	}
+	if complete.Output != "deliverables meet the bar" {
+		t.Errorf("complete output = %q, want the review reason as output", complete.Output)
+	}
+}
+
 func TestDriverFailsTaskWhenCompletionCallbackRejected(t *testing.T) {
 	runner := &completingSessionRunner{
 		started: make(chan struct{}),

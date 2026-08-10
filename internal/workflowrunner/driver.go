@@ -489,7 +489,14 @@ func (d *Driver) execute(ctx context.Context, payload workflow.TaskRunPayload, r
 		if strings.TrimSpace(output) == "" {
 			output = strings.TrimSpace(truncateOutput(string(out)))
 		}
-		if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" {
+		// A critic's review signal carries its payload in Decision/Reason, not
+		// Summary — and the abort path above discards session stdout. Use the
+		// reason as the output, and never misjudge a decision-carrying signal
+		// as empty output: the decision alone is a valid completion.
+		if strings.TrimSpace(output) == "" {
+			output = truncateOutput(sig.Reason)
+		}
+		if payload.Agent == AgentCsc && strings.TrimSpace(output) == "" && sig.Decision == "" {
 			emptyErr := fmt.Errorf("%w: %s", agent.ErrEmptySessionOutput, sessionID)
 			return d.failTask(payload.TaskID, emptyErr, "agent_empty_output")
 		}
