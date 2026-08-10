@@ -354,7 +354,7 @@ func (d *Driver) reserveTaskID(taskID string) (*taskRecord, error) {
 	defer d.mu.Unlock()
 	if _, exists := d.running[taskID]; exists {
 		<-d.sem
-		return nil, fmt.Errorf("task %s is already running", taskID)
+		return nil, ErrTaskAlreadyRunning
 	}
 	if ts, wasAborted := d.abortedIDs[taskID]; wasAborted {
 		<-d.sem

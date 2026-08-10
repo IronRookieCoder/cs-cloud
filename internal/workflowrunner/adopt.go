@@ -17,30 +17,39 @@ var ErrTaskAlreadyRunning = errors.New("task already running")
 // bound to workflow taskID, then watches the turn and reports the outcome to
 // the multica backend exactly like a normal dispatch would. The prompt itself
 // is NOT sent here — the proxy path already delivered it to csc.
+//
+// The SSE subscription is established synchronously before this function
+// returns, so the caller can forward the prompt to csc without racing past the
+// busy/idle events.
 func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, agent *csc.Agent) error {
 	rec, err := d.reserveTaskID(taskID)
 	if err != nil {
-		return ErrTaskAlreadyRunning
+		if errors.Is(err, ErrTaskAlreadyRunning) {
+			return ErrTaskAlreadyRunning
+		}
+		return err
 	}
-	go d.watchAdoptedTurn(taskID, sessionID, agent, rec)
+
+	watchCtx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+	events, err := agent.SubscribeSessionEvents(watchCtx, sessionID)
+	if err != nil {
+		cancel()
+		d.release(taskID, rec)
+		slog.Warn("adopted turn: subscribe failed", "task_id", taskID, "error", err)
+		_ = d.failAdoptedTurn(taskID, "adopted turn: event stream unavailable", "agent_error")
+		return err
+	}
+
+	go d.watchAdoptedTurn(watchCtx, cancel, taskID, sessionID, agent, rec, events)
 	return nil
 }
 
 // watchAdoptedTurn consumes the session's event stream until the turn ends,
 // forwards the final assistant message for the live transcript, then completes
-// or fails the task. Always releases the running-map slot.
-func (d *Driver) watchAdoptedTurn(taskID, sessionID string, agent *csc.Agent, rec *taskRecord) {
-	defer d.release(taskID, rec)
-
-	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.AgentTimeout)
+// or fails the task. Always releases the running-map slot and cancels watchCtx.
+func (d *Driver) watchAdoptedTurn(ctx context.Context, cancel context.CancelFunc, taskID, sessionID string, agent *csc.Agent, rec *taskRecord, events <-chan csc.SessionEvent) {
 	defer cancel()
-
-	events, err := agent.SubscribeSessionEvents(ctx, sessionID)
-	if err != nil {
-		slog.Warn("adopted turn: subscribe failed", "task_id", taskID, "error", err)
-		_ = d.failAdoptedTurn(taskID, "adopted turn: event stream unavailable", "agent_error")
-		return
-	}
+	defer d.release(taskID, rec)
 
 	waitErr := csc.WaitForSessionDone(ctx, events)
 	if waitErr != nil {

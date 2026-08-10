@@ -116,10 +116,12 @@ func stringValue(m map[string]any, key string) string {
 // fakeCSCServer serves the SSE event stream, session directory lookup, and
 // message list used by AdoptUserTurn.
 type fakeCSCServer struct {
-	mu         sync.Mutex
-	sessionDir string
-	messages   json.RawMessage
-	events     []cscEvent
+	mu              sync.Mutex
+	sessionDir      string
+	messages        json.RawMessage
+	events          []cscEvent
+	subscribed      chan struct{}
+	eventStatusCode int
 }
 
 type cscEvent struct {
@@ -135,9 +137,39 @@ func newFakeCSCServer(sessionDir string, messages json.RawMessage, events []cscE
 	}
 }
 
+func newFakeCSCServerWithSubscribeSignal(sessionDir string, messages json.RawMessage, events []cscEvent) *fakeCSCServer {
+	return &fakeCSCServer{
+		sessionDir: sessionDir,
+		messages:   messages,
+		events:     events,
+		subscribed: make(chan struct{}),
+	}
+}
+
+func newFakeCSCServerWithEventFailure(statusCode int) *fakeCSCServer {
+	return &fakeCSCServer{
+		eventStatusCode: statusCode,
+	}
+}
+
 func (f *fakeCSCServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		statusCode := f.eventStatusCode
+		subscribed := f.subscribed
+		f.mu.Unlock()
+
+		if subscribed != nil {
+			close(subscribed)
+		}
+
+		if statusCode != 0 {
+			w.WriteHeader(statusCode)
+			_, _ = w.Write([]byte("event stream unavailable"))
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		if flusher, ok := w.(http.Flusher); ok {
@@ -362,4 +394,93 @@ func TestAdoptUserTurnReleasesRunningSlot(t *testing.T) {
 		complete, _, _ := backend.snapshot()
 		return len(complete) > 1
 	})
+}
+
+// TestAdoptUserTurnSubscribesBeforeReturn verifies that AdoptUserTurn does not
+// return until the SSE subscription is established. This closes the race where
+// the proxy forwards the user prompt before the driver is listening to events.
+func TestAdoptUserTurnSubscribesBeforeReturn(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	fakeCSC := newFakeCSCServerWithSubscribeSignal("", json.RawMessage(`{"messages":[]}`), []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	})
+	cscSrv := httptest.NewServer(fakeCSC.handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	select {
+	case <-fakeCSC.subscribed:
+		// ok — subscription was established before return.
+	case <-time.After(5 * time.Second):
+		t.Fatal("AdoptUserTurn returned before the SSE subscription was established")
+	}
+}
+
+// TestAdoptUserTurnSubscribeFailureReportsFailure verifies that a failed SSE
+// subscription is reported to the backend as a failed task and the error is
+// returned to the caller.
+func TestAdoptUserTurnSubscribeFailureReportsFailure(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServerWithEventFailure(http.StatusServiceUnavailable).handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error on subscribe failure")
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	_, fail, _ := backend.snapshot()
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "agent_error" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "agent_error")
+	}
+	if !strings.Contains(fail[0].Reason, "event stream unavailable") {
+		t.Errorf("fail reason = %q, want it to contain %q", fail[0].Reason, "event stream unavailable")
+	}
+}
+
+// TestAdoptUserTurnReserveErrorsAreNotDuplicate verifies that non-duplicate
+// reserve failures (e.g. driver not running) are surfaced as-is, not mapped to
+// ErrTaskAlreadyRunning.
+func TestAdoptUserTurnReserveErrorsAreNotDuplicate(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServer("", json.RawMessage(`{"messages":[]}`), nil).handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	// Stop the driver so reserveTaskID fails the Health() check.
+	if err := d.Stop(); err != nil {
+		t.Fatalf("stop driver: %v", err)
+	}
+
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	if errors.Is(err, ErrTaskAlreadyRunning) {
+		t.Fatalf("AdoptUserTurn error = %v, should not be ErrTaskAlreadyRunning", err)
+	}
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error when driver was stopped")
+	}
 }
