@@ -174,6 +174,13 @@ func (a *App) cleanupAllStateFiles() {
 	a.SaveServerURL("")
 }
 
+func (a *App) ClearDaemonReadiness() {
+	a.RemovePID()
+	a.RemoveAgentPID()
+	_ = os.Remove(a.stateFile())
+	_ = a.SaveServerURL("")
+}
+
 func (a *App) forceKillStale(pid int) {
 	if !a.IsProcessRunning(pid) {
 		return

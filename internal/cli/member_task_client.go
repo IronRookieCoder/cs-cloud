@@ -44,6 +44,10 @@ func newMemberTaskClient(a *app.App) *memberTaskClient {
 
 func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskRequest) (any, error) {
 	if err := c.ensureDaemon(ctx); err != nil {
+		var taskErr *membertask.TaskError
+		if errors.As(err, &taskErr) {
+			return nil, taskErr
+		}
 		return nil, &membertask.TaskError{Code: "daemon_unavailable", Message: "member task daemon is unavailable"}
 	}
 	serverURL, secret, err := c.resolve()
@@ -226,6 +230,9 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 	if err := a.SaveMode("cloud"); err != nil {
 		return err
 	}
+	if _, err := a.PrepareCloudDaemon(); err != nil {
+		return err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -268,7 +275,7 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 		case <-deadline.C:
 			return errors.New("daemon readiness timeout")
 		case <-ticker.C:
-			if serverURL, _ := a.ServerURL(); serverURL != "" {
+			if running, _, _ := a.DaemonStatus(); running {
 				return nil
 			}
 		}

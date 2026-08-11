@@ -163,3 +163,16 @@ func (a *App) workflowTokenProvider() func() (*provider.Credentials, error) {
 func (a *App) Device() (*device.DeviceInfo, error) {
 	return device.LoadDevice()
 }
+
+func (a *App) PrepareCloudDaemon() (*device.DeviceInfo, error) {
+	info, err := a.Device()
+	if err != nil || info == nil || strings.TrimSpace(info.DeviceID) == "" || strings.TrimSpace(info.DeviceToken) == "" {
+		a.ClearDaemonReadiness()
+		return nil, &membertask.TaskError{Code: "device_registration_required", Message: "device registration is required; run cs-cloud register first"}
+	}
+	if err := device.ValidateDeviceOwner(info); err != nil {
+		a.ClearDaemonReadiness()
+		return nil, &membertask.TaskError{Code: "device_registration_required", Message: "device registration does not belong to the current user; run cs-cloud register first"}
+	}
+	return info, nil
+}
