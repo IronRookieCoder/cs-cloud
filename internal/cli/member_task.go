@@ -14,12 +14,13 @@ import (
 )
 
 type memberTaskRequest struct {
-	Command    string
-	TaskKey    string
-	PreviewID  string
-	Decision   string
-	Reason     string
-	DeleteMode membertask.DeleteMode
+	Command     string
+	TaskKey     string
+	PreviewID   string
+	Decision    string
+	Reason      string
+	DeleteMode  membertask.DeleteMode
+	FixturePath string
 }
 
 type memberTaskAPI interface {
@@ -34,7 +35,7 @@ func memberTaskCmd(a *app.App, args []string) error {
 		}
 		return printMemberTaskHelp(os.Stdout, taskJSONRequested(), command...)
 	}
-	client := newMemberTaskClient(a)
+	client := &fixtureMemberTaskAPI{fallback: newMemberTaskClient(a)}
 	return runMemberTaskCommandWithFormat(context.Background(), args, client, os.Stdout, os.Stderr, taskJSONRequested())
 }
 
@@ -110,8 +111,13 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 	if len(args) == 0 {
 		return memberTaskRequest{}, &membertask.TaskError{Code: "invalid_arguments", Message: "task command is required"}
 	}
+	normalized, fixturePath, err := extractMemberTaskFixture(args)
+	if err != nil {
+		return memberTaskRequest{}, err
+	}
+	args = normalized
 	command := args[0]
-	request := memberTaskRequest{Command: command}
+	request := memberTaskRequest{Command: command, FixturePath: fixturePath}
 	switch command {
 	case "list":
 		if len(args) != 1 {
@@ -214,6 +220,34 @@ func parseMemberTaskFlags(args []string) (map[string]string, error) {
 		flags[name] = value
 	}
 	return flags, nil
+}
+
+func extractMemberTaskFixture(args []string) ([]string, string, error) {
+	result := make([]string, 0, len(args))
+	fixturePath := ""
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg != "--fixture" && !strings.HasPrefix(arg, "--fixture=") {
+			result = append(result, arg)
+			continue
+		}
+		if fixturePath != "" {
+			return nil, "", invalidArguments("invalid or duplicate flag: --fixture")
+		}
+		if value, ok := strings.CutPrefix(arg, "--fixture="); ok {
+			fixturePath = value
+		} else {
+			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+				return nil, "", invalidArguments("--fixture requires a value")
+			}
+			index++
+			fixturePath = args[index]
+		}
+		if strings.TrimSpace(fixturePath) == "" {
+			return nil, "", invalidArguments("--fixture requires a value")
+		}
+	}
+	return result, fixturePath, nil
 }
 
 func invalidArguments(message string) error {
@@ -325,14 +359,20 @@ func stateAfterForResult(result any) *membertask.Projection {
 }
 
 func nextCommandsFor(request memberTaskRequest, result any) []nextCommand {
+	confirmation := func(command []string) []nextCommand {
+		if request.FixturePath != "" {
+			command = append(command, "--fixture="+request.FixturePath)
+		}
+		return []nextCommand{{Argv: command, Safety: "requires_confirmation"}}
+	}
 	preview, ok := result.(membertask.Preview)
 	if !ok {
 		if deletion, ok := result.(membertask.DeletePreview); ok {
-			return []nextCommand{{Argv: []string{"cs-cloud", "task", "delete", request.TaskKey, "--confirm", deletion.ID}, Safety: "requires_confirmation"}}
+			return confirmation([]string{"cs-cloud", "task", "delete", request.TaskKey, "--confirm", deletion.ID})
 		}
 		return []nextCommand{}
 	}
-	return []nextCommand{{Argv: []string{"cs-cloud", "task", request.Command, request.TaskKey, "--confirm", preview.ID}, Safety: "requires_confirmation"}}
+	return confirmation([]string{"cs-cloud", "task", request.Command, request.TaskKey, "--confirm", preview.ID})
 }
 
 func taskJSONRequested() bool {

@@ -1,0 +1,283 @@
+{
+  "schema_version": "1.0",
+  "task_key": "zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic",
+  "responses": {
+    "list": [
+      {
+        "task_key": {
+          "cloud_instance_id": "zgsm",
+          "workspace_id": "costrict",
+          "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+          "role": "critic"
+        },
+        "remote": {
+          "cloud_instance_id": "zgsm",
+          "workspace_id": "costrict",
+          "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+          "role": "critic",
+          "attempt": 1,
+          "task_version": 1,
+          "context_version": 1,
+          "cloud_status": "assigned"
+        },
+        "projection": {
+          "display_status": "not_prepared",
+          "flags": {},
+          "available_actions": [
+            "get",
+            "prepare"
+          ]
+        }
+      }
+    ],
+    "get": {
+      "task_key": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic"
+      },
+      "remote": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic",
+        "attempt": 1,
+        "task_version": 1,
+        "context_version": 1,
+        "cloud_status": "assigned"
+      },
+      "context": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic",
+        "attempt": 1,
+        "task_version": 1,
+        "context_version": 1,
+        "cloud_status": "assigned",
+        "goal": "审查 COS-155 用原生web技术创建一个五子棋游戏-2100 的方案设计成果",
+        "objective": "检查方案设计师提交的五子棋游戏方案设计文档，并决定通过或驳回。",
+        "acceptance_criteria": [
+          "使用原生 HTML5、CSS3 和 JavaScript，零第三方依赖",
+          "标准 15x15 棋盘，双人同屏轮流落子，黑方先手且不实现禁手",
+          "设计覆盖横、竖、斜线五连胜、满盘平局、重复落子和重新开始",
+          "方案说明 Canvas 2D 主方案、DOM 网格备选方案及回退边界"
+        ],
+        "required_deliverables": [
+          {
+            "id": "gomoku-solution-design",
+            "title": "五子棋游戏方案设计文档",
+            "description": "gomoku-solution-design.md，共 133 行新增",
+            "required": true,
+            "purpose": "方案设计审查",
+            "missing": false,
+            "url": "https://git-common-zgsm.sangfor.com/t-a74c21e4/wf-b7d47227/pulls/3"
+          }
+        ],
+        "prepare_allowed": true,
+        "providers": [
+          "gitea"
+        ],
+        "repositories": [
+          {
+            "provider": "gitea",
+            "identity": "t-a74c21e4/wf-b7d47227",
+            "clone_url": "https://git-common-zgsm.sangfor.com/t-a74c21e4/wf-b7d47227.git",
+            "base_ref": "inst-97cf6dd2",
+            "target_ref": "node/01-0447d3a1",
+            "head_sha": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "prepare_allowed": true
+          }
+        ],
+        "materials": [
+          {
+            "id": "gomoku-solution-design",
+            "identity": "gomoku-solution-design.md",
+            "kind": "gitea_pull_request",
+            "name": "五子棋游戏方案设计文档",
+            "version": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "read_only": true,
+            "source_version": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "relative_path": "review/gomoku-solution-design.md",
+            "role": "reference_only",
+            "sha256": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730"
+          }
+        ],
+        "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
+      "projection": {
+        "display_status": "not_prepared",
+        "flags": {},
+        "available_actions": [
+          "get",
+          "prepare"
+        ]
+      }
+    },
+    "prepare": {
+      "key": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic"
+      },
+      "remote_version": "1:1:1",
+      "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
+      "attempt": 1,
+      "directory": "demo/costrict-006485da-solution-review",
+      "prepared": true,
+      "activity": "prepared",
+      "dirty": false,
+      "offline": false,
+      "cloud_state_unverified": false,
+      "read_only": false,
+      "write_authority_lost": false,
+      "won_by_other_operation": false,
+      "cleanup_pending": false,
+      "reprepare_required": false,
+      "reconfirmation_required": false,
+      "sync_pending": false,
+      "ended": false,
+      "outcome": "completed",
+      "performed": true
+    },
+    "start": {
+      "key": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic"
+      },
+      "remote_version": "1:1:1",
+      "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
+      "attempt": 1,
+      "directory": "demo/costrict-006485da-solution-review",
+      "prepared": true,
+      "activity": "active",
+      "dirty": false,
+      "offline": false,
+      "cloud_state_unverified": false,
+      "read_only": false,
+      "write_authority_lost": false,
+      "won_by_other_operation": false,
+      "cleanup_pending": false,
+      "reprepare_required": false,
+      "reconfirmation_required": false,
+      "sync_pending": false,
+      "ended": false,
+      "outcome": "completed",
+      "performed": true
+    },
+    "pause": {
+      "key": {
+        "cloud_instance_id": "zgsm",
+        "workspace_id": "costrict",
+        "node_run_id": "006485da-3f92-443e-8c5d-677bfbd82225",
+        "role": "critic"
+      },
+      "remote_version": "1:1:1",
+      "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
+      "attempt": 1,
+      "directory": "demo/costrict-006485da-solution-review",
+      "prepared": true,
+      "activity": "prepared",
+      "dirty": false,
+      "offline": false,
+      "cloud_state_unverified": false,
+      "read_only": false,
+      "write_authority_lost": false,
+      "won_by_other_operation": false,
+      "cleanup_pending": false,
+      "reprepare_required": false,
+      "reconfirmation_required": false,
+      "sync_pending": false,
+      "ended": false,
+      "outcome": "completed",
+      "performed": true
+    },
+    "review_approve_preview": {
+      "id": "costrict-006485da-review-approve",
+      "kind": "approve",
+      "status": "previewed",
+      "task_version": 1,
+      "context_version": 1,
+      "attempt": 1,
+      "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
+      "content_digest": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730",
+      "risk_digest": "a31eccc3f8d5d9e13e827b7e68cd00f48b0f25201d29234cef8aa9db455c733a",
+      "preview_digest": "a31eccc3f8d5d9e13e827b7e68cd00f48b0f25201d29234cef8aa9db455c733a",
+      "review_snapshot_id": "costrict-006485da-b015f800da59",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "publish_plan": {
+        "summary": "通过五子棋游戏方案设计文档，推进 COS-155 的方案设计节点",
+        "changes": [
+          "审查 gomoku-solution-design.md",
+          "PR#3 包含 1 个文件、133 行新增"
+        ],
+        "missing_required_deliverables": [],
+        "destination": "Multica 方案设计节点审查结论",
+        "external_effect": "通过后工作流进入任务拆解阶段",
+        "review_snapshot": {
+          "pull_request_url": "https://git-common-zgsm.sangfor.com/t-a74c21e4/wf-b7d47227/pulls/3",
+          "commit_sha": "b015f800da59abd2cfdb3795de8201b449bcc982",
+          "manifest_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+        }
+      }
+    },
+    "review_reject_preview": {
+      "id": "costrict-006485da-review-reject",
+      "kind": "reject",
+      "status": "previewed",
+      "task_version": 1,
+      "context_version": 1,
+      "attempt": 1,
+      "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
+      "content_digest": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730",
+      "risk_digest": "6dce922b5b8f5261a03aabb3ba9da3e0299648ad73304ea029be21aa61d61fde",
+      "preview_digest": "6dce922b5b8f5261a03aabb3ba9da3e0299648ad73304ea029be21aa61d61fde",
+      "review_snapshot_id": "costrict-006485da-b015f800da59",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "publish_plan": {
+        "summary": "驳回五子棋游戏方案设计文档并要求方案设计师返工",
+        "changes": [
+          "审查 gomoku-solution-design.md",
+          "PR#3 包含 1 个文件、133 行新增",
+          "驳回原因取自本次命令的 --reason 参数"
+        ],
+        "missing_required_deliverables": [],
+        "destination": "Multica 方案设计节点审查结论",
+        "external_effect": "驳回后方案设计师进入返工",
+        "review_snapshot": {
+          "pull_request_url": "https://git-common-zgsm.sangfor.com/t-a74c21e4/wf-b7d47227/pulls/3",
+          "commit_sha": "b015f800da59abd2cfdb3795de8201b449bcc982",
+          "manifest_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+        }
+      }
+    },
+    "review_confirm:costrict-006485da-review-approve": {
+      "id": "costrict-006485da-operation-approve",
+      "preview_id": "costrict-006485da-review-approve",
+      "kind": "approve",
+      "status": "completed",
+      "publish_plan": {
+        "review_snapshot_id": "costrict-006485da-b015f800da59",
+        "commit_sha": "b015f800da59abd2cfdb3795de8201b449bcc982",
+        "manifest_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
+      "outcome": "completed"
+    },
+    "review_confirm:costrict-006485da-review-reject": {
+      "id": "costrict-006485da-operation-reject",
+      "preview_id": "costrict-006485da-review-reject",
+      "kind": "reject",
+      "status": "completed",
+      "publish_plan": {
+        "review_snapshot_id": "costrict-006485da-b015f800da59",
+        "commit_sha": "b015f800da59abd2cfdb3795de8201b449bcc982",
+        "manifest_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
+      "outcome": "completed"
+    }
+  }
+}

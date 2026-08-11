@@ -50,7 +50,11 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Name: "confirm", Kind: "flag", Flag: "--confirm", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		Summary: "Previously issued preview id",
 	}
-	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm}) {
+	wantFixture := ArgumentSpec{
+		Name: "fixture", Kind: "flag", Flag: "--fixture", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
+		Summary: "Local task fixture for an isolated demonstration",
+	}
+	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm, wantFixture}) {
 		t.Fatalf("submit arguments = %+v", got)
 	}
 
@@ -65,7 +69,7 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Summary:      "Required for reject",
 	}
 	review := commands["review"]
-	if !reflect.DeepEqual(review.Arguments, []ArgumentSpec{wantTaskKey, wantDecision, wantReason, wantConfirm}) {
+	if !reflect.DeepEqual(review.Arguments, []ArgumentSpec{wantTaskKey, wantDecision, wantReason, wantConfirm, wantFixture}) {
 		t.Fatalf("review arguments = %+v", review.Arguments)
 	}
 	if got := review.MutuallyExclusive; len(got) != 2 || len(got[0]) != 2 || got[0][0] != "confirm" || got[0][1] != "decision" || len(got[1]) != 2 || got[1][0] != "confirm" || got[1][1] != "reason" {
@@ -77,7 +81,7 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Summary: "Preview explicit risky discard",
 	}
 	deleteCommand := commands["delete"]
-	if !reflect.DeepEqual(deleteCommand.Arguments, []ArgumentSpec{wantTaskKey, wantForceDiscard, wantConfirm}) {
+	if !reflect.DeepEqual(deleteCommand.Arguments, []ArgumentSpec{wantTaskKey, wantForceDiscard, wantConfirm, wantFixture}) {
 		t.Fatalf("delete arguments = %+v", deleteCommand.Arguments)
 	}
 	if got := deleteCommand.MutuallyExclusive; len(got) != 1 || len(got[0]) != 2 || got[0][0] != "confirm" || got[0][1] != "force_discard" {
