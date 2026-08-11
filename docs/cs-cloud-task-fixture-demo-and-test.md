@@ -92,21 +92,86 @@ $binary = 'C:\Users\demo\.costrict\bin\cs-cloud.exe'
 
 ## 4. Skill 交互演示
 
-### 4.1 推荐演示提示词
+### 4.1 测试数据注入与交互边界
 
-在已加载 `cs-cloud-task` skill 的 CSC/CoStrict 会话中输入：
+交互演示只模拟后台返回的数据，用户操作必须按真实使用场景逐步进行。开始会话前，由测试控制端在用户不可见的执行上下文中绑定以下测试数据：
 
 ```text
-请使用 cs-cloud-task skill 演示本地审查流程。
-fixture 为 F:\ai-coding\cs-cloud\skills\cs-cloud-task\testdata\costrict-006485da-solution-review.json，
-task_key 为 zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic。
-先查看任务列表和详情，再准备、开始、暂停并重新开始处理，最后生成“通过”审查预览。
-展示预览后停止，等待我单独确认，不要代替我确认。
+fixture=F:\ai-coding\cs-cloud\skills\cs-cloud-task\testdata\costrict-006485da-solution-review.json
+task_key=zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic
 ```
 
-skill 应按运行时 catalog 构造命令，不应直接读取 fixture JSON，也不应调用 Daemon HTTP。
+该绑定属于测试环境准备，不得作为用户消息发送，也不得出现在 skill 面向用户的回复中。测试控制端应确保 skill 按运行时 catalog 为 `cs-cloud task` 调用附加 fixture 参数；skill 不直接读取 fixture JSON，也不调用 Daemon HTTP。
 
-### 4.2 预期演示过程
+用户消息中不得出现 `演示`、`fixture`、`task_key`、`cs-cloud-task skill`、测试步骤编排或预期返回值。不得用一条提示词要求 skill 连续完成整个流程；每一步都由用户在看到上一轮真实格式的结果后再发起。
+
+### 4.2 逐步交互流程
+
+#### 第一步：发现待办任务
+
+用户输入：
+
+```text
+查看一下我当前需要处理的任务。
+```
+
+skill 应列出当前任务。用户从结果中看到 `COS-155 用原生web技术创建一个五子棋游戏-2100` 的方案设计审查任务后，再进入下一步。
+
+#### 第二步：查看任务详情
+
+用户输入：
+
+```text
+打开 COS-155 的方案设计审查任务，查看详细信息。
+```
+
+skill 应展示 Issue、节点、执行者、审查者、交付物、PR、commit、验收条件和设计范围，不推进任务状态。
+
+#### 第三步：准备任务
+
+用户输入：
+
+```text
+准备这个审查任务。
+```
+
+skill 应返回准备结果，任务展示状态变为 `prepared`。
+
+#### 第四步：开始处理
+
+用户输入：
+
+```text
+开始处理这个任务。
+```
+
+skill 应返回开始结果，任务展示状态变为 `in_progress`。
+
+#### 第五步：暂停处理
+
+用户输入：
+
+```text
+先暂停这个任务，我稍后继续。
+```
+
+skill 应返回暂停结果，任务展示状态回到 `prepared`。
+
+#### 第六步：继续处理
+
+用户输入：
+
+```text
+继续处理刚才的任务。
+```
+
+skill 应再次开始该任务，展示状态变为 `in_progress`。
+
+#### 第七步：提交审查决定
+
+用户在审阅交付物后，根据通过或驳回场景发送对应的业务指令。skill 必须先生成审查预览并停止，不能在同一轮中代替用户确认。
+
+完整流程的状态变化如下：
 
 | 步骤 | CLI outcome | performed | 展示状态 |
 |---|---|---:|---|
@@ -127,7 +192,13 @@ skill 应按运行时 catalog 构造命令，不应直接读取 fixture JSON，�
 - 不可变 commit SHA。
 - 验收条件和设计范围。
 
-### 4.3 通过审查
+### 4.3 通过审查场景
+
+用户输入：
+
+```text
+方案设计符合验收要求，通过这个审查。
+```
 
 skill 展示通过预览后，应明确说明操作尚未完成。预览至少应包含：
 
@@ -138,10 +209,10 @@ skill 展示通过预览后，应明确说明操作尚未完成。预览至少�
 - commit：`b015f800da59abd2cfdb3795de8201b449bcc982`。
 - manifest digest：`bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71`。
 
-确认预览内容后，用户单独回复：
+确认预览内容后，用户在下一轮单独回复：
 
 ```text
-确认通过该审查预览。
+确认通过。
 ```
 
 skill 只能执行预览信封中唯一的 `safety=requires_confirmation` 候选 argv，不得自行重构 `--confirm`、decision、fixture 路径或其他参数。
@@ -155,20 +226,18 @@ kind=approve
 operation=costrict-006485da-operation-approve
 ```
 
-### 4.4 驳回审查
+### 4.4 驳回审查场景
 
-开始一轮新的演示，输入：
+使用全新的会话和初始测试数据，按 4.2 的第一步至第六步完成任务发现与处理。用户审阅交付物后输入：
 
 ```text
-请使用相同 fixture 和 task_key 生成“驳回”审查预览。
-驳回原因：方案需补充键盘可访问性验收说明。
-展示预览后停止，等待我单独确认。
+这个方案需要补充键盘可访问性验收说明，请驳回。
 ```
 
-没有 `reason` 时，skill 不应启动 review 命令。预览生成后，用户单独回复：
+skill 应从用户消息中提取驳回原因；原因不明确时应先询问，不能启动 review 命令。预览生成后，用户在下一轮单独回复：
 
 ```text
-确认驳回该审查预览。
+确认驳回。
 ```
 
 预期结果：
@@ -384,4 +453,3 @@ $LASTEXITCODE
 - [ ] fixture 模式不连接 Multica、Gitea 或 Daemon。
 - [ ] 未传 fixture 时保持原正式流程。
 - [ ] 相关模块测试、构建和 JSON 校验通过。
-
