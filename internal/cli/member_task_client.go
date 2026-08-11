@@ -254,9 +254,6 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := a.WritePID(cmd.Process.Pid); err != nil {
-		return err
-	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 	ticker := time.NewTicker(200 * time.Millisecond)
