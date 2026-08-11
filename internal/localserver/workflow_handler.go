@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
@@ -178,4 +179,54 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeOK(w, map[string]string{"status": "accepted"})
+}
+
+// handleWorkflowTaskFacts returns the durable facts recorded for a task,
+// whether pending or delivered, plus whether the task is still in the driver's
+// running table. This lets the multica server reconcile task state from the
+// device instead of inferring it from session liveness.
+func (s *Server) handleWorkflowTaskFacts(w http.ResponseWriter, r *http.Request) {
+	if s.workflow == nil {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
+		return
+	}
+
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task_id")
+		return
+	}
+
+	outbox := s.workflow.Outbox()
+	if outbox == nil {
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "workflow driver not initialized")
+		return
+	}
+
+	facts, err := outbox.All()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "read outbox: "+err.Error())
+		return
+	}
+
+	filtered := make([]workflowrunner.OutboxFact, 0, len(facts))
+	for _, f := range facts {
+		if f.TaskID == taskID {
+			filtered = append(filtered, f)
+		}
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].OccurredAt.Equal(filtered[j].OccurredAt) {
+			return filtered[i].OccurredAt.Before(filtered[j].OccurredAt)
+		}
+		return filtered[i].FactID < filtered[j].FactID
+	})
+
+	running := s.workflow.IsTaskRunning(taskID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"facts":        filtered,
+		"task_running": running,
+	})
 }

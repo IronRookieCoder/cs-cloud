@@ -234,6 +234,7 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
 	api.HandleFunc("POST /workflow/tasks/{id}/complete", s.handleWorkflowTaskComplete)
+	api.HandleFunc("GET /workflow/facts", s.handleWorkflowTaskFacts)
 
 	s.http = &http.Server{
 		Handler:           mux,

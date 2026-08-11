@@ -274,6 +274,23 @@ func (d *Driver) Health() error {
 	return nil
 }
 
+// IsTaskRunning reports whether the task is currently in the running table.
+// It is safe to call from handlers outside of task execution goroutines.
+func (d *Driver) IsTaskRunning(taskID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.running[taskID]
+	return ok
+}
+
+// Outbox returns the driver's durable task-fact outbox. It is always non-nil
+// after Start has succeeded.
+func (d *Driver) Outbox() *Outbox {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.outbox
+}
+
 // RunTask executes a task payload synchronously. It returns an error if the
 // driver is not running or if task execution fails.
 func (d *Driver) RunTask(ctx context.Context, payload workflow.TaskRunPayload) error {

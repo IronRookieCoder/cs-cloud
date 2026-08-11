@@ -143,3 +143,49 @@ func (o *Outbox) MarkDone(factID string) error {
 	}
 	return nil
 }
+
+// All returns all facts in both the pending and done directories. Corrupt files
+// are logged and skipped so a single bad file cannot hide the rest of the
+// device state.
+func (o *Outbox) All() ([]OutboxFact, error) {
+	if err := o.ensureDirs(); err != nil {
+		return nil, err
+	}
+
+	pending, err := o.readFactsDir(o.pendingDir())
+	if err != nil {
+		return nil, err
+	}
+	done, err := o.readFactsDir(o.doneDir())
+	if err != nil {
+		return nil, err
+	}
+	return append(pending, done...), nil
+}
+
+func (o *Outbox) readFactsDir(dir string) ([]OutboxFact, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read facts dir %s: %w", dir, err)
+	}
+
+	var facts []OutboxFact
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("outbox: skipping unreadable file %s: %v", path, err)
+			continue
+		}
+		var f OutboxFact
+		if err := json.Unmarshal(data, &f); err != nil {
+			log.Printf("outbox: skipping corrupt file %s: %v", path, err)
+			continue
+		}
+		facts = append(facts, f)
+	}
+	return facts, nil
+}

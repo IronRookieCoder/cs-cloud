@@ -153,3 +153,64 @@ func TestOutbox_PendingSkipsCorruptFiles(t *testing.T) {
 		t.Errorf("expected fact_id %q, got %q", good.FactID, pending[0].FactID)
 	}
 }
+
+func TestOutbox_AllReturnsPendingAndDone(t *testing.T) {
+	o := newTestOutbox(t)
+	pending := sampleFact("fact-pending")
+	done := sampleFact("fact-done")
+
+	if err := o.Add(pending); err != nil {
+		t.Fatalf("Add pending fact failed: %v", err)
+	}
+	if err := o.Add(done); err != nil {
+		t.Fatalf("Add done fact failed: %v", err)
+	}
+	if err := o.MarkDone(done.FactID); err != nil {
+		t.Fatalf("MarkDone failed: %v", err)
+	}
+
+	all, err := o.All()
+	if err != nil {
+		t.Fatalf("All failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 facts, got %d", len(all))
+	}
+
+	ids := make(map[string]bool, len(all))
+	for _, f := range all {
+		ids[f.FactID] = true
+	}
+	if !ids[pending.FactID] {
+		t.Errorf("expected pending fact %q in All result", pending.FactID)
+	}
+	if !ids[done.FactID] {
+		t.Errorf("expected done fact %q in All result", done.FactID)
+	}
+}
+
+func TestOutbox_AllSkipsCorruptFiles(t *testing.T) {
+	o := newTestOutbox(t)
+	good := sampleFact("fact-good")
+	if err := o.Add(good); err != nil {
+		t.Fatalf("Add good fact failed: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(o.pendingDir(), "corrupt.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt pending file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(o.doneDir(), "corrupt.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt done file: %v", err)
+	}
+
+	all, err := o.All()
+	if err != nil {
+		t.Fatalf("All failed on corrupt files: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected 1 good fact with corrupt files skipped, got %d", len(all))
+	}
+	if all[0].FactID != good.FactID {
+		t.Errorf("expected fact_id %q, got %q", good.FactID, all[0].FactID)
+	}
+}
