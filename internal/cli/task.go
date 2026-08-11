@@ -23,8 +23,12 @@ import (
 const taskCompleteAttempts = 3
 
 // taskCompleteRetryWait paces retries. Short: completion is latency-sensitive
-// (the driver's completion grace window is seconds), so we must not back off
-// for long before the signal lands.
+// because the signal must reach the localserver and enter the driver's
+// completion registry before execute returns and unregisterCompletion removes
+// the task's entry - after that the POST gets a 409 and the explicit
+// completion payload is lost. (The fail/complete race is arbitrated
+// server-side via ApplyTaskFact's FailureGraceWindow; this retry only guards
+// device-side signal delivery.)
 const taskCompleteRetryWait = 500 * time.Millisecond
 
 // errTaskAlreadyFinished represents a 409 from localserver: the task is no
@@ -38,9 +42,10 @@ var errTaskAlreadyFinished = errors.New("task already finished")
 // It calls back into this device's localserver, which signals the driver.
 //
 // The agent passes NO context flags: task id + local server URL come from the
-// environment, which `cs-cloud workflow` populated from .cs-cloud.env at task
-// start (see loadTaskEnvFile). Each command takes at most one optional flag
-// (summary / reason) to keep the surface small and hard to misuse.
+// environment, which `cs-cloud workflow` fills from .cs-cloud.env when env
+// propagation through the agent subprocess failed. Each command takes at most
+// one optional flag (summary / reason) to keep the surface small and hard to
+// misuse.
 func taskCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
 	if len(args) == 0 {
@@ -117,7 +122,8 @@ func runTaskReview(args []string, decision string) error {
 
 // postTaskCompletion POSTs the completion payload to this device's localserver
 // endpoint, which forwards it to the driver via SignalTaskCompletion. Task id +
-// local URL come from the env (populated from .cs-cloud.env by loadTaskEnvFile).
+// local URL come from the env (filled from .cs-cloud.env by loadTaskEnvFile when
+// env propagation through the agent subprocess failed).
 //
 // The call is the agent's only chance to signal completion, so transient
 // failures are retried (taskCompleteAttempts). A 409 means the task already

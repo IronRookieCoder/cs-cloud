@@ -1,0 +1,867 @@
+package workflowrunner
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"cs-cloud/internal/agent"
+	"cs-cloud/internal/agent/csc"
+	"cs-cloud/internal/platform"
+	"cs-cloud/internal/provider"
+	"cs-cloud/internal/runtime"
+	"cs-cloud/internal/workflow"
+)
+
+// fakeAdoptBackend records the task terminal callbacks and message posts made
+// by AdoptUserTurn.
+type fakeAdoptBackend struct {
+	mu            sync.Mutex
+	completeCalls []adoptCompleteCall
+	failCalls     []adoptFailCall
+	messageCalls  []adoptMessageCall
+	factCalls     []adoptFactCall
+}
+
+type adoptCompleteCall struct {
+	TaskID    string
+	Output    string
+	SessionID string
+	WorkDir   string
+}
+
+type adoptFailCall struct {
+	TaskID        string
+	Reason        string
+	FailureReason string
+}
+
+type adoptMessageCall struct {
+	TaskID  string
+	Content string
+}
+
+type adoptFactCall struct {
+	FactID        string
+	TaskID        string
+	Kind          string
+	Output        string
+	FailureReason string
+}
+
+func newFakeAdoptBackend() *fakeAdoptBackend {
+	return &fakeAdoptBackend{}
+}
+
+func (f *fakeAdoptBackend) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		path := r.URL.Path
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		if len(parts) < 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		taskID := parts[len(parts)-2]
+		suffix := parts[len(parts)-1]
+
+		var bodyMap map[string]any
+		_ = json.Unmarshal(body, &bodyMap)
+
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch suffix {
+		case "complete":
+			f.completeCalls = append(f.completeCalls, adoptCompleteCall{
+				TaskID:    taskID,
+				Output:    stringValue(bodyMap, "output"),
+				SessionID: stringValue(bodyMap, "session_id"),
+				WorkDir:   stringValue(bodyMap, "work_dir"),
+			})
+		case "fail":
+			f.failCalls = append(f.failCalls, adoptFailCall{
+				TaskID:        taskID,
+				Reason:        stringValue(bodyMap, "error"),
+				FailureReason: stringValue(bodyMap, "failure_reason"),
+			})
+		case "messages":
+			content := ""
+			if msgs, ok := bodyMap["messages"].([]any); ok && len(msgs) > 0 {
+				if msg, ok := msgs[0].(map[string]any); ok {
+					content = stringValue(msg, "content")
+				}
+			}
+			f.messageCalls = append(f.messageCalls, adoptMessageCall{
+				TaskID:  taskID,
+				Content: content,
+			})
+		case "facts":
+			f.factCalls = append(f.factCalls, adoptFactCall{
+				FactID:        stringValue(bodyMap, "fact_id"),
+				TaskID:        taskID,
+				Kind:          stringValue(bodyMap, "kind"),
+				Output:        stringValue(bodyMap, "output"),
+				FailureReason: stringValue(bodyMap, "failure_reason"),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
+}
+
+func (f *fakeAdoptBackend) snapshot() (complete []adoptCompleteCall, fail []adoptFailCall, messages []adoptMessageCall) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]adoptCompleteCall{}, f.completeCalls...),
+		append([]adoptFailCall{}, f.failCalls...),
+		append([]adoptMessageCall{}, f.messageCalls...)
+}
+
+func (f *fakeAdoptBackend) factSnapshot() []adoptFactCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]adoptFactCall{}, f.factCalls...)
+}
+
+func stringValue(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// fakeCSCServer serves the SSE event stream, session directory lookup, and
+// message list used by AdoptUserTurn.
+type fakeCSCServer struct {
+	mu              sync.Mutex
+	sessionDir      string
+	messages        json.RawMessage
+	events          []cscEvent
+	subscribed      chan struct{}
+	eventStatusCode int
+	hangEvent       bool
+	holdOpen        bool
+}
+
+type cscEvent struct {
+	Name string
+	Data string
+}
+
+func newFakeCSCServer(sessionDir string, messages json.RawMessage, events []cscEvent) *fakeCSCServer {
+	return &fakeCSCServer{
+		sessionDir: sessionDir,
+		messages:   messages,
+		events:     events,
+	}
+}
+
+func newFakeCSCServerWithSubscribeSignal(sessionDir string, messages json.RawMessage, events []cscEvent) *fakeCSCServer {
+	return &fakeCSCServer{
+		sessionDir: sessionDir,
+		messages:   messages,
+		events:     events,
+		subscribed: make(chan struct{}),
+	}
+}
+
+func newFakeCSCServerWithEventFailure(statusCode int) *fakeCSCServer {
+	return &fakeCSCServer{
+		eventStatusCode: statusCode,
+	}
+}
+
+func newFakeCSCServerWithHangingEvent() *fakeCSCServer {
+	return &fakeCSCServer{
+		hangEvent: true,
+	}
+}
+
+// newFakeCSCServerHoldOpen serves the given events and then holds the SSE
+// stream open until the client disconnects, simulating an in-flight turn.
+func newFakeCSCServerHoldOpen(messages json.RawMessage, events []cscEvent) *fakeCSCServer {
+	return &fakeCSCServer{
+		messages: messages,
+		events:   events,
+		holdOpen: true,
+	}
+}
+
+func (f *fakeCSCServer) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/event", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		statusCode := f.eventStatusCode
+		subscribed := f.subscribed
+		hangEvent := f.hangEvent
+		f.mu.Unlock()
+
+		if subscribed != nil {
+			close(subscribed)
+		}
+
+		if hangEvent {
+			<-r.Context().Done()
+			return
+		}
+
+		if statusCode != 0 {
+			w.WriteHeader(statusCode)
+			_, _ = w.Write([]byte("event stream unavailable"))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		f.mu.Lock()
+		events := append([]cscEvent{}, f.events...)
+		f.mu.Unlock()
+		for _, ev := range events {
+			_, _ = fmt.Fprintf(w, "event: %s\n", ev.Name)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", ev.Data)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		f.mu.Lock()
+		holdOpen := f.holdOpen
+		f.mu.Unlock()
+		if holdOpen {
+			<-r.Context().Done()
+		}
+	})
+	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Trim(r.URL.Path, "/")
+		parts := strings.Split(path, "/")
+		if len(parts) < 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		sessionID := parts[1]
+		remainder := ""
+		if len(parts) > 2 {
+			remainder = parts[2]
+		}
+		switch {
+		case r.Method == http.MethodGet && remainder == "":
+			f.mu.Lock()
+			dir := f.sessionDir
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":        sessionID,
+				"directory": dir,
+			})
+		case r.Method == http.MethodGet && remainder == "message":
+			f.mu.Lock()
+			msgs := f.messages
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(msgs)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	return mux
+}
+
+func startAdoptDriver(t *testing.T, backendURL string) (*Driver, *runtime.EventBus) {
+	t.Helper()
+	// Isolate the app dir so Driver.Start (which creates the durable outbox and
+	// starts its delivery loop) does not touch the real ~/.multica, and each
+	// test's facts live in their own temp outbox.
+	prev := platform.DataDir()
+	platform.SetDataDir(t.TempDir())
+	t.Cleanup(func() { platform.SetDataDir(prev) })
+
+	cfg := workflow.Config{
+		WorkspacesRoot: t.TempDir(),
+		CacheDir:       t.TempDir(),
+		SyncInterval:   time.Hour,
+		GCInterval:     time.Hour,
+		AgentTimeout:   time.Minute,
+		AllowedAgents:  []string{"csc"},
+	}
+	d := NewDriver(cfg, &Dependencies{
+		BackendBaseURL: backendURL,
+		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "tok"}, nil },
+	})
+	// Wire a real EventBus onto the driver and return it so each test can route
+	// its fake csc agent's events onto the bus — mirroring how the localserver
+	// wires a managed agent's emitter. AdoptUserTurn consumes the session's
+	// events from the bus (not a private channel), so an unwired test agent
+	// would never produce the busy/idle transitions the watcher gates on.
+	bus := runtime.NewEventBus()
+	d.SetEventBus(bus)
+	if err := d.Start(); err != nil {
+		t.Fatalf("start driver: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	return d, bus
+}
+
+// wireAdoptAgent builds a csc agent whose parsed SSE events are emitted onto the
+// runtime EventBus, mirroring how the localserver wires a managed agent. The
+// adopt path consumes a session's events from the bus, so a test agent must
+// publish there rather than dropping its events.
+func wireAdoptAgent(bus *runtime.EventBus, endpoint string) *csc.Agent {
+	a := csc.NewAgentWithEndpoint(endpoint)
+	a.SetEventEmitter(func(ev agent.Event) { bus.Emit(ev) })
+	return a
+}
+
+func TestAdoptUserTurnCompletesOnIdle(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	sessionDir := t.TempDir()
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"hello from assistant"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	complete, fail, messagesOut := backend.snapshot()
+	if len(fail) != 0 {
+		t.Fatalf("expected no fail calls, got %+v", fail)
+	}
+	if len(complete) != 1 {
+		t.Fatalf("expected one complete call, got %d", len(complete))
+	}
+	if complete[0].Output != "hello from assistant" {
+		t.Errorf("complete output = %q, want %q", complete[0].Output, "hello from assistant")
+	}
+	if complete[0].SessionID != "session-1" {
+		t.Errorf("complete session_id = %q, want %q", complete[0].SessionID, "session-1")
+	}
+	if complete[0].WorkDir != sessionDir {
+		t.Errorf("complete work_dir = %q, want %q", complete[0].WorkDir, sessionDir)
+	}
+	if len(messagesOut) != 1 || messagesOut[0].Content != "hello from assistant" {
+		t.Errorf("message calls = %+v, want one with assistant text", messagesOut)
+	}
+}
+
+func TestAdoptedTurnCompleteWritesFactToOutbox(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	sessionDir := t.TempDir()
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"hello from assistant"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	// The completion must be durably recorded as a complete fact carrying the
+	// output, so a crash between the outcome and the in-process CompleteTask
+	// callback does not lose the produced output.
+	waitFor(t, "complete fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "complete" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var completeFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "complete" && facts[i].TaskID == "task-1" {
+			completeFact = &facts[i]
+			break
+		}
+	}
+	if completeFact == nil {
+		t.Fatalf("expected a complete fact for task-1 in outbox, got %+v", facts)
+	}
+	if completeFact.Output != "hello from assistant" {
+		t.Errorf("fact output = %q, want %q", completeFact.Output, "hello from assistant")
+	}
+	if completeFact.SessionID != "session-1" {
+		t.Errorf("fact session_id = %q, want %q", completeFact.SessionID, "session-1")
+	}
+	if completeFact.WorkDir != sessionDir {
+		t.Errorf("fact work_dir = %q, want %q", completeFact.WorkDir, sessionDir)
+	}
+}
+
+func TestAdoptedTurnCompleteFactIsDeliverable(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	sessionDir := t.TempDir()
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"hello from assistant"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	// Wait for the complete callback so the fact is definitely persisted.
+	waitFor(t, "complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	// Force a delivery pass instead of waiting for the 10s tick. Concurrent
+	// with the driver's own loop this is at-least-once and benign.
+	d.deliverOutboxPass(context.Background())
+
+	waitFor(t, "complete fact delivered to /facts", func() bool {
+		for _, fc := range backend.factSnapshot() {
+			if fc.Kind == "complete" && fc.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	var delivered *adoptFactCall
+	for _, fc := range backend.factSnapshot() {
+		if fc.Kind == "complete" && fc.TaskID == "task-1" {
+			f := fc
+			delivered = &f
+			break
+		}
+	}
+	if delivered == nil {
+		t.Fatalf("expected a complete fact for task-1 delivered to /facts, got %+v", backend.factSnapshot())
+	}
+	if delivered.Output != "hello from assistant" {
+		t.Errorf("delivered fact output = %q, want %q", delivered.Output, "hello from assistant")
+	}
+	if delivered.FactID == "" {
+		t.Errorf("delivered fact has empty fact_id")
+	}
+}
+
+func TestAdoptUserTurnFailsOnErrorEvent(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	messages := json.RawMessage(`{"messages":[]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"error_max_turns","isError":true}`},
+		{Name: "session.error", Data: `{"error":{"subtype":"error_max_turns","message":"Max turns reached"}}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	complete, fail, _ := backend.snapshot()
+	if len(complete) != 0 {
+		t.Fatalf("expected no complete calls, got %+v", complete)
+	}
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if !strings.Contains(fail[0].Reason, "Max turns reached") {
+		t.Errorf("fail reason = %q, want it to contain %q", fail[0].Reason, "Max turns reached")
+	}
+	if fail[0].FailureReason != "agent_error" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "agent_error")
+	}
+}
+
+func TestAdoptedTurnFailWritesFactToOutbox(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	messages := json.RawMessage(`{"messages":[]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"error_max_turns","isError":true}`},
+		{Name: "session.error", Data: `{"error":{"subtype":"error_max_turns","message":"Max turns reached"}}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	// Wait for the fail callback so failAdoptedTurn has run.
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	// The failure must be durably recorded as a fail fact, so a crash between
+	// the outcome and the in-process FailTask callback does not lose it.
+	waitFor(t, "fail fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "fail" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var failFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "fail" && facts[i].TaskID == "task-1" {
+			failFact = &facts[i]
+			break
+		}
+	}
+	if failFact == nil {
+		t.Fatalf("expected a fail fact for task-1 in outbox, got %+v", facts)
+	}
+	if failFact.FailureReason != "agent_error" {
+		t.Errorf("fact failure_reason = %q, want %q", failFact.FailureReason, "agent_error")
+	}
+	if failFact.Error == "" {
+		t.Errorf("fact error is empty; want the agent failure text")
+	}
+}
+
+func TestAdoptUserTurnRejectsDuplicate(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	// The first turn never ends, so the running-map slot stays occupied.
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer("", json.RawMessage(`{"messages":[]}`), events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("first AdoptUserTurn: %v", err)
+	}
+
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", wireAdoptAgent(bus, cscSrv.URL))
+	if !errors.Is(err, ErrTaskAlreadyRunning) {
+		t.Fatalf("second AdoptUserTurn error = %v, want ErrTaskAlreadyRunning", err)
+	}
+
+	// Wait for the first goroutine to finish (it will fail because the SSE
+	// stream ends without an idle event) so the test does not close the server
+	// underneath an in-flight subscribe.
+	waitFor(t, "first fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+}
+
+func TestAdoptUserTurnReleasesRunningSlot(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"done"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("first AdoptUserTurn: %v", err)
+	}
+
+	waitFor(t, "first complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	// After the first turn completes, the same taskID can be adopted again.
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("second AdoptUserTurn after release: %v", err)
+	}
+
+	waitFor(t, "second complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 1
+	})
+}
+
+// TestAdoptUserTurnSubscribesBeforeReturn verifies that AdoptUserTurn does not
+// return until the SSE subscription is established. This closes the race where
+// the proxy forwards the user prompt before the driver is listening to events.
+func TestAdoptUserTurnSubscribesBeforeReturn(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	fakeCSC := newFakeCSCServerWithSubscribeSignal("", json.RawMessage(`{"messages":[]}`), []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	})
+	cscSrv := httptest.NewServer(fakeCSC.handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	select {
+	case <-fakeCSC.subscribed:
+		// ok — subscription was established before return.
+	case <-time.After(5 * time.Second):
+		t.Fatal("AdoptUserTurn returned before the SSE subscription was established")
+	}
+}
+
+// TestAdoptUserTurnSubscribeFailureReportsFailure verifies that a failed SSE
+// subscription is reported to the backend as a failed task and the error is
+// returned to the caller.
+func TestAdoptUserTurnSubscribeFailureReportsFailure(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServerWithEventFailure(http.StatusServiceUnavailable).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error on subscribe failure")
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	_, fail, _ := backend.snapshot()
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "agent_error" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "agent_error")
+	}
+	if !strings.Contains(fail[0].Reason, "event stream unavailable") {
+		t.Errorf("fail reason = %q, want it to contain %q", fail[0].Reason, "event stream unavailable")
+	}
+}
+
+// TestAdoptUserTurnSubscribeEstablishmentTimeout verifies that a hanging SSE
+// subscription establishment is bounded and reported to the backend as a failed
+// task. Returning an error lets the proxy forward the prompt normally.
+func TestAdoptUserTurnSubscribeEstablishmentTimeout(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServerWithHangingEvent().handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	d.adoptEstablishmentTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error on establishment timeout")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("AdoptUserTurn took %s, want under 1s", elapsed)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	_, fail, _ := backend.snapshot()
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "agent_error" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "agent_error")
+	}
+}
+
+// TestAdoptUserTurnReserveErrorsAreNotDuplicate verifies that non-duplicate
+// reserve failures (e.g. driver not running) are surfaced as-is, not mapped to
+// ErrTaskAlreadyRunning.
+func TestAdoptUserTurnReserveErrorsAreNotDuplicate(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	cscSrv := httptest.NewServer(newFakeCSCServer("", json.RawMessage(`{"messages":[]}`), nil).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	// Stop the driver so reserveTaskID fails the Health() check.
+	if err := d.Stop(); err != nil {
+		t.Fatalf("stop driver: %v", err)
+	}
+
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
+	if errors.Is(err, ErrTaskAlreadyRunning) {
+		t.Fatalf("AdoptUserTurn error = %v, should not be ErrTaskAlreadyRunning", err)
+	}
+	if err == nil {
+		t.Fatal("AdoptUserTurn returned nil error when driver was stopped")
+	}
+}
+
+// TestAdoptUserTurnAbortReportsCancelled verifies that AbortTask cancels an
+// adopted turn's watch and that the abort is reported with failure_reason
+// "cancelled", mirroring the dispatched-run path.
+func TestAdoptUserTurnAbortReportsCancelled(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	// The turn goes busy and then stays in flight until the watch is cancelled.
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServerHoldOpen(json.RawMessage(`{"messages":[]}`), events).handler())
+	defer cscSrv.Close()
+
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	if err := d.AbortTask("task-1"); err != nil {
+		t.Fatalf("AbortTask: %v", err)
+	}
+
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	complete, fail, _ := backend.snapshot()
+	if len(complete) != 0 {
+		t.Fatalf("expected no complete calls, got %+v", complete)
+	}
+	if len(fail) != 1 {
+		t.Fatalf("expected one fail call, got %d", len(fail))
+	}
+	if fail[0].FailureReason != "cancelled" {
+		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "cancelled")
+	}
+
+	// The abort failure must be durably recorded as a fail fact, so a crash
+	// between the abort outcome and the in-process FailTask callback does not
+	// leave the task stuck in a running state on the server.
+	waitFor(t, "abort fail fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "fail" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var abortFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "fail" && facts[i].TaskID == "task-1" {
+			abortFact = &facts[i]
+			break
+		}
+	}
+	if abortFact == nil {
+		t.Fatalf("expected a fail fact for task-1 in outbox, got %+v", facts)
+	}
+	if abortFact.FailureReason != "cancelled" {
+		t.Errorf("fact failure_reason = %q, want %q", abortFact.FailureReason, "cancelled")
+	}
+}

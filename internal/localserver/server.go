@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"cs-cloud/internal/agent/csc"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/filewatcher"
 	"cs-cloud/internal/gitwatcher"
@@ -95,6 +96,11 @@ type Server struct {
 	// the agent has been restarted in-place. Optional; when nil, restart
 	// paths skip persistence (used in tests).
 	agentPIDWriter func(pid int)
+
+	// adopter intercepts prompts sent to workflow-bound sessions and reopens
+	// the associated task so the user's turn drives the workflow. Nil when the
+	// workflow subsystem is unavailable.
+	adopter *sessionAdopter
 
 	memberTasks      *membertask.Service
 	memberTaskSecret string
@@ -243,6 +249,7 @@ func New(opts ...Option) *Server {
 	api.HandleFunc("POST /workflow/tasks/{id}/run", s.handleWorkflowTaskRun)
 	api.HandleFunc("POST /workflow/tasks/{id}/abort", s.handleWorkflowTaskAbort)
 	api.HandleFunc("POST /workflow/tasks/{id}/complete", s.handleWorkflowTaskComplete)
+	api.HandleFunc("GET /workflow/facts", s.handleWorkflowTaskFacts)
 
 	s.http = &http.Server{
 		Handler:           mux,
@@ -341,6 +348,10 @@ func (s *Server) Start(addr string) error {
 		// Pass the localserver API key so those callbacks authenticate when
 		// apiAuth is enabled (no-op when no key is configured).
 		s.workflow.SetLocalAPIKey(apiKeyFromConfig(s.cfg))
+		// Hand the runtime EventBus to the driver so AdoptUserTurn can
+		// subscribe to an adopted session's events. The bus is constructed
+		// above (before this driver), so wire it now, before Start.
+		s.workflow.SetEventBus(s.eventBus)
 		if err := s.workflow.Start(); err != nil {
 			// The workflow subsystem is optional. A daemon registered
 			// against a server without the workflow backend (no server
@@ -348,6 +359,12 @@ func (s *Server) Start(addr string) error {
 			// disabled" instead of failing the whole server.
 			logger.Warn("workflow driver disabled: %v", err)
 			s.workflowErr = err
+		} else {
+			s.adopter = &sessionAdopter{
+				bindings: s.workflow.Client(),
+				driver:   s.workflow,
+				resolve:  s.resolveCSCAgent,
+			}
 		}
 	}
 
@@ -406,6 +423,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.manager.KillAll()
 	s.termMgr.CloseAll()
 	return s.http.Shutdown(ctx)
+}
+
+// resolveCSCAgent returns the csc agent bound to the given session — the same
+// agent the proxy forwards that session's prompts to.
+//
+// Only an agent registered for this exact session qualifies. There is
+// deliberately no fallback to a default/shared csc agent: an adopted turn
+// subscribes to that agent's session event stream, and a different agent that
+// does not own the session would emit no busy/idle events for it, so the turn
+// would hang silently until agent_timeout. If the session has no bound agent,
+// adoption is skipped and the prompt falls through as an ordinary conversation.
+func (s *Server) resolveCSCAgent(sessionID string) (*csc.Agent, error) {
+	a, ok := s.manager.GetAgent(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("no agent bound to session %s", sessionID)
+	}
+	cscAgent, ok := a.(*csc.Agent)
+	if !ok {
+		return nil, fmt.Errorf("agent bound to session %s is not a csc agent", sessionID)
+	}
+	return cscAgent, nil
 }
 
 func (s *Server) TerminalManager() *terminal.TerminalManager {

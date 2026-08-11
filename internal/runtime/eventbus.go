@@ -8,6 +8,9 @@ import (
 
 type SubFilter struct {
 	Backend string
+	// ConversationID, when set, restricts delivery to events emitted for that
+	// conversation/session id. Empty delivers all (subject to Backend).
+	ConversationID string
 }
 
 type EventBus struct {
@@ -44,14 +47,27 @@ func (b *EventBus) Emit(event agent.Event) {
 	defer b.mu.RUnlock()
 
 	for ch, filter := range b.subscribers {
-		if filter != nil && filter.Backend != "" && event.Backend != filter.Backend {
-			continue
+		if filter != nil {
+			if filter.Backend != "" && event.Backend != filter.Backend {
+				continue
+			}
+			if filter.ConversationID != "" && event.ConversationID != filter.ConversationID {
+				continue
+			}
 		}
 		select {
 		case ch <- event:
 		default:
 		}
 	}
+}
+
+// SubscribeSession returns a channel that receives only events emitted for the
+// given conversation/session id. It is a convenience over Subscribe with a
+// SubFilter, for callers (e.g. the workflow driver watching an adopted turn)
+// that need one session's busy/idle/done transitions rather than the firehose.
+func (b *EventBus) SubscribeSession(conversationID string) chan agent.Event {
+	return b.Subscribe(&SubFilter{ConversationID: conversationID})
 }
 
 func (b *EventBus) SubscriberCount() int {

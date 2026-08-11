@@ -121,11 +121,14 @@ func workflowProjectList(a *app.App) error {
 }
 
 // loadTaskEnvFile loads KEY=VALUE lines from .cs-cloud.env in the current
-// directory (the task workdir) into the process env. cs-cloud writes this file
-// at task start with the CS_CLOUD_* task variables; loading it here lets the
-// workflow CLIs resolve task context from a file, which is more robust than
-// relying on env propagation through the agent subprocess. A missing file is a
-// no-op (CLIs fall back to the process env / flags).
+// directory (the task workdir) into the process env, but only for keys that are
+// not already present in the process env. cs-cloud writes this file at task
+// start with the CS_CLOUD_* task variables; loading it here lets the workflow
+// CLIs resolve task context from a file when env propagation through the agent
+// subprocess fails. Keeping process env authoritative prevents a stale
+// .cs-cloud.env (e.g. left behind after a resumed session's cwd was aligned to
+// an old task directory) from overriding the live task ID injected by the
+// daemon. A missing file is a no-op (CLIs fall back to the process env / flags).
 func loadTaskEnvFile() {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -292,7 +295,11 @@ func loadTaskEnvFileFrom(startDir string) {
 		if !ok {
 			continue
 		}
-		os.Setenv(strings.TrimSpace(k), stripEnvQuotes(strings.TrimSpace(v)))
+		k = strings.TrimSpace(k)
+		if _, ok := os.LookupEnv(k); ok {
+			continue
+		}
+		os.Setenv(k, stripEnvQuotes(strings.TrimSpace(v)))
 	}
 }
 

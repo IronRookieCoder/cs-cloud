@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -219,6 +220,31 @@ func (c *Client) FailTask(ctx context.Context, taskID string, reason string, fai
 	return c.request(ctx, http.MethodPost, path, body, nil)
 }
 
+// PostTaskFact delivers a task outcome to the modern /facts endpoint. If the
+// server responds 404 (old server without the endpoint), it falls back to the
+// legacy /complete or /fail path based on the fact kind. The returned error is
+// the delivery result: nil means accepted, *StatusError exposes HTTP status for
+// caller-side retry/ignore decisions.
+func (c *Client) PostTaskFact(ctx context.Context, f OutboxFact) error {
+	path := fmt.Sprintf(workflow.TaskFactsEndpoint, url.PathEscape(f.TaskID))
+	err := c.request(ctx, http.MethodPost, path, f, nil)
+	if err == nil {
+		return nil
+	}
+	var stErr *StatusError
+	if !errors.As(err, &stErr) || stErr.StatusCode != http.StatusNotFound {
+		return err
+	}
+	// Old server: fall back to legacy endpoint with the same payload shape.
+	if f.Kind == "complete" {
+		return c.CompleteTask(ctx, f.TaskID, f.Output, f.SessionID, f.WorkDir, agent.CompletionSignal{
+			Decision: f.Decision,
+			Reason:   f.Reason,
+		})
+	}
+	return c.FailTask(ctx, f.TaskID, f.Error, f.FailureReason)
+}
+
 // PostTaskMessages uploads task output as a single text message, matching
 // the server's batch shape ({"messages": [{seq, type, content}]}).
 func (c *Client) PostTaskMessages(ctx context.Context, taskID string, output string) error {
@@ -272,7 +298,7 @@ func (c *Client) CreateChatSession(ctx context.Context, workspaceID, agentID, ti
 
 // PinTaskSession persists the chat session binding for a task.
 func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir string) error {
-	path := fmt.Sprintf(workflow.TaskSessionEndpoint, taskID)
+	path := fmt.Sprintf(workflow.TaskSessionEndpoint, url.PathEscape(taskID))
 	return c.request(ctx, http.MethodPost, path, workflow.PinTaskSessionRequest{
 		SessionID: sessionID,
 		WorkDir:   workDir,
@@ -282,7 +308,7 @@ func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir 
 // BindNodeRunSession persists the runtime/device/session binding for a
 // workflow node run.
 func (c *Client) BindNodeRunSession(ctx context.Context, nodeRunID, runtimeID, deviceID, sessionID string) error {
-	path := fmt.Sprintf(workflow.NodeRunSessionEndpoint, nodeRunID)
+	path := fmt.Sprintf(workflow.NodeRunSessionEndpoint, url.PathEscape(nodeRunID))
 	return c.request(ctx, http.MethodPost, path, workflow.BindNodeRunSessionRequest{
 		RuntimeID: runtimeID,
 		DeviceID:  deviceID,
@@ -336,4 +362,54 @@ func (c *Client) GetWorkflowNodeRunGCCheck(ctx context.Context, nodeRunID string
 	var out GCCheckStatus
 	err := c.request(ctx, http.MethodGet, fmt.Sprintf(workflow.WorkflowNodeRunGCCheckEndpoint, nodeRunID), nil, &out)
 	return out, err
+}
+
+// SessionBinding resolves which workflow task owns a CSC session.
+type SessionBinding struct {
+	TaskID        string `json:"task_id"`
+	TaskStatus    string `json:"task_status"`
+	NodeRunID     string `json:"node_run_id"`
+	NodeRunStatus string `json:"node_run_status"`
+	Resumable     bool   `json:"resumable"`
+}
+
+// ErrSessionNotBound is returned by GetSessionBinding when the server reports
+// the session has no associated workflow binding.
+var ErrSessionNotBound = errors.New("session has no workflow binding")
+
+// ErrTaskNotResumable is returned by ResumeBeginTask when the server reports
+// the task cannot be resumed.
+var ErrTaskNotResumable = errors.New("task not resumable")
+
+// GetSessionBinding resolves which workflow task (if any) owns a CSC session.
+// A 404 response maps to ErrSessionNotBound so the proxy layer can fall
+// through to a plain conversation.
+func (c *Client) GetSessionBinding(ctx context.Context, sessionID string) (*SessionBinding, error) {
+	path := fmt.Sprintf("/api/daemon/sessions/%s/binding", url.PathEscape(sessionID))
+	var binding SessionBinding
+	err := c.request(ctx, http.MethodGet, path, nil, &binding)
+	if err != nil {
+		var stErr *StatusError
+		if errors.As(err, &stErr) && stErr.StatusCode == http.StatusNotFound {
+			return nil, ErrSessionNotBound
+		}
+		return nil, err
+	}
+	return &binding, nil
+}
+
+// ResumeBeginTask asks multica to reopen a failed task for a user-driven turn.
+// A 409 response maps to ErrTaskNotResumable; callers treat it as a plain
+// conversation.
+func (c *Client) ResumeBeginTask(ctx context.Context, taskID, sessionID string) error {
+	path := fmt.Sprintf("/api/daemon/tasks/%s/resume-begin", url.PathEscape(taskID))
+	err := c.request(ctx, http.MethodPost, path, map[string]string{"session_id": sessionID}, nil)
+	if err != nil {
+		var stErr *StatusError
+		if errors.As(err, &stErr) && stErr.StatusCode == http.StatusConflict {
+			return ErrTaskNotResumable
+		}
+		return err
+	}
+	return nil
 }

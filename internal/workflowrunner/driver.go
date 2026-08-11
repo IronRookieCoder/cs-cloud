@@ -13,6 +13,7 @@ import (
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/version"
 	"cs-cloud/internal/workflow"
@@ -85,6 +86,19 @@ type Driver struct {
 	// success via the normal CompleteTask path. execute remains the sole owner
 	// of task-status callbacks.
 	completion map[string]*completionState
+	// outbox is the durable task-fact outbox. Populated by Task 2.3; delivery
+	// loop methods tolerate a nil outbox and simply do nothing.
+	outbox *Outbox
+	// runCtx/runCancel bound the driver's background goroutines (outbox
+	// delivery). Created on Start and cancelled on Stop.
+	runCtx    context.Context
+	runCancel context.CancelFunc
+	// outboxWG tracks the outbox delivery goroutine so Stop can join it
+	// before returning; without this the loop can still be touching the
+	// outbox dir (ensureDirs) after Stop returns and race a test's tempdir
+	// cleanup. Safe to Wait on while holding d.mu: the delivery loop never
+	// acquires d.mu.
+	outboxWG sync.WaitGroup
 	// localBaseURL is this device's localserver URL, applied to the task
 	// runner on Start so in-task CLIs can call back into the driver. Set by
 	// the localserver (which knows its URL only after binding its listener).
@@ -94,7 +108,18 @@ type Driver struct {
 	// authenticate to the localserver's apiAuth middleware. Set by the
 	// localserver alongside SetLocalBaseURL.
 	localAPIKey string
-	mu          sync.Mutex
+	// eventBus is the runtime event center. AdoptUserTurn subscribes to it to
+	// watch an adopted session's busy/idle/done transitions instead of opening
+	// a private SSE channel, so session-event routing stays in one place (the
+	// bus) and the csc agent stays a pure translator. Injected by the
+	// localserver via SetEventBus after the bus is constructed; nil before
+	// that, in which case AdoptUserTurn reports the turn as unavailable.
+	eventBus SessionEventBus
+	// adoptEstablishmentTimeout bounds the SSE subscription setup phase in
+	// AdoptUserTurn. It defaults to defaultAdoptEstablishmentTimeout and is
+	// exposed only for tests.
+	adoptEstablishmentTimeout time.Duration
+	mu                        sync.Mutex
 }
 
 // NewDriver creates a new workflow driver.
@@ -104,6 +129,14 @@ func NewDriver(cfg workflow.Config, deps *Dependencies) *Driver {
 
 // Name returns the driver name.
 func (d *Driver) Name() string { return "workflow" }
+
+// Client returns the multica REST client used by the driver. Available after
+// Start has succeeded; nil before that.
+func (d *Driver) Client() *Client {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.client
+}
 
 // Start initializes the workflow driver components and starts the runtime loop.
 func (d *Driver) Start() error {
@@ -127,6 +160,9 @@ func (d *Driver) Start() error {
 	}
 	if d.cfg.AgentTimeout <= 0 {
 		d.cfg.AgentTimeout = workflow.DefaultConfig().AgentTimeout
+	}
+	if d.adoptEstablishmentTimeout <= 0 {
+		d.adoptEstablishmentTimeout = defaultAdoptEstablishmentTimeout
 	}
 
 	d.workspaceManager = NewWorkspaceManager(d.cfg.WorkspacesRoot)
@@ -172,6 +208,9 @@ func (d *Driver) Start() error {
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)
 	d.registrations = make(map[string]string)
+	// The outbox lives under the app dir so it survives daemon restarts and
+	// rebinds to the same directory after upgrade.
+	d.outbox = NewOutbox(platform.AppDir())
 
 	if err := d.runtime.Start(); err != nil {
 		d.cleanupOnError()
@@ -188,6 +227,16 @@ func (d *Driver) Start() error {
 	}()
 
 	d.state = driverStateRunning
+	d.runCtx, d.runCancel = context.WithCancel(context.Background())
+	// Launch the outbox delivery loop with WaitGroup bookkeeping at the call
+	// site (not inside startOutboxDelivery) so the function body stays free of
+	// WaitGroup coupling and can be invoked directly from tests. Stop joins
+	// this goroutine to guarantee no outbox dir touches after it returns.
+	d.outboxWG.Add(1)
+	go func() {
+		defer d.outboxWG.Done()
+		d.startOutboxDelivery(d.runCtx)
+	}()
 	return nil
 }
 
@@ -241,6 +290,16 @@ func (d *Driver) Stop() error {
 		}
 	}
 	d.running = make(map[string]*taskRecord)
+	// Cancel the driver's run context so background goroutines such as the
+	// outbox delivery loop return promptly.
+	if d.runCancel != nil {
+		d.runCancel()
+		d.runCancel = nil
+	}
+	// Join the delivery loop so it has fully stopped (no more outbox dir
+	// touches) by the time Stop returns. See the outboxWG field comment for
+	// why holding d.mu here is safe.
+	d.outboxWG.Wait()
 	d.state = driverStateIdle
 	return nil
 }
@@ -253,6 +312,23 @@ func (d *Driver) Health() error {
 		return fmt.Errorf("workflow driver not running")
 	}
 	return nil
+}
+
+// IsTaskRunning reports whether the task is currently in the running table.
+// It is safe to call from handlers outside of task execution goroutines.
+func (d *Driver) IsTaskRunning(taskID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.running[taskID]
+	return ok
+}
+
+// Outbox returns the driver's durable task-fact outbox. It is always non-nil
+// after Start has succeeded.
+func (d *Driver) Outbox() *Outbox {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.outbox
 }
 
 // RunTask executes a task payload synchronously. It returns an error if the
@@ -297,6 +373,13 @@ func (d *Driver) RunTaskAsync(payload workflow.TaskRunPayload) error {
 // task as running. It also rejects tasks whose abort arrived before the run
 // request (cancel raced the server-side push).
 func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
+	return d.reserveTaskID(payload.TaskID)
+}
+
+// reserveTaskID is the taskID-only variant used by AdoptUserTurn, which does
+// not have a full task payload. The semaphore, running map, and abort
+// tombstone logic match reserve exactly.
+func (d *Driver) reserveTaskID(taskID string) (*taskRecord, error) {
 	if err := d.Health(); err != nil {
 		return nil, err
 	}
@@ -309,17 +392,17 @@ func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if _, exists := d.running[payload.TaskID]; exists {
+	if _, exists := d.running[taskID]; exists {
 		<-d.sem
-		return nil, fmt.Errorf("task %s is already running", payload.TaskID)
+		return nil, ErrTaskAlreadyRunning
 	}
-	if ts, wasAborted := d.abortedIDs[payload.TaskID]; wasAborted {
+	if ts, wasAborted := d.abortedIDs[taskID]; wasAborted {
 		<-d.sem
 		if time.Since(ts) <= abortTombstoneTTL {
-			delete(d.abortedIDs, payload.TaskID)
-			return nil, fmt.Errorf("task %s was aborted before it started", payload.TaskID)
+			delete(d.abortedIDs, taskID)
+			return nil, fmt.Errorf("task %s was aborted before it started", taskID)
 		}
-		delete(d.abortedIDs, payload.TaskID)
+		delete(d.abortedIDs, taskID)
 	}
 	// GC expired tombstones while we hold the lock.
 	for id, ts := range d.abortedIDs {
@@ -329,7 +412,7 @@ func (d *Driver) reserve(payload workflow.TaskRunPayload) (*taskRecord, error) {
 	}
 
 	rec := &taskRecord{}
-	d.running[payload.TaskID] = rec
+	d.running[taskID] = rec
 	return rec, nil
 }
 
@@ -548,14 +631,6 @@ type agentRunResult struct {
 	err    error
 }
 
-// completionGracePeriod bounds how long runAgent waits for a completion signal
-// after a pure-tool CSC session ends its turn cleanly without calling the
-// complete tool. Once the session has returned, nothing more can arrive except
-// a signal already in flight; wait a short grace for that race, then surface
-// ErrIncomplete (→ agent_incomplete) instead of holding the slot for the full
-// remaining AgentTimeout.
-const completionGracePeriod = 5 * time.Second
-
 // runAgent supervises the agent boundary instead of trusting every SessionRunner
 // implementation to return when its context is cancelled. The worker only
 // produces a buffered result; execute remains the single owner of task status
@@ -599,28 +674,19 @@ func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, 
 			return result.output, result.err
 		}
 		if pureTool {
-			// The csc session ended its turn cleanly. If completion raced with
-			// session end, treat as complete.
+			// The csc session ended its turn cleanly. A completion signal that
+			// already arrived before the session returned is treated as complete.
 			select {
 			case <-notify:
 				return nil, nil
 			default:
 			}
-			// Pure-tool mode: a clean idle is NOT a completion. The session has
-			// ended, so nothing more can arrive except a completion signal
-			// already in flight — wait a short grace for that race, then surface
-			// ErrIncomplete (→ agent_incomplete) so a task whose agent stopped
-			// without calling complete never silently advances the workflow.
-			grace := time.NewTimer(completionGracePeriod)
-			defer grace.Stop()
-			select {
-			case <-grace.C:
-				return nil, agent.ErrIncomplete
-			case <-ctx.Done():
-				return nil, agent.ErrIncomplete
-			case <-notify:
-				return nil, nil
-			}
+			// A clean idle is not a completion. Any complete signal that arrives
+			// after the session has ended is persisted to the outbox by
+			// SignalTaskCompletion; the server's ApplyTaskFacts resurrects a
+			// failed task into completed when the complete fact falls inside the
+			// server's grace window. The device no longer waits here.
+			return nil, agent.ErrIncomplete
 		}
 		return result.output, result.err
 	case <-ctx.Done():
@@ -672,11 +738,19 @@ func (d *Driver) postTaskMessages(taskID, output string) {
 
 func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
 	logger.Warn("workflow: task %s failed: reason=%s err=%v", taskID, failureReason, taskErr)
-	// The failure path never pops the completion registry, and the failure can
-	// be a misjudgment (the agent may still be alive and finish its work):
-	// forward any completion signal from here on instead of latching it
-	// forever. The server arbitrates the fail/complete race.
-	d.markCompletionLate(taskID)
+	// Durability first: persist the failure fact before any in-process failure
+	// handling so a crash between here and the server callback can be retried.
+	d.writeFailFactToOutbox(taskID, taskErr, failureReason)
+	// The failure path never pops the completion registry; the failure can be a
+	// misjudgment (the agent may still be alive and finish its work). Mark the
+	// entry failed so any completion signal arriving before execute returns is
+	// persisted to the outbox instead of being dropped. The server arbitrates
+	// the fail/complete race.
+	d.mu.Lock()
+	if cs, ok := d.completion[taskID]; ok {
+		cs.failed = true
+	}
+	d.mu.Unlock()
 	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
 		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
 	})
@@ -688,6 +762,34 @@ func (d *Driver) failTask(taskID string, taskErr error, failureReason string) er
 		return errors.Join(taskErr, fmt.Errorf("fail task callback: %w", callbackErr))
 	}
 	return taskErr
+}
+
+// writeFailFactToOutbox persists a "fail" task fact durably. Failures are
+// logged loudly but do not block the in-process failure path.
+func (d *Driver) writeFailFactToOutbox(taskID string, taskErr error, failureReason string) {
+	if d.outbox == nil {
+		return
+	}
+	factID, err := newFactID()
+	if err != nil {
+		logger.Error("workflow: task %s failed to generate fail fact id: %v", taskID, err)
+		return
+	}
+	errStr := ""
+	if taskErr != nil {
+		errStr = taskErr.Error()
+	}
+	fact := OutboxFact{
+		FactID:        factID,
+		TaskID:        taskID,
+		Kind:          "fail",
+		OccurredAt:    time.Now().UTC(),
+		Error:         errStr,
+		FailureReason: failureReason,
+	}
+	if err := d.outbox.Add(fact); err != nil {
+		logger.Error("workflow: task %s fail fact write-through failed: %v", taskID, err)
+	}
 }
 
 // bindSession creates a chat session for the task and binds it to both the
@@ -871,6 +973,14 @@ func (d *Driver) SetLocalBaseURL(url string) {
 // called before Start; empty means the localserver has no API key configured.
 func (d *Driver) SetLocalAPIKey(key string) {
 	d.localAPIKey = key
+}
+
+// SetEventBus injects the runtime EventBus so AdoptUserTurn can subscribe to an
+// adopted session's events. The localserver owns the bus and constructs it
+// after the driver, so the bus cannot ride in Dependencies; it is wired here,
+// before Start. AdoptUserTurn is the only consumer.
+func (d *Driver) SetEventBus(bus SessionEventBus) {
+	d.eventBus = bus
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps

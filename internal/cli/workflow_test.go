@@ -24,13 +24,13 @@ func TestWorkflowWorkspaceListEmptyCache(t *testing.T) {
 	}
 }
 
-// TestLoadTaskEnvFile_PopulatesProcessEnv verifies `cs-cloud workflow` reads
-// .cs-cloud.env from the workdir (cwd) so CLIs resolve task context from a file
-// instead of relying on env propagation through the agent subprocess.
+// TestLoadTaskEnvFile_PopulatesProcessEnv verifies `cs-cloud workflow` fills
+// missing CS_CLOUD_* values from .cs-cloud.env in the workdir (cwd) so CLIs
+// resolve task context when env propagation through the agent subprocess fails.
 func TestLoadTaskEnvFile_PopulatesProcessEnv(t *testing.T) {
 	t.Chdir(t.TempDir())
-	t.Setenv("CS_CLOUD_TASK_ID", "")
-	t.Setenv("CS_CLOUD_LOCAL_URL", "")
+	os.Unsetenv("CS_CLOUD_TASK_ID")
+	os.Unsetenv("CS_CLOUD_LOCAL_URL")
 
 	content := "CS_CLOUD_TASK_ID=from-file\n# a comment, skip\nCS_CLOUD_LOCAL_URL=http://127.0.0.1:9\n"
 	if err := os.WriteFile(workflowrunner.TaskEnvFileName, []byte(content), 0o600); err != nil {
@@ -43,6 +43,29 @@ func TestLoadTaskEnvFile_PopulatesProcessEnv(t *testing.T) {
 	}
 	if got := os.Getenv("CS_CLOUD_LOCAL_URL"); got != "http://127.0.0.1:9" {
 		t.Errorf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9", got)
+	}
+}
+
+// TestLoadTaskEnvFile_KeepsProcessEnvAuthoritative verifies a stale .cs-cloud.env
+// in a resumed session's cwd cannot override the live task ID injected by the
+// daemon. Only keys not already present in the process env are filled from the
+// file.
+func TestLoadTaskEnvFile_KeepsProcessEnvAuthoritative(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("CS_CLOUD_TASK_ID", "new-task")
+	os.Unsetenv("CS_CLOUD_LOCAL_URL")
+
+	content := "CS_CLOUD_TASK_ID=old-task\nCS_CLOUD_LOCAL_URL=http://127.0.0.1:9\n"
+	if err := os.WriteFile(workflowrunner.TaskEnvFileName, []byte(content), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	loadTaskEnvFile()
+
+	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "new-task" {
+		t.Errorf("CS_CLOUD_TASK_ID = %q, want new-task (process env must stay authoritative)", got)
+	}
+	if got := os.Getenv("CS_CLOUD_LOCAL_URL"); got != "http://127.0.0.1:9" {
+		t.Errorf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9 (missing key filled from file)", got)
 	}
 }
 
@@ -61,7 +84,7 @@ func TestLoadTaskEnvFile_WalksUpToTaskRoot(t *testing.T) {
 		t.Fatalf("mkdir sub: %v", err)
 	}
 	t.Chdir(sub)
-	t.Setenv("CS_CLOUD_TASK_ID", "")
+	os.Unsetenv("CS_CLOUD_TASK_ID")
 
 	loadTaskEnvFile()
 
@@ -74,7 +97,7 @@ func TestLoadTaskEnvFile_WalksUpToTaskRoot(t *testing.T) {
 // any task tree) is a silent no-op, not an error.
 func TestLoadTaskEnvFile_NoFileIsNoOp(t *testing.T) {
 	t.Chdir(t.TempDir())
-	t.Setenv("CS_CLOUD_TASK_ID", "")
+	os.Unsetenv("CS_CLOUD_TASK_ID")
 	loadTaskEnvFile()
 	if got := os.Getenv("CS_CLOUD_TASK_ID"); got != "" {
 		t.Errorf("CS_CLOUD_TASK_ID = %q, want empty (no env file present)", got)
@@ -317,7 +340,7 @@ func TestWorkflowCmd_ConsumesTaskFlag(t *testing.T) {
 func TestLoadTaskEnvFileIgnoresOversizedFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	t.Setenv("CS_CLOUD_TASK_ID", "")
+	os.Unsetenv("CS_CLOUD_TASK_ID")
 	oversized := strings.Repeat("A", maxTaskEnvFileBytes+1)
 	if err := os.WriteFile(workflowrunner.TaskEnvFileName, []byte("CS_CLOUD_TASK_ID="+oversized+"\n"), 0o600); err != nil {
 		t.Fatalf("write env file: %v", err)

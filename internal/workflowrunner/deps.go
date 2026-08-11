@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"context"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/provider"
 )
 
@@ -35,6 +36,16 @@ type SessionAborter interface {
 // which can differ from the current task's prepared workdir.
 type SessionDirectoryResolver interface {
 	SessionDirectory(ctx context.Context, sessionID string) (string, error)
+}
+
+// SessionEventBus is the subset of the runtime EventBus the workflow driver
+// consumes to watch an adopted turn. SubscribeSession returns a channel that
+// receives only the events emitted for one conversation/session id; Unsubscribe
+// stops delivery and closes the channel. Narrowing the bus to an interface keeps
+// the driver decoupled from the concrete EventBus (and makes a fake trivial).
+type SessionEventBus interface {
+	SubscribeSession(conversationID string) chan agent.Event
+	Unsubscribe(ch chan agent.Event)
 }
 
 // Dependencies holds the external dependencies required by the workflow driver.
