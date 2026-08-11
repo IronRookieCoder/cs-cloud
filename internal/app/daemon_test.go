@@ -212,3 +212,32 @@ func TestMemberTaskDaemonReadyRequiresLiveProcessAndHealth(t *testing.T) {
 		t.Fatal("not ready with a live pid and healthy private server")
 	}
 }
+
+func TestForceCleanupStaleRemovesRuntimeStateFiles(t *testing.T) {
+	app := &App{rootDir: t.TempDir()}
+	if err := app.WritePID(999999); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.WriteAgentPID(999998); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SaveState("stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SaveServerURL("http://127.0.0.1:9876"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(app.stopFile(), []byte("stop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ForceCleanupStale()
+
+	for _, path := range []string{
+		app.pidFile(), app.agentPidFile(), app.stopFile(), app.stateFile(), app.serverFile(),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("runtime state file %q still exists: %v", path, err)
+		}
+	}
+}

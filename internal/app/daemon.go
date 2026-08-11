@@ -175,7 +175,7 @@ func (a *App) cleanupAllStateFiles() {
 	a.RemovePID()
 	a.RemoveAgentPID()
 	a.RemoveStopFile()
-	a.SaveState("stopped")
+	_ = os.Remove(a.stateFile())
 	a.SaveServerURL("")
 }
 
