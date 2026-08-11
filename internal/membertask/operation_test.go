@@ -222,7 +222,7 @@ func TestRecoverOperationUsesOriginalOperationAndMarksCompleted(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/member/task-operations/operation-1" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"id":"operation-1","preview_id":"preview-1","status":"completed","kind":"submit","publish_plan":[]}`))
+		_, _ = w.Write([]byte(`{"id":"operation-1","status":"completed","kind":"submit","publish_plan":[]}`))
 	}))
 	defer srv.Close()
 	store, key, _ := seedOperationTask(t)
@@ -236,8 +236,11 @@ func TestRecoverOperationUsesOriginalOperationAndMarksCompleted(t *testing.T) {
 	if operation.Status != OperationCompleted {
 		t.Fatalf("operation = %+v", operation)
 	}
+	if operation.PreviewID != "preview-1" {
+		t.Fatalf("preview id = %q, want preserved preview-1", operation.PreviewID)
+	}
 	record, _, _ = store.LoadTask(key)
-	if !record.Ended {
+	if !record.Ended || record.Operation == nil || record.Operation.PreviewID != "preview-1" {
 		t.Fatalf("record = %+v", record)
 	}
 }

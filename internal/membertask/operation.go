@@ -259,6 +259,11 @@ func (s *Service) RecoverOperation(ctx context.Context, key TaskKey) (Operation,
 	if operation.ID != record.Operation.ID {
 		return Operation{}, newTaskError("invalid_cloud_response", "operation identity changed during recovery", nil)
 	}
+	if operation.PreviewID == "" {
+		operation.PreviewID = record.Operation.PreviewID
+	} else if record.Operation.PreviewID != "" && operation.PreviewID != record.Operation.PreviewID {
+		return Operation{}, newTaskError("invalid_cloud_response", "operation preview identity changed during recovery", nil)
+	}
 	record.Operation = &operation
 	if operation.Status == OperationCompleted {
 		record.Ended = true
