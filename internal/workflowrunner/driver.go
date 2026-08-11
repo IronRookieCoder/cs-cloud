@@ -711,11 +711,16 @@ func (d *Driver) failTask(taskID string, taskErr error, failureReason string) er
 	// Durability first: persist the failure fact before any in-process failure
 	// handling so a crash between here and the server callback can be retried.
 	d.writeFailFactToOutbox(taskID, taskErr, failureReason)
-	// The failure path never pops the completion registry, and the failure can
-	// be a misjudgment (the agent may still be alive and finish its work):
-	// forward any completion signal from here on instead of latching it
-	// forever. The server arbitrates the fail/complete race.
-	d.markCompletionLate(taskID)
+	// The failure path never pops the completion registry; the failure can be a
+	// misjudgment (the agent may still be alive and finish its work). Mark the
+	// entry failed so any completion signal arriving before execute returns is
+	// persisted to the outbox instead of being dropped. The server arbitrates
+	// the fail/complete race.
+	d.mu.Lock()
+	if cs, ok := d.completion[taskID]; ok {
+		cs.failed = true
+	}
+	d.mu.Unlock()
 	callbackErr := d.withTaskCallbackContext(func(ctx context.Context) error {
 		return d.client.FailTask(ctx, taskID, taskErr.Error(), failureReason)
 	})
