@@ -105,6 +105,20 @@ task_key=zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic
 
 用户消息中不得出现 `演示`、`fixture`、`task_key`、`cs-cloud-task skill`、测试步骤编排或预期返回值。不得用一条提示词要求 skill 连续完成整个流程；每一步都由用户在看到上一轮真实格式的结果后再发起。
 
+具体操作步骤：
+
+1. 按 3.1 节构建并安装待测 CLI 和 skill，关闭安装前已打开的 CSC/CoStrict 会话。
+2. 在会话评测器或命令代理中创建一次性会话配置，将上述 fixture 绝对路径绑定到本次会话。该配置属于执行层参数，不写入用户消息、对话历史或 skill 文件。
+3. 启动新的 CSC/CoStrict 会话，使其重新发现已安装的 `cs-cloud-task` skill。此时不要发送任何测试说明或流程编排提示词。
+4. skill 首次执行 `<resolved-cs-cloud> task help --json` 时保持命令不变，由 catalog 正常发现 `--fixture` 参数。
+5. skill 根据用户业务意图执行 `list`、`get`、`prepare`、`start`、`pause` 或首次 `review` 时，命令代理在 argv 末尾附加且只附加一次 `--fixture=<absolute-path>`。其他参数仍由 skill 根据 catalog 和用户业务意图生成。
+6. `get` 及后续单任务操作使用 `list` 返回的任务标识。测试控制端只校验其等于上述 `task_key`，不得替 skill 选择任务或改写用户意图。
+7. 首次 `review` 返回预览后，不执行确认命令。待用户在下一轮明确确认后，直接执行 `data.next_commands` 中唯一的 `safety=requires_confirmation` argv；该 argv 已包含 fixture 参数，命令代理不得重复追加或重构参数。
+8. 每轮只检查并记录本轮的结构化结果，再按 4.2 节发送下一条自然业务指令。面向用户的回复中不得泄露 fixture 路径、模拟标识或测试控制逻辑。
+9. 完成通过或驳回场景后关闭会话，并删除一次性会话绑定。另一个审查场景必须使用新的会话和初始 fixture 状态。
+
+如果当前会话工具不支持在用户消息之外进行 argv 注入，则不能用包含 fixture 或测试步骤的提示词代替上述配置。此时应只执行第 5 节的 CLI 手工验证，待具备命令代理或会话评测器后再进行交互演示。
+
 ### 4.2 逐步交互流程
 
 #### 第一步：发现待办任务
