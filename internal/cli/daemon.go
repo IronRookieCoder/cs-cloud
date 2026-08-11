@@ -22,7 +22,6 @@ import (
 	"cs-cloud/internal/version"
 )
 
-
 func collectRecent(dirs []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -72,6 +71,12 @@ func runDaemon(a *app.App) error {
 
 	logger.Info("[debug] daemon process started (pid=%d)", os.Getpid())
 
+	readyPublished := false
+	defer func() {
+		if !readyPublished {
+			a.ClearDaemonState()
+		}
+	}()
 	mode := a.LoadMode()
 	a.SaveArgs(os.Args[1:])
 	port, err := parsePort()
@@ -85,17 +90,31 @@ func runDaemon(a *app.App) error {
 		return err
 	}
 
-	if err := a.WritePID(os.Getpid()); err != nil {
-		logger.Warn("failed to write pid: %v", err)
-	}
-
 	logger.Info("[debug] initializing local server...")
 	workflowDriver := a.NewWorkflowDriver()
+	memberTasks, memberTaskSecret, err := a.NewMemberTaskRuntime()
+	if err != nil {
+		logger.Error("failed to initialize member tasks: %v", err)
+		return err
+	}
+	var cloudDevice *device.DeviceInfo
+	if mode == "cloud" {
+		cloudDevice, err = a.PrepareCloudDaemon(context.Background())
+		if err != nil {
+			logger.Error("failed to prepare cloud device: %v", err)
+			return err
+		}
+	}
+	if err := a.WritePID(os.Getpid()); err != nil {
+		logger.Error("failed to write pid: %v", err)
+		return err
+	}
 	srv := localserver.New(
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
 		localserver.WithWorkflow(workflowDriver),
+		localserver.WithMemberTask(memberTasks, memberTaskSecret),
 	)
 
 	ctx := context.Background()
@@ -133,15 +152,19 @@ func runDaemon(a *app.App) error {
 		logger.Error("failed to start server: %v", err)
 		return err
 	}
-	logger.Info("[debug] HTTP server started, saving state...")
-	if err := a.SaveServerURL(srv.URL()); err != nil {
-		logger.Error("failed to save server url: %v", err)
-		return err
+	if err := memberTasks.ReconcileAll(ctx); err != nil {
+		logger.Warn("member task startup reconciliation deferred: %v", err)
 	}
+	logger.Info("[debug] HTTP server started, saving state...")
 	if err := a.SaveState("running"); err != nil {
 		logger.Error("failed to save state: %v", err)
 		return err
 	}
+	if err := a.SaveServerURL(srv.URL()); err != nil {
+		logger.Error("failed to save server url: %v", err)
+		return err
+	}
+	readyPublished = true
 
 	logger.Info("daemon started (version: %s, mode: %s, host: %s, port: %d, auto_upgrade: %v)", version.FullString(), mode, host, srv.Port(), a.Config().AutoUpgrade)
 	logger.Info("swagger docs: %s/api/v1/docs", srv.URL())
@@ -172,21 +195,7 @@ func runDaemon(a *app.App) error {
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
 	if mode == "cloud" {
-		info, err := device.LoadDevice()
-		if err != nil || info == nil {
-			logger.Error("device not registered")
-			return nil
-		}
-
-		if ownerErr := device.ValidateDeviceOwner(info); ownerErr != nil {
-			logger.Warn("[daemon] %v, attempting re-registration...", ownerErr)
-			info, err = device.ReRegister(context.Background(), a.Config())
-			if err != nil {
-				logger.Error("[daemon] re-register failed: %v", err)
-				return nil
-			}
-			logger.Info("[daemon] device re-registered successfully (device_id=%s)", info.DeviceID)
-		}
+		info := cloudDevice
 
 		cloudCtx, cloudCancel := context.WithCancel(context.Background())
 		defer cloudCancel()

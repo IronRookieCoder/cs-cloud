@@ -2,9 +2,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -92,8 +94,11 @@ func TestRunTaskReviewReject(t *testing.T) {
 func TestRunTaskCompleteMissingEnv(t *testing.T) {
 	t.Setenv("CS_CLOUD_LOCAL_URL", "")
 	t.Setenv("CS_CLOUD_TASK_ID", "")
-	if err := runTaskComplete(nil); err == nil {
-		t.Fatal("expected error when CS_CLOUD_LOCAL_URL is unset")
+	// The complete CLI must never surface a non-zero exit, even when task
+	// context is missing: it prints guidance text instead so the agent reads
+	// it and recovers (cd to the task root) instead of being derailed.
+	if err := runTaskComplete(nil); err != nil {
+		t.Fatalf("runTaskComplete with missing env = %v, want nil (never non-zero)", err)
 	}
 }
 
@@ -136,5 +141,41 @@ func TestPostTaskCompletion_RetriesTransientFailures(t *testing.T) {
 	}
 	if got := attempts.Load(); got < 3 {
 		t.Errorf("attempts = %d, want >= 3 (should have retried)", got)
+	}
+}
+
+// TestTaskCmd_UnknownActionExitsZero verifies an unknown task action never
+// surfaces a non-zero exit; it prints non-empty corrective guidance naming the
+// bad action so the agent can correct.
+func TestTaskCmd_UnknownActionExitsZero(t *testing.T) {
+	out := captureStdout(t, func() {
+		if err := taskCmd(nil, []string{"bogus-action"}); err != nil {
+			t.Fatalf("taskCmd unknown = %v, want nil (always exit 0)", err)
+		}
+	})
+	if strings.TrimSpace(out) == "" || !strings.Contains(out, "bogus-action") {
+		t.Fatalf("unknown task action must print non-empty guidance naming it; got:\n%s", out)
+	}
+}
+
+// TestCompletionMessage verifies the complete/review CLI never surfaces a
+// non-zero exit to the agent: success confirms delivery, and failure renders
+// guidance text (cd to task root + retry) so the agent reads it and recovers
+// instead of being derailed by an error exit code. The task id is supplied
+// separately in the task prompt.
+func TestCompletionMessage(t *testing.T) {
+	if msg := completionMessage("Task completion", nil); !strings.Contains(msg, "delivered") {
+		t.Fatalf("success message should confirm delivery; got %q", msg)
+	}
+
+	msg := completionMessage("Task completion", errors.New("boom: connection refused"))
+	if !strings.Contains(msg, "NOT DELIVERED") {
+		t.Fatalf("failure message should say not delivered; got %q", msg)
+	}
+	if !strings.Contains(msg, "task root") || !strings.Contains(msg, "retry") {
+		t.Fatalf("failure message should guide cd-to-task-root + retry; got %q", msg)
+	}
+	if !strings.Contains(msg, "connection refused") {
+		t.Fatalf("failure message should include the underlying error; got %q", msg)
 	}
 }

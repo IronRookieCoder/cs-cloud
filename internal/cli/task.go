@@ -63,8 +63,8 @@ func taskCmd(a *app.App, args []string) error {
 		printTaskUsage()
 		return nil
 	default:
-		printTaskUsage()
-		return fmt.Errorf("unknown workflow task command: %s", args[0])
+		fmt.Println("Unknown workflow task command: " + args[0] + ". Valid actions: complete, approve, reject.")
+		return nil
 	}
 }
 
@@ -81,25 +81,43 @@ func printTaskUsage() {
 	fmt.Print(renderKV(cmds))
 }
 
+// completionMessage renders the result of a completion/review POST as
+// agent-facing text. The task CLI never surfaces a non-zero exit to the agent:
+// on success it confirms delivery, on failure it returns this guidance instead,
+// so the agent reads the text and recovers (cd to the task root and retry)
+// rather than being derailed by an error exit code. The task id is supplied to
+// the agent separately in the task prompt (injectTaskEnvGuidance).
+func completionMessage(subject string, err error) string {
+	if err == nil {
+		return subject + " delivered. You may stop."
+	}
+	return strings.ToUpper(subject) + " NOT DELIVERED: " + err.Error() + "\n" +
+		"This is not a final failure. You are likely not in the task root, or the task server was briefly unavailable. cd to your task root and retry the command. If it still fails after a few attempts, report this message verbatim."
+}
+
 // runTaskComplete signals that the worker agent has finished its work. It must
 // be the agent's last action: until it is called, the driver holds the task
 // open (idle is not completion).
 func runTaskComplete(args []string) error {
 	summary, _ := parseStringFlag(args, "--summary")
-	return postTaskCompletion(map[string]string{
+	err := postTaskCompletion(map[string]string{
 		"action":  "complete",
 		"summary": summary,
 	})
+	fmt.Println(completionMessage("Task completion", err))
+	return nil
 }
 
 // runTaskReview signals a critic's decision (approve or reject).
 func runTaskReview(args []string, decision string) error {
 	reason, _ := parseStringFlag(args, "--reason")
-	return postTaskCompletion(map[string]string{
+	err := postTaskCompletion(map[string]string{
 		"action":   "review",
 		"decision": decision,
 		"reason":   reason,
 	})
+	fmt.Println(completionMessage("Review decision", err))
+	return nil
 }
 
 // postTaskCompletion POSTs the completion payload to this device's localserver

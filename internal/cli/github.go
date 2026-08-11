@@ -80,9 +80,9 @@ func submitGithubPR(cfg submitConfig) error {
 		return fmt.Errorf("open PR: %w", err)
 	}
 
-	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
+	submitEndpoint, submitBodyField := resolveSubmitTarget(deliverableID, serverURL, nodeRunID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting PR\n", deliverableID)
-	if err := reportToServer(ctx, serverURL, token, submitEndpoint, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
+	if err := reportToServer(ctx, serverURL, token, submitEndpoint, prURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"), submitBodyField); err != nil {
 		return fmt.Errorf("report submit: %w", err)
 	}
 

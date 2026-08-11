@@ -92,9 +92,9 @@ func submitGitlabMR(cfg submitConfig) error {
 		return fmt.Errorf("open MR: %w", err)
 	}
 
-	submitEndpoint := serverURL + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
+	submitEndpoint, submitBodyField := resolveSubmitTarget(deliverableID, serverURL, nodeRunID)
 	fmt.Fprintf(os.Stderr, "deliverable %s: reporting MR\n", deliverableID)
-	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID")); err != nil {
+	if err := reportToServer(ctx, serverURL, token, submitEndpoint, mrURL, os.Getenv("CS_CLOUD_WORKSPACE_ID"), os.Getenv("CS_CLOUD_AGENT_ID"), os.Getenv("CS_CLOUD_TASK_ID"), submitBodyField); err != nil {
 		return fmt.Errorf("report submit: %w", err)
 	}
 

@@ -13,6 +13,7 @@ import (
 	"cs-cloud/internal/filewatcher"
 	"cs-cloud/internal/gitwatcher"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/membertask"
 	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/terminal"
 	"cs-cloud/internal/updater"
@@ -100,6 +101,9 @@ type Server struct {
 	// the associated task so the user's turn drives the workflow. Nil when the
 	// workflow subsystem is unavailable.
 	adopter *sessionAdopter
+
+	memberTasks      *membertask.Service
+	memberTaskSecret string
 }
 
 func New(opts ...Option) *Server {
@@ -129,6 +133,11 @@ func New(opts ...Option) *Server {
 	api := http.NewServeMux()
 	apiAuth := authMiddleware(apiKeyFromConfig(s.cfg))
 	mux.Handle("/api/v1/", corsMiddleware(apiAuth(http.StripPrefix("/api/v1", api))))
+	if s.memberTasks != nil {
+		private := authMiddleware(s.memberTaskSecret)(s.requireLoopback(http.HandlerFunc(s.handleMemberTasks)))
+		mux.Handle("/api/v1/member-tasks", private)
+		mux.Handle("/api/v1/member-tasks/", private)
+	}
 
 	// CORS-friendly 404 for paths outside /api/v1/ (e.g. wrong baseUrl)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +291,13 @@ func WithWorkflow(d *workflowrunner.Driver) Option {
 	}
 }
 
+func WithMemberTask(service *membertask.Service, secret string) Option {
+	return func(s *Server) {
+		s.memberTasks = service
+		s.memberTaskSecret = secret
+	}
+}
+
 func (s *Server) Manager() *runtime.AgentManager {
 	return s.manager
 }
@@ -291,6 +307,9 @@ func (s *Server) EventBus() *runtime.EventBus {
 }
 
 func (s *Server) Start(addr string) error {
+	if s.memberTasks != nil && s.memberTaskSecret == "" {
+		return fmt.Errorf("member task private secret is empty")
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err

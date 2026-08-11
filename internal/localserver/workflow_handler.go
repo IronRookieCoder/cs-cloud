@@ -42,7 +42,14 @@ func (s *Server) BindWorkflowSessionBinder() {
 	if s.workflow == nil || s.manager == nil {
 		return
 	}
-	if s.manager.DefaultBackend() != "csc" {
+	if backend := s.manager.DefaultBackend(); backend != "csc" {
+		// Without the binder, workflow tasks cannot bind a csc session, so the
+		// task-complete tool path is unavailable: tasks run to completion but
+		// their completion signal finds no registry entry ("task not running")
+		// and they eventually fail with agent_timeout. This may be intentional
+		// (a non-csc default agent), so we don't refuse startup — but log
+		// loudly so the degraded state is diagnosable instead of silent.
+		logger.Warn("workflow session binder not wired: default backend %q is not \"csc\"; csc workflow tasks will not be able to signal completion and may time out", backend)
 		return
 	}
 	s.workflow.SetConversationBinder(&agentManagerSessionBinder{manager: s.manager})

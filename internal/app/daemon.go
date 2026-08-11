@@ -130,6 +130,11 @@ func (a *App) DaemonStatus() (bool, int, string) {
 	return true, pid, ""
 }
 
+func (a *App) MemberTaskDaemonReady() bool {
+	pid, err := a.ReadPID()
+	return err == nil && pid > 0 && a.IsProcessRunning(pid) && a.healthCheck()
+}
+
 func (a *App) healthCheck() bool {
 	serverURL, err := a.ServerURL()
 	if err != nil || serverURL == "" {
@@ -162,16 +167,16 @@ func (a *App) ForceCleanupStale() bool {
 	if killOrphanProcesses(a.rootDir) {
 		cleaned = true
 	}
-	a.cleanupAllStateFiles()
+	a.ClearDaemonState()
 	return cleaned
 }
 
-func (a *App) cleanupAllStateFiles() {
+func (a *App) ClearDaemonState() {
 	a.RemovePID()
 	a.RemoveAgentPID()
 	a.RemoveStopFile()
-	a.SaveState("stopped")
-	a.SaveServerURL("")
+	_ = os.Remove(a.stateFile())
+	_ = a.SaveServerURL("")
 }
 
 func (a *App) forceKillStale(pid int) {
