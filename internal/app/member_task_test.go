@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"testing"
 
 	"cs-cloud/internal/config"
@@ -25,5 +26,16 @@ func TestMemberTaskRuntimeCreatesStableSecuredSecret(t *testing.T) {
 	}
 	if err := membertask.ValidateProfilePermissions(a.RootDir(), a.memberTaskSecretPath()); err != nil {
 		t.Fatalf("profile permissions: %v", err)
+	}
+}
+
+func TestMemberTaskRuntimeRejectsMalformedSecret(t *testing.T) {
+	a := &App{rootDir: t.TempDir(), cfg: &config.Config{CloudBaseURL: "https://cloud.invalid"}}
+	if err := os.WriteFile(a.memberTaskSecretPath(), []byte("c2hvcnQ\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := a.NewMemberTaskRuntime(); err == nil {
+		t.Fatal("NewMemberTaskRuntime accepted a secret shorter than 32 bytes")
 	}
 }

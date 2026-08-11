@@ -61,10 +61,10 @@ func TestSecureProfilePermissionsPreservesCurrentUserAccessToRuntimeFiles(t *tes
 	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(runtimeFile, []byte("log"), 0o600); err != nil {
+	if err := SecureProfilePermissions(root, secret); err != nil {
 		t.Fatal(err)
 	}
-	if err := SecureProfilePermissions(root, secret); err != nil {
+	if err := os.WriteFile(runtimeFile, []byte("log"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,6 +80,7 @@ func TestSecureProfilePermissionsPreservesCurrentUserAccessToRuntimeFiles(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowed := map[string]bool{localSystemSID: false, userSID: false}
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
@@ -87,10 +88,16 @@ func TestSecureProfilePermissionsPreservesCurrentUserAccessToRuntimeFiles(t *tes
 		}
 		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-			if sid.String() == userSID {
-				return
+			raw := sid.String()
+			if _, ok := allowed[raw]; !ok {
+				t.Fatalf("runtime file DACL grants unexpected principal %s access", raw)
 			}
+			allowed[raw] = true
 		}
 	}
-	t.Fatalf("runtime file DACL does not grant current user %s access", userSID)
+	for sid, present := range allowed {
+		if !present {
+			t.Errorf("runtime file DACL does not grant %s access", sid)
+		}
+	}
 }

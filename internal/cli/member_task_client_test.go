@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"cs-cloud/internal/device"
 	"cs-cloud/internal/membertask"
 )
 
@@ -38,13 +39,16 @@ func TestMemberTaskClientEnsuresDaemonOnceAndUsesPrivateSecret(t *testing.T) {
 func TestMemberTaskClientPreservesDeviceRegistrationRequired(t *testing.T) {
 	client := &memberTaskClient{
 		ensureDaemon: func(context.Context) error {
-			return &membertask.TaskError{Code: "device_registration_required", Message: "run cs-cloud register first"}
+			return device.ErrRegistrationRequired
 		},
 	}
 	_, err := client.Execute(context.Background(), memberTaskRequest{Command: "list"})
 	taskErr, ok := err.(*membertask.TaskError)
 	if !ok || taskErr.Code != "device_registration_required" {
 		t.Fatalf("error = %#v, want device_registration_required", err)
+	}
+	if strings.Contains(taskErr.Message, "cs-cloud") || strings.Contains(taskErr.Message, "register") || !strings.Contains(taskErr.Message, "csc cloud start") {
+		t.Fatalf("message = %q, want csc cloud start guidance", taskErr.Message)
 	}
 }
 

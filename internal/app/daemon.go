@@ -167,21 +167,14 @@ func (a *App) ForceCleanupStale() bool {
 	if killOrphanProcesses(a.rootDir) {
 		cleaned = true
 	}
-	a.cleanupAllStateFiles()
+	a.ClearDaemonState()
 	return cleaned
 }
 
-func (a *App) cleanupAllStateFiles() {
+func (a *App) ClearDaemonState() {
 	a.RemovePID()
 	a.RemoveAgentPID()
 	a.RemoveStopFile()
-	_ = os.Remove(a.stateFile())
-	a.SaveServerURL("")
-}
-
-func (a *App) ClearDaemonReadiness() {
-	a.RemovePID()
-	a.RemoveAgentPID()
 	_ = os.Remove(a.stateFile())
 	_ = a.SaveServerURL("")
 }

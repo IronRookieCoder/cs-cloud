@@ -71,6 +71,12 @@ func runDaemon(a *app.App) error {
 
 	logger.Info("[debug] daemon process started (pid=%d)", os.Getpid())
 
+	readyPublished := false
+	defer func() {
+		if !readyPublished {
+			a.ClearDaemonState()
+		}
+	}()
 	mode := a.LoadMode()
 	a.SaveArgs(os.Args[1:])
 	port, err := parsePort()
@@ -93,21 +99,16 @@ func runDaemon(a *app.App) error {
 	}
 	var cloudDevice *device.DeviceInfo
 	if mode == "cloud" {
-		cloudDevice, err = a.PrepareCloudDaemon()
+		cloudDevice, err = a.PrepareCloudDaemon(context.Background())
 		if err != nil {
-			logger.Error("device registration required: %v", err)
+			logger.Error("failed to prepare cloud device: %v", err)
 			return err
 		}
 	}
 	if err := a.WritePID(os.Getpid()); err != nil {
-		logger.Warn("failed to write pid: %v", err)
+		logger.Error("failed to write pid: %v", err)
+		return err
 	}
-	readyPublished := false
-	defer func() {
-		if !readyPublished {
-			a.ClearDaemonReadiness()
-		}
-	}()
 	srv := localserver.New(
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),

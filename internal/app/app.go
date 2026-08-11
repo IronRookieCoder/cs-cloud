@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -78,8 +79,9 @@ func (a *App) memberTaskSecret() (string, error) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			secret := strings.TrimSpace(string(data))
-			if secret == "" {
-				return "", fmt.Errorf("member task secret is empty")
+			decoded, decodeErr := base64.RawURLEncoding.DecodeString(secret)
+			if decodeErr != nil || len(decoded) != 32 {
+				return "", fmt.Errorf("member task secret is malformed")
 			}
 			if err := membertask.SecureProfilePermissions(a.rootDir, path); err != nil {
 				return "", err
@@ -104,16 +106,8 @@ func (a *App) memberTaskSecret() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("create member task secret: %w", err)
 		}
-		if _, err := file.WriteString(secret + "\n"); err != nil {
-			_ = file.Close()
-			return "", fmt.Errorf("write member task secret: %w", err)
-		}
-		if err := file.Sync(); err != nil {
-			_ = file.Close()
-			return "", fmt.Errorf("sync member task secret: %w", err)
-		}
-		if err := file.Close(); err != nil {
-			return "", fmt.Errorf("close member task secret: %w", err)
+		if err := persistMemberTaskSecret(file, path, secret); err != nil {
+			return "", err
 		}
 		if err := membertask.SecureProfilePermissions(a.rootDir, path); err != nil {
 			return "", err
@@ -124,6 +118,27 @@ func (a *App) memberTaskSecret() (string, error) {
 		return secret, nil
 	}
 	return "", fmt.Errorf("member task secret creation raced repeatedly")
+}
+
+func persistMemberTaskSecret(file *os.File, path, secret string) (err error) {
+	complete := false
+	defer func() {
+		if !complete {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.WriteString(secret + "\n"); err != nil {
+		return fmt.Errorf("write member task secret: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync member task secret: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close member task secret: %w", err)
+	}
+	complete = true
+	return nil
 }
 
 func (a *App) MemberTaskSecret() (string, error) {
@@ -171,15 +186,6 @@ func (a *App) Device() (*device.DeviceInfo, error) {
 	return device.LoadDevice()
 }
 
-func (a *App) PrepareCloudDaemon() (*device.DeviceInfo, error) {
-	info, err := a.Device()
-	if err != nil || info == nil || strings.TrimSpace(info.DeviceID) == "" || strings.TrimSpace(info.DeviceToken) == "" {
-		a.ClearDaemonReadiness()
-		return nil, &membertask.TaskError{Code: "device_registration_required", Message: "device registration is required; run cs-cloud register first"}
-	}
-	if err := device.ValidateDeviceOwner(info); err != nil {
-		a.ClearDaemonReadiness()
-		return nil, &membertask.TaskError{Code: "device_registration_required", Message: "device registration does not belong to the current user; run cs-cloud register first"}
-	}
-	return info, nil
+func (a *App) PrepareCloudDaemon(ctx context.Context) (*device.DeviceInfo, error) {
+	return device.PrepareDaemonDevice(ctx, a.cfg)
 }

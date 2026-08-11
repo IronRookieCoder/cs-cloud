@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/device"
 	"cs-cloud/internal/membertask"
 	"cs-cloud/internal/platform"
 )
@@ -47,6 +48,9 @@ func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskReques
 		var taskErr *membertask.TaskError
 		if errors.As(err, &taskErr) {
 			return nil, taskErr
+		}
+		if errors.Is(err, device.ErrRegistrationRequired) {
+			return nil, &membertask.TaskError{Code: "device_registration_required", Message: "device registration is required; run 'csc cloud start' first"}
 		}
 		return nil, &membertask.TaskError{Code: "daemon_unavailable", Message: "member task daemon is unavailable"}
 	}
@@ -232,7 +236,7 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 	if err := a.SaveMode("cloud"); err != nil {
 		return err
 	}
-	if _, err := a.PrepareCloudDaemon(); err != nil {
+	if _, err := a.PrepareCloudDaemon(ctx); err != nil {
 		return err
 	}
 	executable, err := os.Executable()

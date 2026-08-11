@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -8,36 +9,20 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cs-cloud/internal/membertask"
+	"cs-cloud/internal/device"
 	"cs-cloud/internal/platform"
 )
 
-func TestPrepareCloudDaemonRejectsMissingDeviceAndClearsReadiness(t *testing.T) {
+func TestPrepareCloudDaemonReturnsPublicRegistrationError(t *testing.T) {
 	dataDir := t.TempDir()
 	previousDataDir := platform.DataDir()
 	platform.SetDataDir(dataDir)
 	t.Cleanup(func() { platform.SetDataDir(previousDataDir) })
 
 	app := &App{rootDir: filepath.Join(dataDir, "cs-cloud")}
-	if err := app.WritePID(12345); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.SaveState("running"); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.SaveServerURL("http://127.0.0.1:9876"); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := app.PrepareCloudDaemon()
-	var taskErr *membertask.TaskError
-	if !errors.As(err, &taskErr) || taskErr.Code != "device_registration_required" {
-		t.Fatalf("error = %#v, want device_registration_required", err)
-	}
-	for _, path := range []string{app.pidFile(), app.stateFile(), app.serverFile()} {
-		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("readiness artifact %q still exists: %v", path, statErr)
-		}
+	_, err := app.PrepareCloudDaemon(context.Background())
+	if !errors.Is(err, device.ErrRegistrationRequired) {
+		t.Fatalf("error = %#v, want ErrRegistrationRequired", err)
 	}
 }
 
@@ -215,10 +200,10 @@ func TestMemberTaskDaemonReadyRequiresLiveProcessAndHealth(t *testing.T) {
 
 func TestForceCleanupStaleRemovesRuntimeStateFiles(t *testing.T) {
 	app := &App{rootDir: t.TempDir()}
-	if err := app.WritePID(999999); err != nil {
+	if err := app.WritePID(0); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.WriteAgentPID(999998); err != nil {
+	if err := app.WriteAgentPID(-1); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.SaveState("stopped"); err != nil {
