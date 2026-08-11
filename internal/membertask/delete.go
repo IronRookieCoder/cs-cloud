@@ -27,6 +27,9 @@ type DeletePreview struct {
 }
 
 func (s *Service) PreviewDelete(ctx context.Context, key TaskKey, mode DeleteMode) (DeletePreview, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+
 	_ = ctx
 	if mode != DeleteModeNormal && mode != DeleteModeForceDiscard {
 		return DeletePreview{}, newTaskError("invalid_arguments", "delete mode is invalid", nil)
@@ -37,6 +40,10 @@ func (s *Service) PreviewDelete(ctx context.Context, key TaskKey, mode DeleteMod
 	}
 	if !found {
 		return DeletePreview{}, newTaskError("task_not_found", "local task does not exist", nil)
+	}
+	record, err = refreshDeleteFacts(record)
+	if err != nil {
+		return DeletePreview{}, err
 	}
 	if operationBlocksDelete(record.Operation) {
 		return DeletePreview{}, newTaskError("operation_result_unknown", "accepted operation must be recovered before deletion", nil)
@@ -62,6 +69,9 @@ func (s *Service) PreviewDelete(ctx context.Context, key TaskKey, mode DeleteMod
 }
 
 func (s *Service) ConfirmDelete(ctx context.Context, key TaskKey, previewID string) error {
+	unlock := s.lockTask(key)
+	defer unlock()
+
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
@@ -76,6 +86,10 @@ func (s *Service) ConfirmDelete(ctx context.Context, key TaskKey, previewID stri
 	}
 	if operationBlocksDelete(record.Operation) {
 		return newTaskError("operation_result_unknown", "accepted operation must be recovered before deletion", nil)
+	}
+	record, err = refreshDeleteFacts(record)
+	if err != nil {
+		return err
 	}
 	risks := deleteRisks(record, s.now())
 	riskDigest := digestJSON(struct {
@@ -96,6 +110,19 @@ func (s *Service) ConfirmDelete(ctx context.Context, key TaskKey, previewID stri
 		return err
 	}
 	return s.continueDelete(journal)
+}
+
+func refreshDeleteFacts(record TaskRecord) (TaskRecord, error) {
+	if record.Manifest == nil || record.Directory == "" {
+		return record, nil
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		return TaskRecord{}, err
+	}
+	record.Dirty = verification.Dirty
+	record.DirtyPaths = verification.ChangedPaths
+	return record, nil
 }
 
 func (s *Service) RecoverDeleteJournals(ctx context.Context) error {

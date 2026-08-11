@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"cs-cloud/internal/membertask"
 )
 
 func TestMemberTaskClientEnsuresDaemonOnceAndUsesPrivateSecret(t *testing.T) {
@@ -75,6 +77,21 @@ func TestTaskConfirmRecoveryRetriesSamePreviewAfterResponseLoss(t *testing.T) {
 	}
 	if attempts.Load() != 2 || result == nil {
 		t.Fatalf("attempts=%d result=%+v", attempts.Load(), result)
+	}
+}
+
+func TestMemberTaskClientDecodesPrepareTransitionFacts(t *testing.T) {
+	client := &memberTaskClient{
+		ensureDaemon: func(context.Context) error { return nil },
+		resolve:      func() (string, string, error) { return "http://127.0.0.1:9876", "secret", nil },
+		do: func(req *http.Request) (*http.Response, error) {
+			return taskHTTPResponse(http.StatusOK, `{"ok":true,"data":{"prepared":true,"outcome":"already_completed","performed":false}}`), nil
+		},
+	}
+	result, err := client.Execute(context.Background(), memberTaskRequest{Command: "prepare", TaskKey: "cloud/ws/node/worker"})
+	transition, ok := result.(membertask.LocalTransition)
+	if err != nil || !ok || transition.Outcome != membertask.OutcomeAlreadyCompleted || transition.Performed {
+		t.Fatalf("result=%+v (%T), err=%v", result, result, err)
 	}
 }
 

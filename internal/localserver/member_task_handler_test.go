@@ -1,10 +1,12 @@
 package localserver
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/membertask"
@@ -63,6 +65,22 @@ func TestMemberTaskServerRejectsEmptySecretBeforeListen(t *testing.T) {
 	srv := New(WithMemberTask(memberTaskTestService(t), ""))
 	if err := srv.Start("127.0.0.1:0"); err == nil {
 		t.Fatal("Start succeeded with empty member task secret")
+	}
+}
+
+func TestMemberTaskServerRejectsNonLoopbackBindBeforeListen(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:0", "[::]:0", "192.0.2.10:0"} {
+		t.Run(addr, func(t *testing.T) {
+			srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
+			err := srv.Start(addr)
+			if err == nil {
+				_ = srv.Shutdown(context.Background())
+				t.Fatal("Start succeeded with a non-loopback member task bind")
+			}
+			if !strings.Contains(err.Error(), "loopback") {
+				t.Fatalf("Start error = %q, want loopback constraint", err)
+			}
+		})
 	}
 }
 

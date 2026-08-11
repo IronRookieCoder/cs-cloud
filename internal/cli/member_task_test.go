@@ -23,7 +23,7 @@ func (f *fakeMemberTaskAPI) Execute(ctx context.Context, request memberTaskReque
 }
 
 func TestTaskHelpCatalogDescribesEveryPublicCommand(t *testing.T) {
-	catalog := memberTaskHelpCatalog()
+	catalog := decodeTaskHelpCatalog(t)
 	want := []string{"help", "list", "get", "prepare", "start", "pause", "submit", "review", "delete"}
 	if len(catalog.Commands) != len(want) {
 		t.Fatalf("commands = %+v", catalog.Commands)
@@ -36,7 +36,7 @@ func TestTaskHelpCatalogDescribesEveryPublicCommand(t *testing.T) {
 }
 
 func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
-	catalog := memberTaskHelpCatalog()
+	catalog := decodeTaskHelpCatalog(t)
 	commands := make(map[string]CommandSpec, len(catalog.Commands))
 	for _, command := range catalog.Commands {
 		commands[command.Name] = command
@@ -47,7 +47,7 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Summary: "Stable cloud/workspace/node/role task identity",
 	}
 	wantConfirm := ArgumentSpec{
-		Name: "confirm", Kind: "flag", Flag: "--confirm", Type: "string",
+		Name: "confirm", Kind: "flag", Flag: "--confirm", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		Summary: "Previously issued preview id",
 	}
 	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm}) {
@@ -55,12 +55,12 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 	}
 
 	wantDecision := ArgumentSpec{
-		Name: "decision", Kind: "flag", Flag: "--decision", Type: "enum",
+		Name: "decision", Kind: "flag", Flag: "--decision", Type: "enum", ValueStyle: "equals_or_unprefixed_separate",
 		Enum: []string{"approve", "reject"}, RequiredUnless: "confirm",
 		Summary: "Critic decision",
 	}
 	wantReason := ArgumentSpec{
-		Name: "reason", Kind: "flag", Flag: "--reason", Type: "string",
+		Name: "reason", Kind: "flag", Flag: "--reason", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		RequiredWhen: &ArgumentCondition{Argument: "decision", Equals: "reject"},
 		Summary:      "Required for reject",
 	}
@@ -83,6 +83,49 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 	if got := deleteCommand.MutuallyExclusive; len(got) != 1 || len(got[0]) != 2 || got[0][0] != "confirm" || got[0][1] != "force_discard" {
 		t.Fatalf("delete mutually_exclusive = %+v", got)
 	}
+}
+
+func TestTaskHelpCatalogIncludesFailureOutcome(t *testing.T) {
+	for _, command := range decodeTaskHelpCatalog(t).Commands {
+		found := false
+		for _, outcome := range command.Outcomes {
+			if outcome == membertask.OutcomeNotCompleted {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("command %q outcomes = %+v", command.Name, command.Outcomes)
+		}
+	}
+}
+
+func TestTaskHelpCatalogDeclaresRepeatedPrepareOutcome(t *testing.T) {
+	for _, command := range decodeTaskHelpCatalog(t).Commands {
+		if command.Name != "prepare" {
+			continue
+		}
+		for _, outcome := range command.Outcomes {
+			if outcome == membertask.OutcomeAlreadyCompleted {
+				return
+			}
+		}
+		t.Fatalf("prepare outcomes = %+v", command.Outcomes)
+	}
+	t.Fatal("prepare command is missing")
+}
+
+func decodeTaskHelpCatalog(t *testing.T) taskHelpCatalog {
+	t.Helper()
+	var output bytes.Buffer
+	if err := printMemberTaskHelp(&output, true); err != nil {
+		t.Fatalf("print task help: %v", err)
+	}
+	var catalog taskHelpCatalog
+	if err := json.Unmarshal(output.Bytes(), &catalog); err != nil {
+		t.Fatalf("decode task help: %v: %s", err, output.String())
+	}
+	return catalog
 }
 
 func TestMemberTaskRejectsReviewWithoutReasonBeforeTransport(t *testing.T) {
@@ -110,6 +153,22 @@ func TestMemberTaskRejectsConfirmMixedWithPreviewArguments(t *testing.T) {
 	err := runMemberTaskCommand(context.Background(), []string{"review", "cloud/ws/node/critic", "--confirm", "preview-1", "--decision", "approve"}, api, &stdout, &stderr)
 	if exitCode(err) != 2 || len(api.calls) != 0 {
 		t.Fatalf("err=%v calls=%+v", err, api.calls)
+	}
+}
+
+func TestReviewStaleErrorDoesNotSuggestIncompletePreviewArguments(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	key := "cloud/ws/node/critic"
+	err := reportTaskCommandError(&stdout, &stderr, []string{"review", key, "--confirm", "preview-1"}, &key, 4, &membertask.TaskError{Code: "review_snapshot_stale", Message: "stale"}, true)
+	if exitCode(err) != 4 {
+		t.Fatalf("exit code = %d", exitCode(err))
+	}
+	var envelope taskCommandEnvelope
+	if unmarshalErr := json.Unmarshal(stdout.Bytes(), &envelope); unmarshalErr != nil {
+		t.Fatalf("decode envelope: %v: %s", unmarshalErr, stdout.String())
+	}
+	if len(envelope.NextCommands) != 0 {
+		t.Fatalf("next_commands = %+v", envelope.NextCommands)
 	}
 }
 
@@ -181,7 +240,162 @@ func TestTaskEnvelopeUsesOperationOutcome(t *testing.T) {
 	}
 	var envelope taskCommandEnvelope
 	_ = json.Unmarshal(stdout.Bytes(), &envelope)
-	if envelope.Outcome != membertask.OutcomeRecovered {
-		t.Fatalf("outcome = %s", envelope.Outcome)
+	if envelope.Outcome != membertask.OutcomeRecovered || !envelope.Performed {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+}
+
+func TestTaskEnvelopeDoesNotReportIncompleteOperationAsPerformed(t *testing.T) {
+	for _, status := range []membertask.OperationStatus{membertask.OperationAccepted, membertask.OperationRunning} {
+		t.Run(string(status), func(t *testing.T) {
+			api := &fakeMemberTaskAPI{response: membertask.Operation{ID: "operation-1", Status: status}}
+			var stdout, stderr bytes.Buffer
+			if err := runMemberTaskCommand(context.Background(), []string{"submit", "cloud/ws/node/worker", "--confirm", "preview-1"}, api, &stdout, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			var envelope taskCommandEnvelope
+			_ = json.Unmarshal(stdout.Bytes(), &envelope)
+			if envelope.Outcome != membertask.OutcomeNotCompleted || envelope.Performed {
+				t.Fatalf("envelope = %+v", envelope)
+			}
+		})
+	}
+}
+
+func TestTaskEnvelopeUsesIdempotentLocalTransitionFacts(t *testing.T) {
+	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
+	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{
+		TaskRecord: membertask.TaskRecord{Key: key, Prepared: true, Activity: membertask.ActivityActive},
+		Outcome:    membertask.OutcomeAlreadyCompleted,
+		Performed:  false,
+	}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"start", key.String()}, api, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var envelope taskCommandEnvelope
+	_ = json.Unmarshal(stdout.Bytes(), &envelope)
+	if envelope.Outcome != membertask.OutcomeAlreadyCompleted || envelope.Performed {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+}
+
+func TestTaskEnvelopeDoesNotReportNonTerminalOperationAsPerformed(t *testing.T) {
+	statuses := []membertask.OperationStatus{
+		membertask.OperationAccepted,
+		membertask.OperationRunning,
+		membertask.OperationRepreviewRequired,
+		membertask.OperationConflict,
+		membertask.OperationUnknown,
+		membertask.OperationFailed,
+	}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			api := &fakeMemberTaskAPI{response: membertask.Operation{ID: "operation-1", Status: status}}
+			var stdout, stderr bytes.Buffer
+			if err := runMemberTaskCommand(context.Background(), []string{"submit", "cloud/ws/node/worker", "--confirm", "preview-1"}, api, &stdout, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			var envelope taskCommandEnvelope
+			_ = json.Unmarshal(stdout.Bytes(), &envelope)
+			if envelope.Outcome != membertask.OutcomeNotCompleted || envelope.Performed {
+				t.Fatalf("envelope = %+v", envelope)
+			}
+		})
+	}
+}
+
+func TestTaskEnvelopeDoesNotReportAlreadyCompletedAsPerformed(t *testing.T) {
+	api := &fakeMemberTaskAPI{response: membertask.Operation{ID: "operation-1", Status: membertask.OperationCompleted, Outcome: membertask.OutcomeAlreadyCompleted}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"submit", "cloud/ws/node/worker", "--confirm", "preview-1"}, api, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var envelope taskCommandEnvelope
+	_ = json.Unmarshal(stdout.Bytes(), &envelope)
+	if envelope.Outcome != membertask.OutcomeAlreadyCompleted || envelope.Performed {
+		t.Fatalf("envelope = %+v", envelope)
+	}
+}
+
+func TestTaskEnvelopeUsesFourFieldOuterContract(t *testing.T) {
+	api := &fakeMemberTaskAPI{response: []membertask.Task{}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"list"}, api, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 4 || raw["schema_version"] == nil || raw["ok"] == nil || raw["data"] == nil || raw["error"] == nil {
+		t.Fatalf("outer envelope = %s", stdout.String())
+	}
+	var data struct {
+		Command []string `json:"command"`
+	}
+	if err := json.Unmarshal(raw["data"], &data); err != nil || !reflect.DeepEqual(data.Command, []string{"cs-cloud", "task", "list"}) {
+		t.Fatalf("data = %s, err = %v", raw["data"], err)
+	}
+}
+
+func TestTaskEnvelopePreviewIncludesBoundConfirmationCommand(t *testing.T) {
+	api := &fakeMemberTaskAPI{response: membertask.Preview{ID: "preview-1"}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"submit", "cloud/ws/node/worker"}, api, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var envelope taskCommandEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data == nil || len(envelope.Data.NextCommands) != 1 || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, []string{"cs-cloud", "task", "submit", "cloud/ws/node/worker", "--confirm", "preview-1"}) {
+		t.Fatalf("envelope = %s", stdout.String())
+	}
+}
+
+func TestTaskEnvelopeFailureUsesOuterErrorAndFixedStaleSuggestion(t *testing.T) {
+	api := &fakeMemberTaskAPI{err: &membertask.TaskError{Code: "preview_stale", Message: "stale"}}
+	var stdout, stderr bytes.Buffer
+	err := runMemberTaskCommand(context.Background(), []string{"submit", "cloud/ws/node/worker", "--confirm", "old-preview"}, api, &stdout, &stderr)
+	if exitCode(err) != 4 {
+		t.Fatalf("exit code = %d", exitCode(err))
+	}
+	var envelope taskCommandEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "preview_stale" || envelope.Data == nil || len(envelope.Data.NextCommands) != 1 {
+		t.Fatalf("envelope = %s", stdout.String())
+	}
+	want := []string{"cs-cloud", "task", "submit", "cloud/ws/node/worker"}
+	if envelope.Data.NextCommands[0].Safety != "preview_only" || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
+		t.Fatalf("next commands = %+v", envelope.Data.NextCommands)
+	}
+}
+
+func TestTaskHelpCanDescribeOneCommandAndRejectUnknown(t *testing.T) {
+	var output bytes.Buffer
+	if err := printMemberTaskHelp(&output, true, "submit"); err != nil {
+		t.Fatal(err)
+	}
+	var catalog taskHelpCatalog
+	if err := json.Unmarshal(output.Bytes(), &catalog); err != nil || len(catalog.Commands) != 1 || catalog.Commands[0].Name != "submit" {
+		t.Fatalf("catalog = %+v, err = %v", catalog, err)
+	}
+	output.Reset()
+	if err := printMemberTaskHelp(&output, true, "unknown"); exitCode(err) != 2 {
+		t.Fatalf("unknown help exit = %d, err = %v", exitCode(err), err)
+	}
+}
+
+func TestMemberTaskDefaultOutputIsText(t *testing.T) {
+	api := &fakeMemberTaskAPI{response: []membertask.Task{}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommandWithFormat(context.Background(), []string{"list"}, api, &stdout, &stderr, false); err != nil {
+		t.Fatal(err)
+	}
+	if json.Valid(stdout.Bytes()) || !bytes.Contains(stdout.Bytes(), []byte("task list")) || !bytes.Contains(stdout.Bytes(), []byte("observed")) {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }

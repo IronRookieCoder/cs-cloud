@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,66 @@ func TestReworkReusesDirectoryAndKeepsLocalOutput(t *testing.T) {
 	data, _ := os.ReadFile(output)
 	if string(data) != "local result" {
 		t.Fatalf("local output was replaced: %q", data)
+	}
+}
+
+func TestPrepareWithFactsReportsRepeatedPreparationAsAlreadyCompleted(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+
+	first, err := svc.PrepareWithFacts(context.Background(), key)
+	if err != nil || !first.Performed || first.Outcome != OutcomeCompleted {
+		t.Fatalf("first = %+v, err=%v", first, err)
+	}
+	second, err := svc.PrepareWithFacts(context.Background(), key)
+	if err != nil || second.Performed || second.Outcome != OutcomeAlreadyCompleted || !second.Prepared {
+		t.Fatalf("second = %+v, err=%v", second, err)
+	}
+}
+
+func TestConcurrentPrepareAndDeleteAreSerializedByTaskKey(t *testing.T) {
+	prepareStarted := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var startedOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedOnce.Do(func() { close(prepareStarted) })
+		<-releasePrepare
+		_, _ = w.Write([]byte(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+
+	prepareResult := make(chan error, 1)
+	go func() {
+		_, err := svc.Prepare(context.Background(), key)
+		prepareResult <- err
+	}()
+	<-prepareStarted
+
+	deleteResult := make(chan error, 1)
+	go func() {
+		_, err := svc.PreviewDelete(context.Background(), key, DeleteModeNormal)
+		deleteResult <- err
+	}()
+	select {
+	case err := <-deleteResult:
+		close(releasePrepare)
+		<-prepareResult
+		t.Fatalf("PreviewDelete completed while Prepare was in progress: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releasePrepare)
+	if err := <-prepareResult; err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if err := <-deleteResult; err != nil {
+		t.Fatalf("PreviewDelete: %v", err)
 	}
 }
 
@@ -100,6 +161,18 @@ func TestPrepareRejectsUnsupportedProviderBeforeCreatingTaskDirectories(t *testi
 	}
 	if _, err := os.Stat(store.Layout().StagingRoot()); !os.IsNotExist(err) {
 		t.Fatalf("staging root exists: %v", err)
+	}
+}
+
+func TestPrepareRejectsUnsafeRepositoryCloneURL(t *testing.T) {
+	for _, cloneURL := range []string{"file:///tmp/repo", "http://gitea.test/team/repo.git", "https://user:secret@gitea.test/team/repo.git", "C:/repo"} {
+		t.Run(cloneURL, func(t *testing.T) {
+			err := cloneExactRepository(context.Background(), filepath.Join(t.TempDir(), "repo"), RepositoryContext{CloneURL: cloneURL, BaseSHA: "base"})
+			te, ok := err.(*TaskError)
+			if !ok || te.Code != "unsafe_repository_url" {
+				t.Fatalf("error = %#v, want unsafe_repository_url", err)
+			}
+		})
 	}
 }
 

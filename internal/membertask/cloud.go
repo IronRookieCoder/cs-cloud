@@ -123,7 +123,7 @@ func NewCloudClient(baseURL string, token func() (*provider.Credentials, error))
 
 func (c *CloudClient) List(ctx context.Context) ([]RemoteTask, error) {
 	var raw json.RawMessage
-	if err := c.doJSON(ctx, http.MethodGet, "/api/member/tasks", nil, &raw); err != nil {
+	if err := c.doJSON(ctx, nil, http.MethodGet, "/api/member/tasks", nil, &raw); err != nil {
 		return nil, err
 	}
 	var out struct {
@@ -145,7 +145,7 @@ func (c *CloudClient) List(ctx context.Context) ([]RemoteTask, error) {
 func (c *CloudClient) GetContext(ctx context.Context, key TaskKey) (RemoteTaskContext, error) {
 	endpoint := "/api/member/tasks/" + url.PathEscape(key.NodeRunID) + "/" + url.PathEscape(string(key.Role)) + "/context"
 	var out RemoteTaskContext
-	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
+	if err := c.doJSON(ctx, &key, http.MethodGet, endpoint, nil, &out); err != nil {
 		return RemoteTaskContext{}, err
 	}
 	if out.Key() != key {
@@ -173,36 +173,36 @@ func (c *CloudClient) GetContext(ctx context.Context, key TaskKey) (RemoteTaskCo
 func (c *CloudClient) PreviewSubmit(ctx context.Context, key TaskKey, request SubmitPreviewRequest) (Preview, error) {
 	endpoint := "/api/member/tasks/" + url.PathEscape(key.NodeRunID) + "/" + url.PathEscape(string(key.Role)) + "/submit/preview"
 	var out Preview
-	err := c.doJSON(ctx, http.MethodPost, endpoint, request, &out)
+	err := c.doJSON(ctx, &key, http.MethodPost, endpoint, request, &out)
 	return out, err
 }
 
 func (c *CloudClient) PreviewReview(ctx context.Context, key TaskKey, request ReviewPreviewRequest) (Preview, error) {
 	endpoint := "/api/member/tasks/" + url.PathEscape(key.NodeRunID) + "/" + url.PathEscape(string(key.Role)) + "/review/preview"
 	var out Preview
-	err := c.doJSON(ctx, http.MethodPost, endpoint, request, &out)
+	err := c.doJSON(ctx, &key, http.MethodPost, endpoint, request, &out)
 	return out, err
 }
 
-func (c *CloudClient) ConfirmOperation(ctx context.Context, previewID string) (Operation, error) {
+func (c *CloudClient) ConfirmOperation(ctx context.Context, key TaskKey, previewID string) (Operation, error) {
 	var out Operation
-	err := c.doJSON(ctx, http.MethodPost, "/api/member/task-operations/"+url.PathEscape(previewID)+"/confirm", nil, &out)
+	err := c.doJSON(ctx, &key, http.MethodPost, "/api/member/task-operations/"+url.PathEscape(previewID)+"/confirm", nil, &out)
 	return out, err
 }
 
-func (c *CloudClient) GetOperation(ctx context.Context, operationID string) (Operation, error) {
+func (c *CloudClient) GetOperation(ctx context.Context, key TaskKey, operationID string) (Operation, error) {
 	var out Operation
-	err := c.doJSON(ctx, http.MethodGet, "/api/member/task-operations/"+url.PathEscape(operationID), nil, &out)
+	err := c.doJSON(ctx, &key, http.MethodGet, "/api/member/task-operations/"+url.PathEscape(operationID), nil, &out)
 	return out, err
 }
 
-func (c *CloudClient) ReportOperation(ctx context.Context, operationID string, report StepReport) (Operation, error) {
+func (c *CloudClient) ReportOperation(ctx context.Context, key TaskKey, operationID string, report StepReport) (Operation, error) {
 	var out Operation
-	err := c.doJSON(ctx, http.MethodPost, "/api/member/task-operations/"+url.PathEscape(operationID)+"/report", report, &out)
+	err := c.doJSON(ctx, &key, http.MethodPost, "/api/member/task-operations/"+url.PathEscape(operationID)+"/report", report, &out)
 	return out, err
 }
 
-func (c *CloudClient) doJSON(ctx context.Context, method, endpoint string, body any, out any) error {
+func (c *CloudClient) doJSON(ctx context.Context, key *TaskKey, method, endpoint string, body any, out any) error {
 	if c == nil || c.baseURL == "" {
 		return newTaskError("cloud_unavailable", "cloud base URL is not configured", nil)
 	}
@@ -216,7 +216,7 @@ func (c *CloudClient) doJSON(ctx context.Context, method, endpoint string, body 
 		attempts = cloudReadAttempts
 	}
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err = c.doJSONOnce(ctx, method, base.String(), body, out)
+		err = c.doJSONOnce(ctx, key, method, base.String(), body, out)
 		if err == nil || !retryableReadError(err) || attempt == attempts {
 			return err
 		}
@@ -229,7 +229,7 @@ func (c *CloudClient) doJSON(ctx context.Context, method, endpoint string, body 
 	return err
 }
 
-func (c *CloudClient) doJSONOnce(ctx context.Context, method, endpoint string, body any, out any) error {
+func (c *CloudClient) doJSONOnce(ctx context.Context, key *TaskKey, method, endpoint string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
@@ -248,6 +248,9 @@ func (c *CloudClient) doJSONOnce(ctx context.Context, method, endpoint string, b
 	}
 	req.Header.Set("Authorization", "Bearer "+credentials.AccessToken)
 	req.Header.Set("Accept", "application/json")
+	if key != nil {
+		req.Header.Set("X-Workspace-ID", key.WorkspaceID)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

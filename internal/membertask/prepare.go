@@ -24,7 +24,31 @@ type preparedMetadata struct {
 	ReworkReason        string   `json:"rework_reason,omitempty"`
 }
 
+func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey) (LocalTransition, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+
+	existing, found, err := s.store.LoadTask(key)
+	if err != nil {
+		return LocalTransition{}, err
+	}
+	record, err := s.prepare(ctx, key)
+	if err != nil {
+		return LocalTransition{}, err
+	}
+	if found && existing.Prepared && existing.RemoteVersion == record.RemoteVersion && existing.Directory == record.Directory {
+		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
+	}
+	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
+}
+
 func (s *Service) Prepare(ctx context.Context, key TaskKey) (TaskRecord, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+	return s.prepare(ctx, key)
+}
+
+func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) {
 	remote, err := s.cloud.GetContext(ctx, key)
 	if err != nil {
 		return TaskRecord{}, err
@@ -314,7 +338,7 @@ func materializeSources(ctx context.Context, root string, sources []MaterialSour
 
 func cloneExactRepository(ctx context.Context, target string, repo RepositoryContext) error {
 	parsed, err := url.Parse(repo.CloneURL)
-	if err != nil || parsed.User != nil {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return newTaskError("unsafe_repository_url", "repository URL is invalid or contains credentials", nil)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

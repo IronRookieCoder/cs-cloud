@@ -303,6 +303,15 @@ func (s *Server) Start(addr string) error {
 	if s.memberTasks != nil && s.memberTaskSecret == "" {
 		return fmt.Errorf("member task private secret is empty")
 	}
+	if s.memberTasks != nil {
+		resolved, err := net.ResolveTCPAddr("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("resolve member task listen address: %w", err)
+		}
+		if resolved.IP == nil || !resolved.IP.IsLoopback() {
+			return fmt.Errorf("member task server must bind to a loopback address")
+		}
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err

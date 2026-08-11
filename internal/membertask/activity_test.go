@@ -16,12 +16,20 @@ func TestStartPauseUseOnlyLocalStore(t *testing.T) {
 	}
 	svc := NewService(store, nil)
 	started, err := svc.Start(context.Background(), key)
-	if err != nil || started.Activity != ActivityActive {
+	if err != nil || started.Activity != ActivityActive || !started.Performed || started.Outcome != OutcomeCompleted {
 		t.Fatalf("Start = %+v, %v", started, err)
 	}
+	repeatedStart, err := svc.Start(context.Background(), key)
+	if err != nil || repeatedStart.Performed || repeatedStart.Outcome != OutcomeAlreadyCompleted {
+		t.Fatalf("repeated Start = %+v, %v", repeatedStart, err)
+	}
 	paused, err := svc.Pause(context.Background(), key)
-	if err != nil || paused.Activity != ActivityPaused {
+	if err != nil || paused.Activity != ActivityPaused || !paused.Performed || paused.Outcome != OutcomeCompleted {
 		t.Fatalf("Pause = %+v, %v", paused, err)
+	}
+	repeatedPause, err := svc.Pause(context.Background(), key)
+	if err != nil || repeatedPause.Performed || repeatedPause.Outcome != OutcomeAlreadyCompleted {
+		t.Fatalf("repeated Pause = %+v, %v", repeatedPause, err)
 	}
 }
 

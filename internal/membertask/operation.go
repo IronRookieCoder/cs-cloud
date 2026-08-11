@@ -2,9 +2,12 @@ package membertask
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -77,6 +80,7 @@ type SubmitFile struct {
 	SourceVersion string `json:"version"`
 	RelativePath  string `json:"relative_path"`
 	SHA256        string `json:"sha256"`
+	Content       string `json:"content"`
 }
 
 type SubmitPreviewRequest struct {
@@ -185,6 +189,9 @@ func (s *Service) PreviewReview(ctx context.Context, key TaskKey, decision, reas
 }
 
 func (s *Service) ConfirmOperation(ctx context.Context, key TaskKey, previewID string) (Operation, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+
 	record, verification, err := s.loadVerifiedTask(key)
 	if err != nil {
 		return Operation{}, err
@@ -198,7 +205,7 @@ func (s *Service) ConfirmOperation(ctx context.Context, key TaskKey, previewID s
 	if record.Preview.MaterialDigest != effectiveMaterialDigest(record) || record.Preview.ContentDigest != verification.ContentDigest {
 		return Operation{}, newTaskError("preview_stale", "task content changed after preview", nil)
 	}
-	operation, err := s.cloud.ConfirmOperation(ctx, previewID)
+	operation, err := s.cloud.ConfirmOperation(ctx, key, previewID)
 	if err != nil {
 		s.handleAuthorityError(record, err)
 		return Operation{}, err
@@ -237,7 +244,7 @@ func (s *Service) RecoverOperation(ctx context.Context, key TaskKey) (Operation,
 	if !found || record.Operation == nil || record.Operation.ID == "" {
 		return Operation{}, newTaskError("operation_not_found", "task has no accepted operation", nil)
 	}
-	operation, err := s.cloud.GetOperation(ctx, record.Operation.ID)
+	operation, err := s.cloud.GetOperation(ctx, key, record.Operation.ID)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -304,7 +311,7 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 			if errors.As(err, &taskErr) {
 				errorCode = taskErr.Code
 			}
-			updated, reportErr := s.cloud.ReportOperation(ctx, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA, ErrorCode: errorCode})
+			updated, reportErr := s.cloud.ReportOperation(ctx, record.Key, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA, ErrorCode: errorCode})
 			if reportErr != nil {
 				return *operation, newTaskError("operation_result_unknown", "operation failure report result is unknown", reportErr)
 			}
@@ -320,7 +327,7 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 			return *operation, err
 		}
 		written = true
-		updated, err := s.cloud.ReportOperation(ctx, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA})
+		updated, err := s.cloud.ReportOperation(ctx, record.Key, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA})
 		if err != nil {
 			return *operation, newTaskError("operation_result_unknown", "operation report result is unknown", err)
 		}
@@ -380,11 +387,13 @@ func buildSubmitManifest(record TaskRecord, verification Verification) ([]Submit
 		if file.Role != MaterialOutputWritable {
 			continue
 		}
-		digest, err := hashFile(filepath.Join(record.Directory, filepath.FromSlash(file.RelativePath)))
+		path := filepath.Join(record.Directory, filepath.FromSlash(file.RelativePath))
+		content, err := os.ReadFile(path)
 		if err != nil {
 			return nil, nil, err
 		}
-		files = append(files, SubmitFile{Identity: file.Identity, SourceVersion: file.SourceVersion, RelativePath: file.RelativePath, SHA256: digest})
+		digest := sha256.Sum256(content)
+		files = append(files, SubmitFile{Identity: file.Identity, SourceVersion: file.SourceVersion, RelativePath: file.RelativePath, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
 	}
 	sort.Slice(repositories, func(i, j int) bool { return repositories[i].RepositoryIdentity < repositories[j].RepositoryIdentity })
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })

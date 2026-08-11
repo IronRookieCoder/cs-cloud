@@ -50,6 +50,30 @@ func TestBuildSubmitManifestRejectsUncommittedRepositoryOutput(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitManifestBindsFileContentToHash(t *testing.T) {
+	store, key, output := seedOperationTask(t)
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := buildSubmitManifest(record, verification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(output)
+	if len(files) != 1 || files[0].Content != string(content) || digestJSON(files[0].Content) == files[0].SHA256 {
+		t.Fatalf("files = %+v", files)
+	}
+	wantHash, _ := hashFile(output)
+	if files[0].SHA256 != wantHash {
+		t.Fatalf("sha256 = %q, want %q", files[0].SHA256, wantHash)
+	}
+}
+
 func runGitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

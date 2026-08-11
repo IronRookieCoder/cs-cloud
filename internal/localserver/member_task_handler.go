@@ -105,7 +105,7 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 	var err error
 	switch action {
 	case "prepare":
-		result, err = s.memberTasks.Prepare(ctx, key)
+		result, err = s.memberTasks.PrepareWithFacts(ctx, key)
 	case "start":
 		result, err = s.memberTasks.Start(ctx, key)
 	case "pause":

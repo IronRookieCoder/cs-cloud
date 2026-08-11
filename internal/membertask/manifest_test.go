@@ -61,3 +61,38 @@ func TestVerifyManifestAllowsOutputFileModificationAndReportsDirty(t *testing.T)
 		t.Fatalf("verification = %+v", verification)
 	}
 }
+
+func TestVerifyManifestRejectsReferenceRepositoryCommitInOutputPath(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repoDir, "init")
+	runGitTest(t, repoDir, "config", "user.email", "test@example.com")
+	runGitTest(t, repoDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repoDir, "result.txt"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repoDir, "add", "result.txt")
+	runGitTest(t, repoDir, "commit", "-m", "base")
+	base := runGitTest(t, repoDir, "rev-parse", "HEAD")
+	manifest, err := BuildManifest(root, []MaterialSource{{
+		Identity: "repo", Kind: "git", RelativePath: "repo", Role: MaterialReferenceOnly,
+		Repository: &RepositoryContext{Identity: "repo", BaseSHA: base, OutputPaths: []string{"result.txt"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "result.txt"), []byte("critic change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repoDir, "add", "result.txt")
+	runGitTest(t, repoDir, "commit", "-m", "critic changed output")
+
+	_, err = VerifyManifest(root, manifest)
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "input_material_modified" {
+		t.Fatalf("VerifyManifest error = %#v, want input_material_modified", err)
+	}
+}

@@ -2,8 +2,10 @@ package membertask
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -20,10 +22,18 @@ type Service struct {
 	cloud     *CloudClient
 	now       func() time.Time
 	publisher *GitPublisher
+	taskLocks sync.Map
 }
 
 func NewService(store *Store, cloud *CloudClient) *Service {
 	return &Service{store: store, cloud: cloud, now: time.Now, publisher: NewGitPublisher()}
+}
+
+func (s *Service) lockTask(key TaskKey) func() {
+	value, _ := s.taskLocks.LoadOrStore(key.String(), &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (s *Service) List(ctx context.Context) ([]Task, error) {
@@ -39,10 +49,16 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 
 	remote, remoteErr := s.cloud.List(ctx)
 	if remoteErr != nil {
+		if !isCloudUnavailable(remoteErr) {
+			return nil, remoteErr
+		}
 		for raw, task := range merged {
 			record := *task.Local
 			record.Offline = true
 			record.CloudStateUnverified = true
+			if err := s.store.SaveTask(record); err != nil {
+				return nil, err
+			}
 			task.Local = &record
 			task.Projection = projectRecord(record, "")
 			merged[raw] = task
@@ -51,9 +67,11 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 	}
 
 	now := s.now().UTC()
+	seen := make(map[string]struct{}, len(remote))
 	for i := range remote {
 		remoteTask := remote[i]
 		key := remoteTask.Key()
+		seen[key.String()] = struct{}{}
 		task, exists := merged[key.String()]
 		if !exists {
 			task = Task{Key: key}
@@ -66,12 +84,31 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 			record.LastVerifiedAt = &now
 			record.RemoteVersion = versionString(remoteTask)
 			record.Attempt = remoteTask.Attempt
+			if err := s.store.SaveTask(record); err != nil {
+				return nil, err
+			}
 			task.Local = &record
 			task.Projection = projectRecord(record, remoteTask.CloudStatus)
 		} else {
 			task.Projection = ProjectStatus(Facts{Role: key.Role, RemoteState: remoteTask.CloudStatus})
 		}
 		merged[key.String()] = task
+	}
+	for raw, task := range merged {
+		if _, ok := seen[raw]; ok || task.Local == nil {
+			continue
+		}
+		record := *task.Local
+		record.Offline = false
+		record.CloudStateUnverified = false
+		record.ReadOnly = true
+		record.LastVerifiedAt = &now
+		if err := s.store.SaveTask(record); err != nil {
+			return nil, err
+		}
+		task.Local = &record
+		task.Projection = projectRecord(record, "")
+		merged[raw] = task
 	}
 	return sortedTasks(merged), nil
 }
@@ -86,8 +123,15 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 		if !found {
 			return Task{}, err
 		}
+		if !isCloudUnavailable(err) {
+			s.handleAuthorityError(record, err)
+			return Task{}, err
+		}
 		record.Offline = true
 		record.CloudStateUnverified = true
+		if err := s.store.SaveTask(record); err != nil {
+			return Task{}, err
+		}
 		return Task{Key: key, Local: &record, Projection: projectRecord(record, "")}, nil
 	}
 	remote := remoteContext.RemoteTask
@@ -99,6 +143,9 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 		record.LastVerifiedAt = &now
 		record.RemoteVersion = versionString(remote)
 		record.Attempt = remote.Attempt
+		if err := s.store.SaveTask(record); err != nil {
+			return Task{}, err
+		}
 		task.Local = &record
 		task.Projection = projectRecord(record, remote.CloudStatus)
 	} else {
@@ -107,48 +154,53 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 	return task, nil
 }
 
-func (s *Service) Start(ctx context.Context, key TaskKey) (TaskRecord, error) {
+func isCloudUnavailable(err error) bool {
+	var taskErr *TaskError
+	return errors.As(err, &taskErr) && taskErr.Code == "cloud_unavailable"
+}
+
+func (s *Service) Start(ctx context.Context, key TaskKey) (LocalTransition, error) {
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
-		return TaskRecord{}, err
+		return LocalTransition{}, err
 	}
 	if !found {
-		return TaskRecord{}, newTaskError("task_not_found", "local task is not prepared", nil)
+		return LocalTransition{}, newTaskError("task_not_found", "local task is not prepared", nil)
 	}
 	if !record.Prepared || (record.Activity != ActivityPrepared && record.Activity != ActivityPaused && record.Activity != ActivityActive) {
-		return TaskRecord{}, newTaskError("invalid_task_state", "task cannot be started from its current state", nil)
+		return LocalTransition{}, newTaskError("invalid_task_state", "task cannot be started from its current state", nil)
 	}
 	if record.Activity == ActivityActive {
-		return record, nil
+		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
 	}
 	record.Activity = ActivityActive
 	if err := s.store.SaveTask(record); err != nil {
-		return TaskRecord{}, err
+		return LocalTransition{}, err
 	}
-	return record, nil
+	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
 }
 
-func (s *Service) Pause(ctx context.Context, key TaskKey) (TaskRecord, error) {
+func (s *Service) Pause(ctx context.Context, key TaskKey) (LocalTransition, error) {
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
-		return TaskRecord{}, err
+		return LocalTransition{}, err
 	}
 	if !found {
-		return TaskRecord{}, newTaskError("task_not_found", "local task is not prepared", nil)
+		return LocalTransition{}, newTaskError("task_not_found", "local task is not prepared", nil)
 	}
 	if record.Activity == ActivityPaused {
-		return record, nil
+		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
 	}
 	if record.Activity != ActivityActive {
-		return TaskRecord{}, newTaskError("invalid_task_state", "only an active task can be paused", nil)
+		return LocalTransition{}, newTaskError("invalid_task_state", "only an active task can be paused", nil)
 	}
 	record.Activity = ActivityPaused
 	if err := s.store.SaveTask(record); err != nil {
-		return TaskRecord{}, err
+		return LocalTransition{}, err
 	}
-	return record, nil
+	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, key TaskKey) (TaskRecord, error) {

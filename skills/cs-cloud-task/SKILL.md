@@ -13,9 +13,9 @@ description: Use when a user needs to view, prepare, start, pause, submit, revie
 
 仅依赖以下 `cs-cloud` 公共 CLI 契约：
 
-- `cs-cloud task help --json` 返回顶层 `{schema_version, commands}`；每个命令仅依赖 `name`、`summary`、`capability`、`timeout_seconds`、`arguments`、`mutually_exclusive`、`confirmation_mode` 和 `outcomes`。
+- `cs-cloud task help --json` 返回顶层 `{schema_version, commands}`；本 skill 支持 schema 主版本 `1`。每个命令仅依赖 `name`、`summary`、`capability`、`timeout_seconds`、`arguments`、`mutually_exclusive`、`confirmation_mode` 和 `outcomes`。
 - catalog 声明的任务命令及其 `--json` 统一信封。
-- 任务信封顶层的 `schema_version`、`ok`、`request_id`、`command`、`task_key`、`performed`、`outcome`、`state_before`、`state_after`、`observed_at`、`data`、`error` 和 `next_commands`。
+- 任务信封顶层固定为 `schema_version`、`ok`、`data` 和 `error`。`data` 包含 `request_id`、argv 数组 `command`、`task_key`、`performed`、`outcome`、`state_before`、`state_after`、`observed_at`、`result` 和 `next_commands`。
 
 命令集合、具体参数和业务状态不属于 skill 自身知识，始终在运行时从 catalog 获取。只按 catalog 的参数元数据构造 argv；不要从帮助文案、内部实现或失败信息猜测语法。不要依赖配置文件布局、端口、HTTP/SSE 路由、Daemon 传输、Go 类型、数据库或本地状态目录；这些内部实现变化不应要求修改 skill。
 
@@ -24,10 +24,11 @@ description: Use when a user needs to view, prepare, start, pause, submit, revie
 - `name` 是供条件和互斥规则引用的逻辑名；`kind` 是 `positional` 或 `flag`。
 - `flag` 是 flag 参数的完整 argv token；不得从 `name` 推导拼写。
 - `type` 是 `string`、`enum` 或 `boolean`；`enum` 的值只能从 `enum` 列表选择。
+- 字符串和枚举 flag 的 `value_style=equals_or_unprefixed_separate` 表示 CLI 接受 `--flag=value`，也接受值不以 `--` 开头时的 `--flag value`；构造新 argv 时固定使用前者，解析 CLI 返回 argv 时按此约束接受两者。
 - `required`、`required_when` 和 `required_unless` 决定何时必须取得值；`required_when` 通过 `{argument, equals}` 引用另一参数。
 - 命令级 `mutually_exclusive` 中每一组逻辑名不得同时出现。
 
-按 `arguments` 顺序生成 argv：位置参数追加值；字符串和枚举 flag 追加 `flag` 与值；值为 true 的布尔 flag 只追加 `flag`。必填值缺失时向用户询问，不启动目标命令。遇到未知 `kind`、`type`、条件形式或 catalog 主版本时停止并报告客户端契约不兼容，不要猜测或回退到内部接口。
+按 `arguments` 顺序生成 argv：位置参数追加值；`equals_or_unprefixed_separate` 的字符串和枚举 flag 追加单个 `flag=value` token；值为 true 的布尔 flag 只追加 `flag`。必填值缺失时向用户询问，不启动目标命令。遇到未知 `kind`、`type`、`value_style`、条件形式或 catalog 主版本时停止并报告客户端契约不兼容，不要猜测或回退到内部接口。
 
 ## 执行入口
 
@@ -60,28 +61,28 @@ description: Use when a user needs to view, prepare, start, pause, submit, revie
 catalog 标记为终态确认、外部可见写入、删除或强制丢弃的操作始终使用两阶段流程：
 
 1. 首次调用不传 `--confirm`，生成最新预览。
-2. 展示预览中的任务、决定、版本、风险摘要、变更与确认 id。明确说明尚未完成。
+2. 完整展示信封 `data.result` 中的结构化预览事实，并用 `data.next_commands` 说明待确认动作；不要假设 `result` 的内部字段布局。明确说明尚未完成。
 3. 在预览展示之后，单独询问用户是否确认。原始请求中的“直接提交”“不用再问”不代替这次确认。
-4. 仅在当前会话中保存刚展示的确认 id、绑定版本/决定/风险摘要、CLI 返回的 confirm argv 和本次操作解析出的二进制绝对路径，不写入文件，也不向用户展示路径。
-5. 用户确认后，继续使用保存的绝对路径；校验保存 argv 前缀为逻辑 `cs-cloud task`，并确认后续命令仍与预览对应。用绝对路径替换首个逻辑名后以 argv 数组直接执行；若 argv 不含 `--json`，仅在末尾追加一次，若已含一个则保持不变。除首个可执行文件路径与 JSON 输出标志外，不要重新构造、删改或覆盖决定、reason、snapshot、删除模式及其他参数。
-6. 任务、版本、决定、风险摘要变化，或 CLI 返回 `preview_stale` / `review_snapshot_stale` 时，丢弃旧确认并重新预览。
+4. 终态预览的 `data.next_commands` 必须恰有一个 `safety=requires_confirmation` 的候选。仅在当前会话中保存刚展示的结构化预览 `data.result`、该候选 argv 和本次操作解析出的二进制绝对路径，不写入文件，也不向用户展示路径；候选缺失或不唯一时按 CLI 契约无效停止。
+5. 用户确认后，继续使用保存的绝对路径。校验候选 argv 是非空字符串 token 数组，前三项是逻辑 `cs-cloud task`，命令存在于 catalog 且等于预览信封 `data.command` 的第三项；要求 `--json` 最多出现一次，匹配参数时忽略该输出标志，再按命令参数元数据解析 argv，并要求其中的 task key 等于预览信封 `data.task_key`。任一 token 为空或校验失败时停止。用绝对路径替换首个逻辑名后以 argv 数组直接执行；若 argv 不含 `--json`，仅在末尾追加一次，若已含一个则保持不变。除首个可执行文件路径与 JSON 输出标志外，不要重新构造、删改或覆盖决定、reason、snapshot、删除模式及其他参数。
+6. 结构化预览 `data.result`、待确认 argv 或目标命令发生变化，或 CLI 返回 `preview_stale` / `review_snapshot_stale` 时，丢弃旧确认并重新预览。
 
 ## 结果事实
 
 | 条件 | 可报告事实 |
 |---|---|
-| 退出码 `0`、`ok=true`、`outcome=observed`、`performed=false` | 已完成查询；没有推进业务状态 |
-| `outcome=previewed`、`performed=false` | 预览已生成，正在等待用户确认 |
-| `outcome=completed` 且 `performed=true` | 本次调用已完成并推进对应操作 |
-| `outcome=already_completed` | 操作此前已经完成；不要声称本次重新执行 |
-| `outcome=recovered` 且 `performed=true` | 已恢复并收敛原 operation；按返回状态说明结果 |
+| 退出码 `0`、`ok=true`、`data.outcome=observed`、`data.performed=false` | 已完成查询；没有推进业务状态 |
+| `data.outcome=previewed`、`data.performed=false` | 预览已生成，正在等待用户确认 |
+| `data.outcome=completed` 且 `data.performed=true` | 本次调用已完成并推进对应操作 |
+| `data.outcome=already_completed` | 操作此前已经完成；不要声称本次重新执行 |
+| `data.outcome=recovered` 且 `data.performed=true` | 已恢复并收敛原 operation；按返回状态说明结果 |
 | 任意非零退出、`ok=false` 或信封无效 | 操作未完成；展示结构化 `error` 和安全下一步，不要声称已执行 |
 
-`performed=false` 永远不能证明本次推进了状态。结果的顶层 `command` 必须等于 `task <command-name>`；`next_commands` 位于信封顶层，不在 `error` 内。只有在 stdout 非空、JSON 可解析、schema 主版本兼容、必需字段和枚举有效，且退出码与 `ok` 一致时，才按信封报告结果；否则视为客户端契约不兼容或调用失败。
+`data.performed=false` 永远不能证明本次推进了状态。`data.command` 必须是以 `cs-cloud task <command-name>` 开头的非空 argv 数组；`next_commands` 位于 `data`，不在 `error` 内。只有在 stdout 非空、JSON 可解析、schema 主版本兼容、必需字段和枚举有效，且退出码与 `ok` 一致时，才按信封报告结果；否则视为客户端契约不兼容或调用失败。
 
 ## 建议命令
 
-程序判断只使用顶层 JSON `error.code` 和 `next_commands`：
+程序判断只使用顶层 JSON `error.code` 和 `data.next_commands`：
 
 | `safety` | 行为 |
 |---|---|
@@ -91,7 +92,9 @@ catalog 标记为终态确认、外部可见写入、删除或强制丢弃的操
 | `requires_confirmation` | 先取得新的明确确认，再执行 |
 | 未知值 | 不执行；展示为不受支持的安全级别，要求人工处理或升级客户端 |
 
-仅对已知 safety 校验建议 argv 以 `cs-cloud task` 开头、命令存在于当前 catalog，并以 argv 数组直接执行。为获得结构化结果，若建议 argv 不含 `--json`，仅在末尾追加一次；不要修改其他参数。未知 safety 即使用户确认也不得执行。不要盲目重跑失败的原命令。调用超时且没有结构化建议时，确认原进程已退出后，最多用原始 argv 中已校验的 task key 执行一次由 catalog 识别的只读详情命令；不要重跑原写命令。
+每个 `data.next_commands` 元素必须是包含 `argv` 和 `safety` 的对象；`argv` 必须是非空字符串 token 数组，且所有 token 非空。字段或元素类型不符时将整个信封视为 CLI 契约无效，不执行任何建议。
+
+仅对已知 safety 校验建议 argv 以 `cs-cloud task` 开头、命令存在于当前 catalog，并以 argv 数组直接执行。为获得结构化结果，若建议 argv 不含 `--json`，仅在末尾追加一次；若多于一个则不执行。不要修改其他参数。未知 safety 即使用户确认也不得执行。不要盲目重跑失败的原命令。调用超时且没有结构化建议时，确认原进程已退出后，最多用原始 argv 中已校验的 task key 执行一次由 catalog 识别的只读详情命令；不要重跑原写命令。
 
 ## 示例
 

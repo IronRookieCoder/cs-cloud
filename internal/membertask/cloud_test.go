@@ -2,6 +2,7 @@ package membertask
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -9,6 +10,34 @@ import (
 
 	"cs-cloud/internal/provider"
 )
+
+func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Workspace-ID"); got != "ws" {
+			t.Errorf("X-Workspace-ID = %q, want ws", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/member/tasks/node/worker/context":
+			_, _ = w.Write([]byte(`{"ref":{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"},"attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true}`))
+		case "/api/member/tasks/node/worker/submit/preview":
+			var request SubmitPreviewRequest
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			_ = json.NewEncoder(w).Encode(Preview{ID: "preview-1", Attempt: request.Attempt, TaskVersion: request.TaskVersion, ContextVersion: request.ContextVersion, MaterialDigest: request.MaterialDigest, ContentDigest: request.ContentDigest})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	client := NewCloudClient(srv.URL, testCredentials)
+	if _, err := client.GetContext(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PreviewSubmit(context.Background(), key, SubmitPreviewRequest{Attempt: 1, TaskVersion: 1, ContextVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCloudClientListsTasksWithBearerAuthAndRetriesReadFailure(t *testing.T) {
 	var attempts atomic.Int32
@@ -87,7 +116,8 @@ func TestCloudClientParsesServerOperationContract(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"operation-1","kind":"submit","status":"accepted","attempt":1,"task_version":1,"context_version":1,"material_digest":"material","preview_digest":"preview","publish_plan":{"task_version":1,"repositories":[]},"steps":[{"repository_identity":"team/repo","expected_ref":"refs/heads/tasks/result","before_sha":"before","head_sha":"head","operation_marker":"marker","status":"not_started"}]}`))
 	}))
 	defer srv.Close()
-	operation, err := NewCloudClient(srv.URL, testCredentials).ConfirmOperation(context.Background(), "operation-1")
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	operation, err := NewCloudClient(srv.URL, testCredentials).ConfirmOperation(context.Background(), key, "operation-1")
 	if err != nil {
 		t.Fatalf("ConfirmOperation: %v", err)
 	}

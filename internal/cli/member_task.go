@@ -28,14 +28,34 @@ type memberTaskAPI interface {
 
 func memberTaskCmd(a *app.App, args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		return printMemberTaskHelp(os.Stdout, taskJSONRequested())
+		var command []string
+		if len(args) > 1 {
+			command = args[1:]
+		}
+		return printMemberTaskHelp(os.Stdout, taskJSONRequested(), command...)
 	}
 	client := newMemberTaskClient(a)
-	return runMemberTaskCommand(context.Background(), args, client, os.Stdout, os.Stderr)
+	return runMemberTaskCommandWithFormat(context.Background(), args, client, os.Stdout, os.Stderr, taskJSONRequested())
 }
 
-func printMemberTaskHelp(out io.Writer, asJSON bool) error {
+func printMemberTaskHelp(out io.Writer, asJSON bool, command ...string) error {
 	catalog := memberTaskHelpCatalog()
+	if len(command) > 1 {
+		return &commandExitError{code: 2}
+	}
+	if len(command) == 1 {
+		found := false
+		for _, spec := range catalog.Commands {
+			if spec.Name == command[0] {
+				catalog.Commands = []CommandSpec{spec}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return &commandExitError{code: 2}
+		}
+	}
 	if asJSON {
 		encoder := json.NewEncoder(out)
 		encoder.SetEscapeHTML(false)
@@ -50,25 +70,37 @@ func printMemberTaskHelp(out io.Writer, asJSON bool) error {
 }
 
 func runMemberTaskCommand(parent context.Context, args []string, api memberTaskAPI, stdout, stderr io.Writer) error {
+	return runMemberTaskCommandWithFormat(parent, args, api, stdout, stderr, true)
+}
+
+func runMemberTaskCommandWithFormat(parent context.Context, args []string, api memberTaskAPI, stdout, stderr io.Writer, asJSON bool) error {
 	request, err := parseMemberTaskRequest(args)
 	if err != nil {
-		return reportTaskCommandError(stdout, stderr, commandName(args), taskKeyFromArgs(args), 2, err)
+		return reportTaskCommandError(stdout, stderr, args, taskKeyFromArgs(args), 2, err, asJSON)
 	}
 	timeout := time.Duration(taskCommandTimeout(request.Command))*time.Second + 2*time.Second
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	result, err := api.Execute(ctx, request)
 	if err != nil {
-		return reportTaskCommandError(stdout, stderr, "task "+request.Command, optionalString(request.TaskKey), classifyTaskError(err), err)
+		return reportTaskCommandError(stdout, stderr, args, optionalString(request.TaskKey), classifyTaskError(err), err, asJSON)
 	}
 	outcome := outcomeForRequest(request, result)
+	performed := performedForResult(result, outcome)
 	stateAfter := stateAfterForResult(result)
 	envelope := taskCommandEnvelope{
-		SchemaVersion: membertask.SchemaVersion, OK: true, RequestID: newRequestID(), Command: "task " + request.Command,
-		TaskKey: optionalString(request.TaskKey), Performed: outcome != membertask.OutcomeObserved && outcome != membertask.OutcomePreviewed,
-		Outcome: outcome, StateAfter: stateAfter, ObservedAt: time.Now().UTC(), Data: result, NextCommands: nextCommandsFor(request, result),
+		SchemaVersion: membertask.SchemaVersion, OK: true,
+		Data: &taskCommandData{
+			RequestID: newRequestID(), Command: taskCommandArgv(args), TaskKey: optionalString(request.TaskKey),
+			Performed: performed, Outcome: outcome, StateAfter: stateAfter, ObservedAt: time.Now().UTC(),
+			Result: result, NextCommands: nextCommandsFor(request, result),
+		},
 	}
-	if err := writeTaskEnvelope(stdout, envelope); err != nil {
+	if asJSON {
+		if err := writeTaskEnvelope(stdout, envelope); err != nil {
+			return err
+		}
+	} else if err := writeTaskText(stdout, envelope.Data); err != nil {
 		return err
 	}
 	return nil
@@ -188,18 +220,44 @@ func invalidArguments(message string) error {
 	return &membertask.TaskError{Code: "invalid_arguments", Message: message}
 }
 
-func reportTaskCommandError(stdout, stderr io.Writer, command string, taskKey *string, code int, err error) error {
+func reportTaskCommandError(stdout, stderr io.Writer, args []string, taskKey *string, code int, err error, asJSON bool) error {
 	taskErr, ok := err.(*membertask.TaskError)
 	if !ok {
 		taskErr = &membertask.TaskError{Code: "internal_error", Message: "task command failed"}
 	}
-	envelope := taskCommandEnvelope{SchemaVersion: membertask.SchemaVersion, OK: false, RequestID: newRequestID(), Command: command, TaskKey: taskKey, Outcome: membertask.OutcomeNotCompleted, ObservedAt: time.Now().UTC(), Error: taskErr, NextCommands: []nextCommand{}}
-	_ = writeTaskEnvelope(stdout, envelope)
+	envelope := taskCommandEnvelope{SchemaVersion: membertask.SchemaVersion, OK: false, Error: taskErr, Data: &taskCommandData{
+		RequestID: newRequestID(), Command: taskCommandArgv(args), TaskKey: taskKey, Outcome: membertask.OutcomeNotCompleted,
+		ObservedAt: time.Now().UTC(), NextCommands: failureNextCommands(taskErr.Code, args, taskKey),
+	}}
+	if asJSON {
+		_ = writeTaskEnvelope(stdout, envelope)
+	}
 	fmt.Fprintf(stderr, "error[%s]: %s\n", taskErr.Code, taskErr.Message)
 	fmt.Fprintln(stderr, "cause: command was not completed")
 	fmt.Fprintln(stderr, "next: none")
 	fmt.Fprintln(stderr, "manual: inspect the task state with cs-cloud task get when safe")
 	return &commandExitError{code: code}
+}
+
+func taskCommandArgv(args []string) []string {
+	return append([]string{"cs-cloud", "task"}, args...)
+}
+
+func failureNextCommands(code string, args []string, taskKey *string) []nextCommand {
+	if taskKey == nil || len(args) == 0 {
+		return []nextCommand{}
+	}
+	switch code {
+	case "preview_stale", "review_snapshot_stale":
+		if args[0] == "submit" || args[0] == "delete" {
+			return []nextCommand{{Argv: []string{"cs-cloud", "task", args[0], *taskKey}, Safety: "preview_only"}}
+		}
+	case "operation_result_unknown":
+		return []nextCommand{{Argv: []string{"cs-cloud", "task", "get", *taskKey}, Safety: "observe_only"}}
+	case "force_discard_required":
+		return []nextCommand{{Argv: []string{"cs-cloud", "task", "delete", *taskKey, "--force-discard"}, Safety: "preview_only"}}
+	}
+	return []nextCommand{}
 }
 
 func classifyTaskError(err error) int {
@@ -228,7 +286,13 @@ func outcomeForRequest(request memberTaskRequest, result any) membertask.Outcome
 	if (request.Command == "submit" || request.Command == "review" || request.Command == "delete") && request.PreviewID == "" {
 		return membertask.OutcomePreviewed
 	}
-	if operation, ok := result.(membertask.Operation); ok && operation.Status == membertask.OperationCompleted {
+	if transition, ok := result.(membertask.LocalTransition); ok {
+		return transition.Outcome
+	}
+	if operation, ok := result.(membertask.Operation); ok {
+		if operation.Status != membertask.OperationCompleted {
+			return membertask.OutcomeNotCompleted
+		}
 		if operation.Outcome != "" {
 			return operation.Outcome
 		}
@@ -237,10 +301,20 @@ func outcomeForRequest(request memberTaskRequest, result any) membertask.Outcome
 	return membertask.OutcomeCompleted
 }
 
+func performedForResult(result any, outcome membertask.Outcome) bool {
+	if transition, ok := result.(membertask.LocalTransition); ok {
+		return transition.Performed
+	}
+	return outcome != membertask.OutcomeObserved && outcome != membertask.OutcomePreviewed && outcome != membertask.OutcomeNotCompleted && outcome != membertask.OutcomeAlreadyCompleted
+}
+
 func stateAfterForResult(result any) *membertask.Projection {
 	switch value := result.(type) {
 	case membertask.TaskRecord:
 		projection := membertask.ProjectTaskRecord(value)
+		return &projection
+	case membertask.LocalTransition:
+		projection := membertask.ProjectTaskRecord(value.TaskRecord)
 		return &projection
 	case membertask.Task:
 		projection := value.Projection

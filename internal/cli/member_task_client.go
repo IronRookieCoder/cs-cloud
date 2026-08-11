@@ -164,8 +164,10 @@ func decodeMemberTaskResponse(response *http.Response, request memberTaskRequest
 		target = &[]membertask.Task{}
 	case "get":
 		target = &membertask.Task{}
-	case "prepare", "start", "pause":
-		target = &membertask.TaskRecord{}
+	case "prepare":
+		target = &membertask.LocalTransition{}
+	case "start", "pause":
+		target = &membertask.LocalTransition{}
 	case "submit", "review":
 		if request.PreviewID == "" {
 			target = &membertask.Preview{}
@@ -190,7 +192,7 @@ func decodeMemberTaskResponse(response *http.Response, request memberTaskRequest
 		return *value, nil
 	case *membertask.Task:
 		return *value, nil
-	case *membertask.TaskRecord:
+	case *membertask.LocalTransition:
 		return *value, nil
 	case *membertask.Preview:
 		return *value, nil

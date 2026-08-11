@@ -25,6 +25,7 @@ type FileManifest struct {
 type RepositoryManifest struct {
 	Identity       string            `json:"identity"`
 	RelativePath   string            `json:"relative_path"`
+	Role           MaterialRole      `json:"role"`
 	BaseSHA        string            `json:"base_sha"`
 	BaseRef        string            `json:"base_ref"`
 	BeforeSHA      string            `json:"before_sha"`
@@ -166,7 +167,7 @@ func buildRepositoryManifest(repoDir, rel string, source MaterialSource) (Reposi
 	if beforeSHA == "" {
 		beforeSHA = repo.BaseSHA
 	}
-	return RepositoryManifest{Identity: repo.Identity, RelativePath: rel, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs}, nil
+	return RepositoryManifest{Identity: repo.Identity, RelativePath: rel, Role: source.Role, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs}, nil
 }
 
 func verifyRepository(repoDir string, manifest RepositoryManifest) ([]string, string, error) {
@@ -207,6 +208,9 @@ func verifyRepository(repoDir string, manifest RepositoryManifest) ([]string, st
 	}
 	paths := make([]string, 0, len(changed))
 	for path := range changed {
+		if manifest.Role != MaterialOutputWritable {
+			return nil, "", newTaskError("input_material_modified", "reference repository changed", nil)
+		}
 		if !pathAllowed(path, manifest.OutputPaths) {
 			return nil, "", newTaskError("input_material_modified", "repository changed outside writable outputs", nil)
 		}

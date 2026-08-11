@@ -51,6 +51,68 @@ func TestDeleteDirtyTaskRequiresForceDiscardPreview(t *testing.T) {
 	}
 }
 
+func TestDeletePreviewRechecksWorkspaceForUnrecordedChanges(t *testing.T) {
+	store, key, dir := seedDeleteTask(t, TaskRecord{Ended: true})
+	resultPath := filepath.Join(dir, "result.txt")
+	manifest, err := BuildManifest(dir, []MaterialSource{{
+		Identity: "result", SourceVersion: "v1", RelativePath: "result.txt", Role: MaterialOutputWritable,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Manifest = &manifest
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte("edited after prepare"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := NewService(store, nil).PreviewDelete(context.Background(), key, DeleteModeNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.RequiresForce {
+		t.Fatalf("preview = %+v, want force discard for current workspace changes", preview)
+	}
+}
+
+func TestDeleteConfirmRejectsPreviewAfterWorkspaceChanges(t *testing.T) {
+	store, key, dir := seedDeleteTask(t, TaskRecord{Ended: true})
+	resultPath := filepath.Join(dir, "result.txt")
+	manifest, err := BuildManifest(dir, []MaterialSource{{
+		Identity: "result", SourceVersion: "v1", RelativePath: "result.txt", Role: MaterialOutputWritable,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Manifest = &manifest
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := NewService(store, nil).PreviewDelete(context.Background(), key, DeleteModeNormal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte("edited after preview"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = NewService(store, nil).ConfirmDelete(context.Background(), key, preview.ID)
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "preview_stale" {
+		t.Fatalf("ConfirmDelete error = %#v, want preview_stale", err)
+	}
+}
+
 func TestDeleteBlocksUnknownExternalOperation(t *testing.T) {
 	store, key, _ := seedDeleteTask(t, TaskRecord{Operation: &Operation{ID: "operation-1", Status: OperationUnknown}})
 	_, err := NewService(store, nil).PreviewDelete(context.Background(), key, DeleteModeForceDiscard)

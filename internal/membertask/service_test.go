@@ -2,13 +2,71 @@ package membertask
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"cs-cloud/internal/provider"
 )
+
+func TestServiceGetAuthorityErrorsAreNotOfflineSuccess(t *testing.T) {
+	for _, code := range []string{"task_not_assigned", "resource_access_denied"} {
+		t.Run(code, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"` + code + `","message":"denied","retryable":false}}`))
+			}))
+			defer srv.Close()
+			store, _ := OpenStore(t.TempDir())
+			key, _ := ParseTaskKey("cloud/ws/node/worker")
+			if err := store.SaveTask(TaskRecord{Key: key, Prepared: true}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).Get(context.Background(), key)
+			var taskErr *TaskError
+			if !errors.As(err, &taskErr) || taskErr.Code != code {
+				t.Fatalf("Get error = %#v, want %s", err, code)
+			}
+			record, _, err := store.LoadTask(key)
+			if err != nil || !record.ReadOnly || record.Offline {
+				t.Fatalf("record = %+v, err = %v", record, err)
+			}
+		})
+	}
+}
+
+func TestServiceListPersistsVerificationAndMakesMissingLocalTasksReadOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tasks":[{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"both","role":"worker","attempt":2,"task_version":3,"context_version":4,"cloud_status":"assigned"}]}`))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	present, _ := ParseTaskKey("cloud/ws/both/worker")
+	missing, _ := ParseTaskKey("cloud/ws/missing/worker")
+	if err := store.SaveTask(TaskRecord{Key: present, Prepared: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(TaskRecord{Key: missing, Prepared: true}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	svc.now = func() time.Time { return now }
+	if _, err := svc.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	presentRecord, _, _ := store.LoadTask(present)
+	if presentRecord.RemoteVersion != "2:3:4" || presentRecord.LastVerifiedAt == nil || !presentRecord.LastVerifiedAt.Equal(now) {
+		t.Fatalf("present record = %+v", presentRecord)
+	}
+	missingRecord, _, _ := store.LoadTask(missing)
+	if !missingRecord.ReadOnly || missingRecord.CloudStateUnverified {
+		t.Fatalf("missing record = %+v", missingRecord)
+	}
+}
 
 func TestServiceListMergesOnlineTasksAndLocalHistory(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

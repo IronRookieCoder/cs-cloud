@@ -179,6 +179,12 @@ const (
 	OutcomeNotCompleted     Outcome = "not_completed"
 )
 
+type LocalTransition struct {
+	TaskRecord
+	Outcome   Outcome `json:"outcome"`
+	Performed bool    `json:"performed"`
+}
+
 type TaskError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
