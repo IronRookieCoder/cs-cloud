@@ -162,6 +162,58 @@ func TestRecoverOperationUsesOriginalOperationAndMarksCompleted(t *testing.T) {
 	}
 }
 
+func TestRecoverOperationSavesRepreviewRequiredWithoutPublishingOrReporting(t *testing.T) {
+	var reportCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/member/task-operations/operation-1":
+			_ = json.NewEncoder(w).Encode(Operation{
+				ID: "operation-1", PreviewID: "preview-1", Status: OperationRepreviewRequired, Kind: "submit",
+				PublishSteps: []RepoPublishPlan{{RepositoryIdentity: "repo", ExpectedRef: "refs/heads/tasks/result"}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/member/task-operations/operation-1/report":
+			reportCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	store, key, _ := seedOperationTask(t)
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Operation = &Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationAccepted, Kind: "submit"}
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+	var publishCalls atomic.Int32
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	svc.publisher = newGitPublisherWithRunner(func(context.Context, string, ...string) (string, error) {
+		publishCalls.Add(1)
+		return "", nil
+	})
+
+	operation, err := svc.RecoverOperation(context.Background(), key)
+	if err != nil {
+		t.Fatalf("RecoverOperation: %v", err)
+	}
+	if operation.Status != OperationRepreviewRequired {
+		t.Fatalf("operation status = %q, want %q", operation.Status, OperationRepreviewRequired)
+	}
+	record, _, err = store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Operation == nil || record.Operation.Status != OperationRepreviewRequired || record.Ended {
+		t.Fatalf("record = %+v, want saved repreview-required operation with ended=false", record)
+	}
+	if publishCalls.Load() != 0 || reportCalls.Load() != 0 {
+		t.Fatalf("publish calls = %d, report calls = %d, want 0/0", publishCalls.Load(), reportCalls.Load())
+	}
+}
+
 func TestRemoteRefChangeReportsOriginalOperationBeforeReturning(t *testing.T) {
 	var report StepReport
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,12 @@ func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
 			var request SubmitPreviewRequest
 			_ = json.NewDecoder(r.Body).Decode(&request)
 			_ = json.NewEncoder(w).Encode(Preview{ID: "preview-1", Attempt: request.Attempt, TaskVersion: request.TaskVersion, ContextVersion: request.ContextVersion, MaterialDigest: request.MaterialDigest, ContentDigest: request.ContentDigest})
+		case "/api/member/task-operations/preview-1/confirm":
+			_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationAccepted})
+		case "/api/member/task-operations/operation-1":
+			_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationRunning})
+		case "/api/member/task-operations/operation-1/report":
+			_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationRunning})
 		default:
 			http.NotFound(w, r)
 		}
@@ -35,6 +41,17 @@ func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := client.PreviewSubmit(context.Background(), key, SubmitPreviewRequest{Attempt: 1, TaskVersion: 1, ContextVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ConfirmOperation(context.Background(), key, "preview-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetOperation(context.Background(), key, "operation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ReportOperation(context.Background(), key, "operation-1", StepReport{
+		RepositoryIdentity: "team/repo", Status: RepoStepVerified,
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
