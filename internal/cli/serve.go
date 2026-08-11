@@ -28,11 +28,16 @@ func serve(a *app.App) error {
 	}
 
 	workflowDriver := a.NewWorkflowDriver()
+	memberTasks, memberTaskSecret, err := a.NewMemberTaskRuntime()
+	if err != nil {
+		return err
+	}
 	srv := localserver.New(
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
 		localserver.WithWorkflow(workflowDriver),
+		localserver.WithMemberTask(memberTasks, memberTaskSecret),
 	)
 
 	if err := srv.Manager().InitDefaultAgent(ctx, a.Config().DefaultAgent, a.Config().AgentCommand, a.Config().AgentVersionCommand, a.Config().AgentWorkspace, a.Config().AgentEnv); err != nil {
@@ -43,6 +48,9 @@ func serve(a *app.App) error {
 
 	if err := srv.Start(net.JoinHostPort(host, fmt.Sprintf("%d", port))); err != nil {
 		return err
+	}
+	if err := memberTasks.ReconcileAll(ctx); err != nil {
+		return fmt.Errorf("reconcile member tasks: %w", err)
 	}
 	if err := a.SaveServerURL(srv.URL()); err != nil {
 		return err

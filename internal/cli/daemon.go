@@ -22,7 +22,6 @@ import (
 	"cs-cloud/internal/version"
 )
 
-
 func collectRecent(dirs []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -91,11 +90,17 @@ func runDaemon(a *app.App) error {
 
 	logger.Info("[debug] initializing local server...")
 	workflowDriver := a.NewWorkflowDriver()
+	memberTasks, memberTaskSecret, err := a.NewMemberTaskRuntime()
+	if err != nil {
+		logger.Error("failed to initialize member tasks: %v", err)
+		return err
+	}
 	srv := localserver.New(
 		localserver.WithVersion(version.Get()),
 		localserver.WithConfig(a.Config()),
 		localserver.WithRootDir(a.RootDir()),
 		localserver.WithWorkflow(workflowDriver),
+		localserver.WithMemberTask(memberTasks, memberTaskSecret),
 	)
 
 	ctx := context.Background()
@@ -132,6 +137,9 @@ func runDaemon(a *app.App) error {
 	if err := srv.Start(net.JoinHostPort(host, fmt.Sprintf("%d", port))); err != nil {
 		logger.Error("failed to start server: %v", err)
 		return err
+	}
+	if err := memberTasks.ReconcileAll(ctx); err != nil {
+		logger.Warn("member task startup reconciliation deferred: %v", err)
 	}
 	logger.Info("[debug] HTTP server started, saving state...")
 	if err := a.SaveServerURL(srv.URL()); err != nil {
