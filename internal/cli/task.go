@@ -23,8 +23,12 @@ import (
 const taskCompleteAttempts = 3
 
 // taskCompleteRetryWait paces retries. Short: completion is latency-sensitive
-// (the driver's completion grace window is seconds), so we must not back off
-// for long before the signal lands.
+// because the signal must reach the localserver and enter the driver's
+// completion registry before execute returns and unregisterCompletion removes
+// the task's entry - after that the POST gets a 409 and the explicit
+// completion payload is lost. (The fail/complete race is arbitrated
+// server-side via ApplyTaskFact's FailureGraceWindow; this retry only guards
+// device-side signal delivery.)
 const taskCompleteRetryWait = 500 * time.Millisecond
 
 // errTaskAlreadyFinished represents a 409 from localserver: the task is no
