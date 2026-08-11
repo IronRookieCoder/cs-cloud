@@ -33,7 +33,7 @@ func TestReportToServer_SendsRequiredHeaders(t *testing.T) {
 	defer srv.Close()
 
 	endpoint := srv.URL + "/api/node-runs/nr-1/deliverables/del-2/submit"
-	if err := reportToServer(context.Background(), srv.URL, "tok", endpoint, "https://pr", "ws-123", "agent-1", "task-9"); err != nil {
+	if err := reportToServer(context.Background(), srv.URL, "tok", endpoint, "https://pr", "ws-123", "agent-1", "task-9", "pull_request_url"); err != nil {
 		t.Fatalf("reportToServer: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestReportToServer_OmitsEmptyWorkspaceHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := reportToServer(context.Background(), srv.URL, "tok", srv.URL+"/x", "https://pr", "", "a", "t"); err != nil {
+	if err := reportToServer(context.Background(), srv.URL, "tok", srv.URL+"/x", "https://pr", "", "a", "t", "pull_request_url"); err != nil {
 		t.Fatalf("reportToServer: %v", err)
 	}
 	if workspaceHeaderPresent {
@@ -96,5 +96,70 @@ func TestReportDeliverablePR_BuildsUnifiedEndpoint(t *testing.T) {
 	}
 	if want := "/api/node-runs/nr-1/deliverables/del-2/submit"; gotPath != want {
 		t.Errorf("endpoint path = %q, want %q", gotPath, want)
+	}
+}
+
+// TestResolveSubmitTarget_FallsBackWhenNoReports verifies the hardcoded
+// endpoint + body field are used when multica did not send per-deliverable
+// Report contracts (backward compat with older multica deployments).
+func TestResolveSubmitTarget_FallsBackWhenNoReports(t *testing.T) {
+	t.Setenv("CS_CLOUD_DELIVERABLE_REPORTS", "")
+	endpoint, bodyField := resolveSubmitTarget("del-2", "http://srv", "nr-1")
+	if want := "http://srv/api/node-runs/nr-1/deliverables/del-2/submit"; endpoint != want {
+		t.Fatalf("endpoint = %q, want %q", endpoint, want)
+	}
+	if bodyField != "pull_request_url" {
+		t.Fatalf("bodyField = %q, want pull_request_url", bodyField)
+	}
+}
+
+// TestResolveSubmitTarget_UsesReportWhenPresent verifies that when multica
+// sends a per-deliverable Report (R4), cs-cloud honors its endpoint path and
+// body field instead of the hardcoded defaults.
+func TestResolveSubmitTarget_UsesReportWhenPresent(t *testing.T) {
+	t.Setenv("CS_CLOUD_DELIVERABLE_REPORTS", `[{"deliverable_id":"del-2","endpoint":"/api/v2/deliverables/del-2/submit","body_field":"merge_request_url"}]`)
+	endpoint, bodyField := resolveSubmitTarget("del-2", "http://srv", "nr-1")
+	if want := "http://srv/api/v2/deliverables/del-2/submit"; endpoint != want {
+		t.Fatalf("endpoint = %q, want %q (Report.Endpoint must override the hardcoded path)", endpoint, want)
+	}
+	if bodyField != "merge_request_url" {
+		t.Fatalf("bodyField = %q, want merge_request_url", bodyField)
+	}
+}
+
+func TestResolveSubmitTarget_IgnoresReportsForOtherDeliverables(t *testing.T) {
+	t.Setenv("CS_CLOUD_DELIVERABLE_REPORTS", `[{"deliverable_id":"del-9","endpoint":"/x","body_field":"y"}]`)
+	endpoint, bodyField := resolveSubmitTarget("del-2", "http://srv", "nr-1")
+	if want := "http://srv/api/node-runs/nr-1/deliverables/del-2/submit"; endpoint != want {
+		t.Fatalf("endpoint = %q, want fallback (no matching report)", endpoint)
+	}
+	if bodyField != "pull_request_url" {
+		t.Fatalf("bodyField = %q, want pull_request_url fallback", bodyField)
+	}
+}
+
+// TestReportToServer_UsesBodyField verifies the body field name is parameterized
+// (R4) so a Report.BodyField like "merge_request_url" is honored.
+func TestReportToServer_UsesBodyField(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := reportToServer(context.Background(), srv.URL, "tok", srv.URL+"/x", "https://pr", "ws", "a", "t", "merge_request_url"); err != nil {
+		t.Fatalf("reportToServer: %v", err)
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
+		t.Fatalf("body unmarshal: %v (body=%q)", err, gotBody)
+	}
+	if body["merge_request_url"] != "https://pr" {
+		t.Fatalf("body = %q, want merge_request_url:https://pr", gotBody)
+	}
+	if _, ok := body["pull_request_url"]; ok {
+		t.Fatalf("body should not contain pull_request_url when bodyField differs: %q", gotBody)
 	}
 }
