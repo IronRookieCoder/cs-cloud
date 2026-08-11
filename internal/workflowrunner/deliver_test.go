@@ -55,14 +55,26 @@ func TestPostTaskFact_DeliversToFactsEndpoint(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
+	for _, key := range []string{
+		"fact_id", "task_id", "kind", "occurred_at", "output",
+		"session_id", "work_dir", "decision", "reason", "error", "failure_reason",
+	} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("missing wire key %q in body: %s", key, gotBody)
+		}
+	}
 	if body["fact_id"] != "fact-1" || body["task_id"] != "task-1" || body["kind"] != "complete" {
-		t.Fatalf("unexpected body: %s", gotBody)
+		t.Fatalf("unexpected identity body: %s", gotBody)
 	}
 	if body["output"] != "done" || body["session_id"] != "sess-1" || body["work_dir"] != "/tmp/wd" {
-		t.Fatalf("unexpected body: %s", gotBody)
+		t.Fatalf("unexpected context body: %s", gotBody)
 	}
 	if body["decision"] != "approve" || body["reason"] != "lgtm" {
-		t.Fatalf("unexpected body: %s", gotBody)
+		t.Fatalf("unexpected signal body: %s", gotBody)
+	}
+	// Empty-string fields must still be present on the wire (no omitempty).
+	if body["error"] != "" || body["failure_reason"] != "" {
+		t.Fatalf("unexpected empty-string fields: %s", gotBody)
 	}
 }
 

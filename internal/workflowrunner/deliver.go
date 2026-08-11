@@ -53,7 +53,16 @@ func (d *Driver) deliverOutboxPass(ctx context.Context) {
 	for _, f := range facts {
 		delivered, err := d.deliverOutboxFact(ctx, f)
 		if err != nil {
-			logger.Warn("workflow: outbox delivery for fact %s failed: %v", f.FactID, err)
+			var stErr *StatusError
+			if errors.As(err, &stErr) && stErr.StatusCode >= 400 && stErr.StatusCode < 500 && stErr.StatusCode != http.StatusConflict {
+				// Non-409 4xx means the server rejected the fact as invalid. This
+				// is a contract bug, not a transient error, but the durable fact
+				// must not be silently dropped. Leave it pending for visibility
+				// and potential operator/manual handling.
+				logger.Warn("workflow: outbox fact %s rejected by server with status %d; leaving pending", f.FactID, stErr.StatusCode)
+			} else {
+				logger.Warn("workflow: outbox delivery for fact %s failed: %v", f.FactID, err)
+			}
 		}
 		if delivered {
 			if err := d.outbox.MarkDone(f.FactID); err != nil {
