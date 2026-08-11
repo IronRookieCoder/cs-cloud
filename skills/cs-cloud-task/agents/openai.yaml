@@ -1,4 +1,0 @@
-interface:
-  display_name: "cs-cloud Local Tasks"
-  short_description: "Safely process Multica tasks through the cs-cloud CLI"
-  default_prompt: "Use $cs-cloud-task to inspect and process my assigned Multica task safely."
