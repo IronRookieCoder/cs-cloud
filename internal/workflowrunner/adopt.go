@@ -115,6 +115,11 @@ func (d *Driver) watchAdoptedTurn(ctx context.Context, cancel context.CancelFunc
 	}
 
 	workDir, _ := agent.SessionDirectory(ctx, sessionID)
+	// Persist the completion durably before any external side-effect, mirroring
+	// the dispatched path: a crash between the outcome and the in-process
+	// CompleteTask callback must not lose the produced output. The fact carries
+	// the output (truncated) so crash recovery can still surface it.
+	_ = d.writeCompleteFactToOutbox(taskID, sessionID, workDir, csagent.CompletionSignal{Summary: output})
 	d.postTaskMessages(taskID, output)
 	_ = d.withTaskCallbackContext(func(callbackCtx context.Context) error {
 		return d.client.CompleteTask(callbackCtx, taskID, output, sessionID, workDir, csagent.CompletionSignal{})

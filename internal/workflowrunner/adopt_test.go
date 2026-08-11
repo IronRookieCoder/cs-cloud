@@ -328,6 +328,74 @@ func TestAdoptUserTurnCompletesOnIdle(t *testing.T) {
 	}
 }
 
+func TestAdoptedTurnCompleteWritesFactToOutbox(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	sessionDir := t.TempDir()
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"hello from assistant"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
+	defer cscSrv.Close()
+
+	agent := csc.NewAgentWithEndpoint(cscSrv.URL)
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	waitFor(t, "complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	// The completion must be durably recorded as a complete fact carrying the
+	// output, so a crash between the outcome and the in-process CompleteTask
+	// callback does not lose the produced output.
+	waitFor(t, "complete fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "complete" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var completeFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "complete" && facts[i].TaskID == "task-1" {
+			completeFact = &facts[i]
+			break
+		}
+	}
+	if completeFact == nil {
+		t.Fatalf("expected a complete fact for task-1 in outbox, got %+v", facts)
+	}
+	if completeFact.Output != "hello from assistant" {
+		t.Errorf("fact output = %q, want %q", completeFact.Output, "hello from assistant")
+	}
+	if completeFact.SessionID != "session-1" {
+		t.Errorf("fact session_id = %q, want %q", completeFact.SessionID, "session-1")
+	}
+	if completeFact.WorkDir != sessionDir {
+		t.Errorf("fact work_dir = %q, want %q", completeFact.WorkDir, sessionDir)
+	}
+}
+
 func TestAdoptUserTurnFailsOnErrorEvent(t *testing.T) {
 	backend := newFakeAdoptBackend()
 	backendSrv := httptest.NewServer(backend.handler())
