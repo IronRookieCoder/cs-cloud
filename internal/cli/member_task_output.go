@@ -109,6 +109,28 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 	return err
 }
 
+func writeTaskErrorText(out io.Writer, envelope taskCommandEnvelope) error {
+	if envelope.Error == nil || envelope.Data == nil {
+		return errors.New("task error envelope is incomplete")
+	}
+	if _, err := fmt.Fprintf(out, "error[%s]: %s\ncause: command was not completed\n", envelope.Error.Code, envelope.Error.Message); err != nil {
+		return err
+	}
+	if len(envelope.Data.NextCommands) == 0 {
+		if _, err := fmt.Fprintln(out, "next: none"); err != nil {
+			return err
+		}
+	} else {
+		for _, command := range envelope.Data.NextCommands {
+			if _, err := fmt.Fprintf(out, "next: %s [%s]\n", strings.Join(command.Argv, " "), command.Safety); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintln(out, "manual: inspect the task state with cs-cloud task get when safe")
+	return err
+}
+
 func (e *taskCommandEnvelope) UnmarshalJSON(payload []byte) error {
 	type wireEnvelope struct {
 		SchemaVersion string                `json:"schema_version"`

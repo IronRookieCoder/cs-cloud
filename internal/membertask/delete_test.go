@@ -77,15 +77,17 @@ func TestConfirmDeleteIsIdempotentForCompletedPreview(t *testing.T) {
 func TestDeleteDirtyTaskRequiresForceDiscardPreview(t *testing.T) {
 	store, key, _ := seedDeleteTask(t, TaskRecord{Dirty: true, DirtyPaths: []string{"output/result.md"}})
 	svc := NewService(store, nil)
-	preview, err := svc.PreviewDelete(context.Background(), key, DeleteModeNormal)
-	if err != nil {
-		t.Fatalf("PreviewDelete: %v", err)
+	_, err := svc.PreviewDelete(context.Background(), key, DeleteModeNormal)
+	taskErr, ok := err.(*TaskError)
+	if !ok || taskErr.Code != "force_discard_required" {
+		t.Fatalf("PreviewDelete error = %#v, want force_discard_required", err)
 	}
-	if !preview.RequiresForce {
-		t.Fatalf("preview = %+v", preview)
+	record, found, err := store.LoadTask(key)
+	if err != nil || !found {
+		t.Fatalf("LoadTask: found=%t err=%v", found, err)
 	}
-	if err := svc.ConfirmDelete(context.Background(), key, preview.ID); err == nil {
-		t.Fatal("normal delete confirmed for dirty task")
+	if record.DeletePreview != nil {
+		t.Fatalf("normal delete confirmation was stored: %+v", record.DeletePreview)
 	}
 	force, err := svc.PreviewDelete(context.Background(), key, DeleteModeForceDiscard)
 	if err != nil {
@@ -117,12 +119,10 @@ func TestDeletePreviewRechecksWorkspaceForUnrecordedChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	preview, err := NewService(store, nil).PreviewDelete(context.Background(), key, DeleteModeNormal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !preview.RequiresForce {
-		t.Fatalf("preview = %+v, want force discard for current workspace changes", preview)
+	_, err = NewService(store, nil).PreviewDelete(context.Background(), key, DeleteModeNormal)
+	taskErr, ok := err.(*TaskError)
+	if !ok || taskErr.Code != "force_discard_required" {
+		t.Fatalf("PreviewDelete error = %#v, want force_discard_required", err)
 	}
 }
 

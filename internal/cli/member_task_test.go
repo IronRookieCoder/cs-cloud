@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/membertask"
@@ -293,7 +294,7 @@ func TestTaskEnvelopeUsesOperationOutcome(t *testing.T) {
 	}
 	var envelope taskCommandEnvelope
 	_ = json.Unmarshal(stdout.Bytes(), &envelope)
-	if envelope.Outcome != membertask.OutcomeRecovered || !envelope.Performed {
+	if envelope.Outcome != membertask.OutcomeRecovered || envelope.Performed {
 		t.Fatalf("envelope = %+v", envelope)
 	}
 }
@@ -424,6 +425,27 @@ func TestTaskEnvelopeFailureUsesOuterErrorAndFixedStaleSuggestion(t *testing.T) 
 	want := []string{"cs-cloud", "task", "submit", "cloud/ws/node/worker"}
 	if envelope.Data.NextCommands[0].Safety != "preview_only" || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
 		t.Fatalf("next commands = %+v", envelope.Data.NextCommands)
+	}
+}
+
+func TestTaskEnvelopeForceDiscardRequiredSuggestsOnlyForcePreview(t *testing.T) {
+	api := &fakeMemberTaskAPI{err: &membertask.TaskError{Code: "force_discard_required", Message: "risky local state"}}
+	var stdout, stderr bytes.Buffer
+	key := "cloud/ws/node/worker"
+	err := runMemberTaskCommand(context.Background(), []string{"delete", key}, api, &stdout, &stderr)
+	if exitCode(err) != 4 {
+		t.Fatalf("exit code = %d", exitCode(err))
+	}
+	var envelope taskCommandEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cs-cloud", "task", "delete", key, "--force-discard"}
+	if envelope.Data == nil || len(envelope.Data.NextCommands) != 1 || envelope.Data.NextCommands[0].Safety != "preview_only" || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
+		t.Fatalf("next commands = %+v, want one force-discard preview", envelope.Data)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(strings.Join(want, " "))) || bytes.Contains(stderr.Bytes(), []byte("next: none")) {
+		t.Fatalf("stderr = %q, want envelope next command", stderr.String())
 	}
 }
 

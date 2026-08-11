@@ -196,8 +196,19 @@ func (c *CloudClient) PreviewReview(ctx context.Context, key TaskKey, request Re
 
 func (c *CloudClient) ConfirmOperation(ctx context.Context, key TaskKey, previewID string) (Operation, error) {
 	var out Operation
-	err := c.doJSON(ctx, &key, http.MethodPost, "/api/member/task-operations/"+url.PathEscape(previewID)+"/confirm", nil, &out)
-	return out, err
+	endpoint := "/api/member/task-operations/" + url.PathEscape(previewID) + "/confirm"
+	err := c.doJSON(ctx, &key, http.MethodPost, endpoint, nil, &out)
+	if err == nil || !retryableReadError(err) {
+		return out, err
+	}
+	out = Operation{}
+	if err := c.doJSON(ctx, &key, http.MethodPost, endpoint, nil, &out); err != nil {
+		return Operation{}, err
+	}
+	if out.Status == OperationCompleted {
+		out.Outcome = OutcomeRecovered
+	}
+	return out, nil
 }
 
 func (c *CloudClient) GetOperation(ctx context.Context, key TaskKey, operationID string) (Operation, error) {

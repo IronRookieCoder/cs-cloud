@@ -133,7 +133,8 @@ func ProjectStatus(f Facts) Projection {
 
 func knownRemoteState(state string) bool {
 	switch state {
-	case "assigned", "prepared", "in_progress", "rework", "submitting", "ended":
+	case "assigned", "prepared", "in_progress", "rework", "submitting", "ended",
+		"worker_assigned", "working", "awaiting_critic", "critic_reviewing":
 		return true
 	default:
 		return false

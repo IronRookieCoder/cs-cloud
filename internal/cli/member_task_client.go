@@ -44,6 +44,10 @@ func newMemberTaskClient(a *app.App) *memberTaskClient {
 
 func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskRequest) (any, error) {
 	if err := c.ensureDaemon(ctx); err != nil {
+		var taskErr *membertask.TaskError
+		if errors.As(err, &taskErr) {
+			return nil, taskErr
+		}
 		return nil, &membertask.TaskError{Code: "daemon_unavailable", Message: "member task daemon is unavailable"}
 	}
 	serverURL, secret, err := c.resolve()
@@ -228,6 +232,9 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 	if err := a.SaveMode("cloud"); err != nil {
 		return err
 	}
+	if _, err := a.PrepareCloudDaemon(); err != nil {
+		return err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -249,9 +256,6 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := a.WritePID(cmd.Process.Pid); err != nil {
-		return err
-	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -270,7 +274,7 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 		case <-deadline.C:
 			return errors.New("daemon readiness timeout")
 		case <-ticker.C:
-			if serverURL, _ := a.ServerURL(); serverURL != "" {
+			if a.MemberTaskDaemonReady() {
 				return nil
 			}
 		}
