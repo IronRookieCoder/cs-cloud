@@ -124,6 +124,86 @@ func TestConfirmRejectsPreviewAfterLocalContentChanges(t *testing.T) {
 	}
 }
 
+func TestConfirmOperationReturnsAlreadyCompletedWithoutCloudRequest(t *testing.T) {
+	var confirmCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		confirmCalls.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	store, key, _ := seedOperationTask(t)
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Preview = &Preview{ID: "preview-1", MaterialDigest: effectiveMaterialDigest(record), ContentDigest: verification.ContentDigest}
+	record.Operation = &Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationCompleted, Kind: "submit"}
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+
+	operation, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).ConfirmOperation(context.Background(), key, "preview-1")
+	if err != nil {
+		t.Fatalf("ConfirmOperation: %v", err)
+	}
+	if operation.Outcome != OutcomeAlreadyCompleted {
+		t.Fatalf("outcome = %q, want %q", operation.Outcome, OutcomeAlreadyCompleted)
+	}
+	if confirmCalls.Load() != 0 {
+		t.Fatalf("confirm calls = %d, want 0", confirmCalls.Load())
+	}
+}
+
+func TestConfirmOperationRecoversCompletedResponseAfterTransientFailure(t *testing.T) {
+	var confirmCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/member/task-operations/preview-1/confirm" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if confirmCalls.Add(1) == 1 {
+			http.Error(w, "response lost", http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", PreviewID: "preview-1", Status: OperationCompleted, Kind: "submit"})
+	}))
+	defer srv.Close()
+	store, key, _ := seedOperationTask(t)
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Preview = &Preview{ID: "preview-1", MaterialDigest: effectiveMaterialDigest(record), ContentDigest: verification.ContentDigest}
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+
+	operation, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).ConfirmOperation(context.Background(), key, "preview-1")
+	if err != nil {
+		t.Fatalf("ConfirmOperation: %v", err)
+	}
+	if operation.Outcome != OutcomeRecovered {
+		t.Fatalf("outcome = %q, want %q", operation.Outcome, OutcomeRecovered)
+	}
+	if confirmCalls.Load() != 2 {
+		t.Fatalf("confirm calls = %d, want 2", confirmCalls.Load())
+	}
+	record, _, err = store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Ended {
+		t.Fatal("ended = false, want true after recovered completion")
+	}
+}
+
 func TestPreviewReviewRequiresReasonForReject(t *testing.T) {
 	store, _, _ := seedOperationTask(t)
 	critic, _ := ParseTaskKey("cloud/ws/node/critic")

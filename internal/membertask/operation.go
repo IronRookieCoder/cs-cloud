@@ -199,6 +199,11 @@ func (s *Service) ConfirmOperation(ctx context.Context, key TaskKey, previewID s
 	if record.Preview == nil || record.Preview.ID != previewID {
 		return Operation{}, newTaskError("preview_stale", "preview does not match the local task", nil)
 	}
+	if record.Operation != nil && record.Operation.PreviewID == previewID && record.Operation.Status == OperationCompleted {
+		operation := *record.Operation
+		operation.Outcome = OutcomeAlreadyCompleted
+		return operation, nil
+	}
 	if !record.Preview.ExpiresAt.IsZero() && !s.now().Before(record.Preview.ExpiresAt) {
 		return Operation{}, newTaskError("preview_stale", "preview has expired", nil)
 	}
@@ -218,6 +223,9 @@ func (s *Service) ConfirmOperation(ctx context.Context, key TaskKey, previewID s
 	}
 	if operation.LocalSteps == nil {
 		operation.LocalSteps = map[string]RepoStepResult{}
+	}
+	if operation.Status == OperationCompleted && operation.Outcome == "" {
+		operation.Outcome = OutcomeCompleted
 	}
 	record.Operation = &operation
 	if err := s.store.SaveTask(record); err != nil {
@@ -278,6 +286,13 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 		operation.LocalSteps = map[string]RepoStepResult{}
 	}
 	if len(operation.PublishSteps) == 0 {
+		if operation.Status == OperationCompleted {
+			record.Ended = true
+			record.Operation = operation
+			if err := s.store.SaveTask(record); err != nil {
+				return *operation, err
+			}
+		}
 		return *operation, nil
 	}
 	publisher := s.publisher

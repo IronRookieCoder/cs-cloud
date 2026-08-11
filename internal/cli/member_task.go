@@ -326,7 +326,7 @@ func performedForResult(result any, outcome membertask.Outcome) bool {
 	if transition, ok := result.(membertask.LocalTransition); ok {
 		return transition.Performed
 	}
-	return outcome != membertask.OutcomeObserved && outcome != membertask.OutcomePreviewed && outcome != membertask.OutcomeNotCompleted && outcome != membertask.OutcomeAlreadyCompleted
+	return outcome != membertask.OutcomeObserved && outcome != membertask.OutcomePreviewed && outcome != membertask.OutcomeNotCompleted && outcome != membertask.OutcomeAlreadyCompleted && outcome != membertask.OutcomeRecovered
 }
 
 func stateAfterForResult(result any) *membertask.Projection {

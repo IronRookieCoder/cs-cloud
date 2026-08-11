@@ -278,7 +278,7 @@ func TestTaskEnvelopeUsesOperationOutcome(t *testing.T) {
 	}
 	var envelope taskCommandEnvelope
 	_ = json.Unmarshal(stdout.Bytes(), &envelope)
-	if envelope.Outcome != membertask.OutcomeRecovered || !envelope.Performed {
+	if envelope.Outcome != membertask.OutcomeRecovered || envelope.Performed {
 		t.Fatalf("envelope = %+v", envelope)
 	}
 }
