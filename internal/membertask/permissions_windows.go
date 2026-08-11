@@ -16,18 +16,25 @@ func SecureProfilePermissions(root, secretPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve current user SID: %w", err)
 	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;" + userSID + ")")
-	if err != nil {
-		return fmt.Errorf("build private DACL: %w", err)
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return fmt.Errorf("read private DACL: %w", err)
-	}
 	flags := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	for _, path := range []string{root, secretPath} {
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, flags, nil, nil, dacl, nil); err != nil {
-			return fmt.Errorf("secure %s: %w", path, err)
+	targets := []struct {
+		path string
+		sddl string
+	}{
+		{root, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + userSID + ")"},
+		{secretPath, "D:P(A;;FA;;;SY)(A;;FA;;;" + userSID + ")"},
+	}
+	for _, target := range targets {
+		sd, err := windows.SecurityDescriptorFromString(target.sddl)
+		if err != nil {
+			return fmt.Errorf("build private DACL: %w", err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			return fmt.Errorf("read private DACL: %w", err)
+		}
+		if err := windows.SetNamedSecurityInfo(target.path, windows.SE_FILE_OBJECT, flags, nil, nil, dacl, nil); err != nil {
+			return fmt.Errorf("secure %s: %w", target.path, err)
 		}
 	}
 	return nil
