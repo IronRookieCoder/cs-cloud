@@ -136,11 +136,23 @@ func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal)
 			d.mu.Unlock()
 			return nil
 		}
+		// Persist while holding the lock so a concurrent signal cannot add a
+		// duplicate fact. Only mark forwarded after a successful write; if Add
+		// fails, a later signal can retry.
+		err := d.writeCompleteFactToOutbox(taskID, cs.sessionID, cs.workDir, sig)
+		if err != nil {
+			d.mu.Unlock()
+			return nil
+		}
+		// Re-check under the same lock in case another signal raced in while
+		// we were writing (it cannot, but the guard makes the contract explicit).
+		if cs.forwarded {
+			d.mu.Unlock()
+			return nil
+		}
 		cs.forwarded = true
 		sessionID, workDir := cs.sessionID, cs.workDir
 		d.mu.Unlock()
-		// Durability first: persist the fact before any in-process delivery.
-		d.writeCompleteFactToOutbox(taskID, sessionID, workDir, sig)
 		go d.forwardLateCompletion(taskID, sessionID, workDir, sig)
 		return nil
 	}
@@ -149,8 +161,9 @@ func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal)
 		return nil
 	}
 	// Durability first: persist the fact before closing notify and letting
-	// execute report completion in-process.
-	d.writeCompleteFactToOutbox(taskID, cs.sessionID, cs.workDir, sig)
+	// execute report completion in-process. In-process completion proceeds even
+	// if the outbox write fails.
+	_ = d.writeCompleteFactToOutbox(taskID, cs.sessionID, cs.workDir, sig)
 	cs.payload = sig
 	cs.set = true
 	close(cs.notify)
@@ -158,17 +171,17 @@ func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal)
 	return nil
 }
 
-// writeCompleteFactToOutbox persists a "complete" task fact durably. Failures
-// are logged loudly but do not block the in-process completion path, which is
-// the best-effort fallback when the outbox cannot be written.
-func (d *Driver) writeCompleteFactToOutbox(taskID, sessionID, workDir string, sig agent.CompletionSignal) {
+// writeCompleteFactToOutbox persists a "complete" task fact durably. It returns
+// nil when the fact is persisted (or when there is no outbox). Failures are
+// logged loudly and returned so callers can decide whether to advance state.
+func (d *Driver) writeCompleteFactToOutbox(taskID, sessionID, workDir string, sig agent.CompletionSignal) error {
 	if d.outbox == nil {
-		return
+		return nil
 	}
 	factID, err := newFactID()
 	if err != nil {
 		logger.Error("workflow: task %s failed to generate complete fact id: %v", taskID, err)
-		return
+		return err
 	}
 	fact := OutboxFact{
 		FactID:     factID,
@@ -183,5 +196,7 @@ func (d *Driver) writeCompleteFactToOutbox(taskID, sessionID, workDir string, si
 	}
 	if err := d.outbox.Add(fact); err != nil {
 		logger.Error("workflow: task %s complete fact write-through failed: %v", taskID, err)
+		return err
 	}
+	return nil
 }

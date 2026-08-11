@@ -51,6 +51,11 @@ func (d *Driver) deliverOutboxPass(ctx context.Context) {
 	}
 
 	for _, f := range facts {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		delivered, err := d.deliverOutboxFact(ctx, f)
 		if err != nil {
 			var stErr *StatusError

@@ -740,12 +740,16 @@ func (d *Driver) writeFailFactToOutbox(taskID string, taskErr error, failureReas
 		logger.Error("workflow: task %s failed to generate fail fact id: %v", taskID, err)
 		return
 	}
+	errStr := ""
+	if taskErr != nil {
+		errStr = taskErr.Error()
+	}
 	fact := OutboxFact{
 		FactID:        factID,
 		TaskID:        taskID,
 		Kind:          "fail",
 		OccurredAt:    time.Now().UTC(),
-		Error:         taskErr.Error(),
+		Error:         errStr,
 		FailureReason: failureReason,
 	}
 	if err := d.outbox.Add(fact); err != nil {
