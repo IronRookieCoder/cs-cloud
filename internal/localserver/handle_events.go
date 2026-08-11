@@ -14,6 +14,7 @@ import (
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/platform"
 )
 
 // handleEventsSSE merges two event sources into a single SSE stream:
@@ -205,7 +206,7 @@ func (s *Server) proxyBackendSSE(ctx context.Context, origReq *http.Request, out
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := platform.HTTPClient().Do(req)
 	if err != nil {
 		logger.Error("events SSE: backend request failed: %v", err)
 		return
