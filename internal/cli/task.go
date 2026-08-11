@@ -38,9 +38,10 @@ var errTaskAlreadyFinished = errors.New("task already finished")
 // It calls back into this device's localserver, which signals the driver.
 //
 // The agent passes NO context flags: task id + local server URL come from the
-// environment, which `cs-cloud workflow` populated from .cs-cloud.env at task
-// start (see loadTaskEnvFile). Each command takes at most one optional flag
-// (summary / reason) to keep the surface small and hard to misuse.
+// environment, which `cs-cloud workflow` fills from .cs-cloud.env when env
+// propagation through the agent subprocess failed. Each command takes at most
+// one optional flag (summary / reason) to keep the surface small and hard to
+// misuse.
 func taskCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
 	if len(args) == 0 {
@@ -99,7 +100,8 @@ func runTaskReview(args []string, decision string) error {
 
 // postTaskCompletion POSTs the completion payload to this device's localserver
 // endpoint, which forwards it to the driver via SignalTaskCompletion. Task id +
-// local URL come from the env (populated from .cs-cloud.env by loadTaskEnvFile).
+// local URL come from the env (filled from .cs-cloud.env by loadTaskEnvFile when
+// env propagation through the agent subprocess failed).
 //
 // The call is the agent's only chance to signal completion, so transient
 // failures are retried (taskCompleteAttempts). A 409 means the task already
