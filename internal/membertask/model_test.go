@@ -76,3 +76,18 @@ func TestProjectStatusUnknownRemoteStateIsReadOnly(t *testing.T) {
 		t.Fatalf("actions = %#v", p.AvailableActions)
 	}
 }
+
+func TestProjectStatusRecognizesWorkflowRemoteStates(t *testing.T) {
+	states := []string{"worker_assigned", "working", "awaiting_critic", "critic_reviewing"}
+	for _, state := range states {
+		t.Run(state, func(t *testing.T) {
+			projection := ProjectStatus(Facts{Role: RoleWorker, RemoteState: state})
+			if projection.DisplayStatus != StatusNotPrepared {
+				t.Fatalf("status = %s, want %s", projection.DisplayStatus, StatusNotPrepared)
+			}
+			if len(projection.AvailableActions) != 2 || projection.AvailableActions[0] != "get" || projection.AvailableActions[1] != "prepare" {
+				t.Fatalf("actions = %#v, want [get prepare]", projection.AvailableActions)
+			}
+		})
+	}
+}
