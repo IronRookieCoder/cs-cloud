@@ -23,6 +23,8 @@ type memberTaskRequest struct {
 	FixturePath string
 }
 
+const memberTaskFixtureEnv = "CS_CLOUD_TASK_FIXTURE"
+
 type memberTaskAPI interface {
 	Execute(context.Context, memberTaskRequest) (any, error)
 }
@@ -225,15 +227,17 @@ func parseMemberTaskFlags(args []string) (map[string]string, error) {
 func extractMemberTaskFixture(args []string) ([]string, string, error) {
 	result := make([]string, 0, len(args))
 	fixturePath := ""
+	explicitFixture := false
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if arg != "--fixture" && !strings.HasPrefix(arg, "--fixture=") {
 			result = append(result, arg)
 			continue
 		}
-		if fixturePath != "" {
+		if explicitFixture {
 			return nil, "", invalidArguments("invalid or duplicate flag: --fixture")
 		}
+		explicitFixture = true
 		if value, ok := strings.CutPrefix(arg, "--fixture="); ok {
 			fixturePath = value
 		} else {
@@ -246,6 +250,9 @@ func extractMemberTaskFixture(args []string) ([]string, string, error) {
 		if strings.TrimSpace(fixturePath) == "" {
 			return nil, "", invalidArguments("--fixture requires a value")
 		}
+	}
+	if !explicitFixture {
+		fixturePath = strings.TrimSpace(os.Getenv(memberTaskFixtureEnv))
 	}
 	return result, fixturePath, nil
 }

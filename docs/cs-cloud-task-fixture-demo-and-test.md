@@ -94,30 +94,40 @@ $binary = 'C:\Users\demo\.costrict\bin\cs-cloud.exe'
 
 ### 4.1 测试数据注入与交互边界
 
-交互演示只模拟后台返回的数据，用户操作必须按真实使用场景逐步进行。开始会话前，由测试控制端在用户不可见的执行上下文中绑定以下测试数据：
-
-```text
-fixture=F:\ai-coding\cs-cloud\skills\cs-cloud-task\testdata\costrict-006485da-solution-review.json
-task_key=zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic
-```
-
-该绑定属于测试环境准备，不得作为用户消息发送，也不得出现在 skill 面向用户的回复中。测试控制端应确保 skill 按运行时 catalog 为 `cs-cloud task` 调用附加 fixture 参数；skill 不直接读取 fixture JSON，也不调用 Daemon HTTP。
+交互演示只模拟后台返回的数据，用户操作必须按真实使用场景逐步进行。测试数据通过临时环境变量传给 CLI，不作为用户消息发送，也不出现在 skill 面向用户的回复中。
 
 用户消息中不得出现 `演示`、`fixture`、`task_key`、`cs-cloud-task skill`、测试步骤编排或预期返回值。不得用一条提示词要求 skill 连续完成整个流程；每一步都由用户在看到上一轮真实格式的结果后再发起。
 
 具体操作步骤：
 
-1. 按 3.1 节构建并安装待测 CLI 和 skill，关闭安装前已打开的 CSC/CoStrict 会话。
-2. 在会话评测器或命令代理中创建一次性会话配置，将上述 fixture 绝对路径绑定到本次会话。该配置属于执行层参数，不写入用户消息、对话历史或 skill 文件。
-3. 启动新的 CSC/CoStrict 会话，使其重新发现已安装的 `cs-cloud-task` skill。此时不要发送任何测试说明或流程编排提示词。
-4. skill 首次执行 `<resolved-cs-cloud> task help --json` 时保持命令不变，由 catalog 正常发现 `--fixture` 参数。
-5. skill 根据用户业务意图执行 `list`、`get`、`prepare`、`start`、`pause` 或首次 `review` 时，命令代理在 argv 末尾附加且只附加一次 `--fixture=<absolute-path>`。其他参数仍由 skill 根据 catalog 和用户业务意图生成。
-6. `get` 及后续单任务操作使用 `list` 返回的任务标识。测试控制端只校验其等于上述 `task_key`，不得替 skill 选择任务或改写用户意图。
-7. 首次 `review` 返回预览后，不执行确认命令。待用户在下一轮明确确认后，直接执行 `data.next_commands` 中唯一的 `safety=requires_confirmation` argv；该 argv 已包含 fixture 参数，命令代理不得重复追加或重构参数。
-8. 每轮只检查并记录本轮的结构化结果，再按 4.2 节发送下一条自然业务指令。面向用户的回复中不得泄露 fixture 路径、模拟标识或测试控制逻辑。
-9. 完成通过或驳回场景后关闭会话，并删除一次性会话绑定。另一个审查场景必须使用新的会话和初始 fixture 状态。
+1. 按 3.1 节构建并安装待测 CLI 和 skill，完全退出安装前已打开的 CSC/CoStrict 进程。
+2. 在 PowerShell 中进入仓库并设置当前进程级临时环境变量：
 
-如果当前会话工具不支持在用户消息之外进行 argv 注入，则不能用包含 fixture 或测试步骤的提示词代替上述配置。此时应只执行第 5 节的 CLI 手工验证，待具备命令代理或会话评测器后再进行交互演示。
+   ```powershell
+   Set-Location F:\ai-coding\cs-cloud
+   $env:CS_CLOUD_TASK_FIXTURE = (Resolve-Path 'skills\cs-cloud-task\testdata\costrict-006485da-solution-review.json').Path
+   ```
+
+3. 在同一个 PowerShell 中验证 CLI 已读取测试数据，命令中不要传 `--fixture`：
+
+   ```powershell
+   $binary = 'C:\Users\demo\.costrict\bin\cs-cloud.exe'
+   & $binary task list --json
+   ```
+
+   输出应包含任务标识 `zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic`。如果命令仍尝试连接 Daemon，说明安装的 CLI 版本不支持该环境变量，应重新执行 3.1 节的构建安装。
+4. 从这个 PowerShell 启动 CSC/CoStrict，使新进程继承 `CS_CLOUD_TASK_FIXTURE`。不要从已经运行的桌面进程中继续旧会话，也不要另开未设置该变量的终端启动。
+5. 创建新会话，按 4.2 节逐条发送自然业务指令。skill 仍执行标准 `cs-cloud task` 命令，不需要知道 fixture 路径；任务标识从 `list` 的结果中取得。
+6. 首次 `review` 返回预览后停止。用户在下一轮明确确认时，skill 直接执行 `data.next_commands` 中唯一的 `safety=requires_confirmation` argv；CLI 会在该 argv 中保留 fixture 参数。
+7. 每轮只检查并记录本轮结构化结果，再发送下一条业务指令。面向用户的回复中不得泄露 fixture 路径、模拟标识或测试控制逻辑。
+8. 完成一个场景后关闭该会话。需要执行另一个审查场景时，新建会话以获得初始 fixture 状态。
+9. 全部测试结束后，在启动 CSC/CoStrict 的 PowerShell 中清除临时环境变量：
+
+   ```powershell
+   Remove-Item Env:CS_CLOUD_TASK_FIXTURE
+   ```
+
+   清除后新启动的 CLI 和 CSC/CoStrict 将恢复正式 Daemon 流程。已启动的子进程仍保留其环境副本，需要一并退出。
 
 ### 4.2 逐步交互流程
 

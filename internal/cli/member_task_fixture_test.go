@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/membertask"
@@ -44,6 +45,41 @@ func TestTaskFixtureReviewPreviewBindsFixtureToConfirmation(t *testing.T) {
 	want := []string{"cs-cloud", "task", "review", key, "--confirm", "review-preview-1", "--fixture=" + fixturePath}
 	if envelope.Data == nil || envelope.Outcome != membertask.OutcomePreviewed || len(envelope.Data.NextCommands) != 1 || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
 		t.Fatalf("preview envelope = %s", stdout.String())
+	}
+}
+
+func TestTaskFixtureEnvironmentAppliesWithoutFixtureArgument(t *testing.T) {
+	fixturePath := writeMemberTaskFixture(t)
+	t.Setenv(memberTaskFixtureEnv, fixturePath)
+	api := &fixtureMemberTaskAPI{}
+	key := "zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic"
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"review", key, "--decision=approve"}, api, &stdout, &stderr); err != nil {
+		t.Fatalf("review preview: %v, stderr=%s", err, stderr.String())
+	}
+	var envelope taskCommandEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode preview: %v: %s", err, stdout.String())
+	}
+	want := []string{"cs-cloud", "task", "review", key, "--confirm", "review-preview-1", "--fixture=" + fixturePath}
+	if envelope.Data == nil || len(envelope.Data.NextCommands) != 1 || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
+		t.Fatalf("preview envelope = %s", stdout.String())
+	}
+	if strings.Contains(strings.Join(envelope.Data.Command, " "), fixturePath) {
+		t.Fatalf("public command leaks environment fixture path: %v", envelope.Data.Command)
+	}
+}
+
+func TestTaskFixtureArgumentOverridesEnvironment(t *testing.T) {
+	environmentFixture := writeMemberTaskFixture(t)
+	explicitFixture := writeMemberTaskFixture(t)
+	t.Setenv(memberTaskFixtureEnv, environmentFixture)
+	request, err := parseMemberTaskRequest([]string{"list", "--fixture=" + explicitFixture})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.FixturePath != explicitFixture {
+		t.Fatalf("fixture path = %q, want explicit path %q", request.FixturePath, explicitFixture)
 	}
 }
 
