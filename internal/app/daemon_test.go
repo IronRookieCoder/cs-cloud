@@ -1,12 +1,30 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"cs-cloud/internal/device"
+	"cs-cloud/internal/platform"
 )
+
+func TestPrepareCloudDaemonReturnsPublicRegistrationError(t *testing.T) {
+	dataDir := t.TempDir()
+	previousDataDir := platform.DataDir()
+	platform.SetDataDir(dataDir)
+	t.Cleanup(func() { platform.SetDataDir(previousDataDir) })
+
+	app := &App{rootDir: filepath.Join(dataDir, "cs-cloud")}
+	_, err := app.PrepareCloudDaemon(context.Background())
+	if !errors.Is(err, device.ErrRegistrationRequired) {
+		t.Fatalf("error = %#v, want ErrRegistrationRequired", err)
+	}
+}
 
 func TestDataDirFromArgs(t *testing.T) {
 	tests := []struct {
@@ -152,5 +170,59 @@ func TestDaemonStatus_Healthy(t *testing.T) {
 	}
 	if reason != "" {
 		t.Errorf("DaemonStatus() reason = %q, want empty", reason)
+	}
+}
+
+func TestMemberTaskDaemonReadyRequiresLiveProcessAndHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	app := &App{rootDir: t.TempDir()}
+	if err := app.SaveServerURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if app.MemberTaskDaemonReady() {
+		t.Fatal("ready without a daemon pid")
+	}
+	if err := app.WritePID(os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if !app.MemberTaskDaemonReady() {
+		t.Fatal("not ready with a live pid and healthy private server")
+	}
+}
+
+func TestForceCleanupStaleRemovesRuntimeStateFiles(t *testing.T) {
+	app := &App{rootDir: t.TempDir()}
+	if err := app.WritePID(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.WriteAgentPID(-1); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SaveState("stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SaveServerURL("http://127.0.0.1:9876"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(app.stopFile(), []byte("stop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ForceCleanupStale()
+
+	for _, path := range []string{
+		app.pidFile(), app.agentPidFile(), app.stopFile(), app.stateFile(), app.serverFile(),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("runtime state file %q still exists: %v", path, err)
+		}
 	}
 }
