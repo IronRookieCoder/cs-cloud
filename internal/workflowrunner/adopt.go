@@ -134,6 +134,10 @@ func (d *Driver) lastAssistantText(ctx context.Context, agent *csc.Agent, sessio
 // failAdoptedTurn reports a terminal failure for an adopted turn.
 func (d *Driver) failAdoptedTurn(taskID, reason, failureReason string) error {
 	slog.Warn("adopted turn failed", "task_id", taskID, "failure_reason", failureReason, "reason", reason)
+	// Persist the failure durably before the in-process callback, mirroring the
+	// dispatched path: a crash between the outcome and FailTask must not lose
+	// the signal. Best-effort like the dispatched path; delivery is at-least-once.
+	d.writeFailFactToOutbox(taskID, errors.New(reason), failureReason)
 	return d.withTaskCallbackContext(func(callbackCtx context.Context) error {
 		return d.client.FailTask(callbackCtx, taskID, reason, failureReason)
 	})

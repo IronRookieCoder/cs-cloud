@@ -368,6 +368,69 @@ func TestAdoptUserTurnFailsOnErrorEvent(t *testing.T) {
 	}
 }
 
+func TestAdoptedTurnFailWritesFactToOutbox(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	messages := json.RawMessage(`{"messages":[]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"error_max_turns","isError":true}`},
+		{Name: "session.error", Data: `{"error":{"subtype":"error_max_turns","message":"Max turns reached"}}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
+	defer cscSrv.Close()
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	// Wait for the fail callback so failAdoptedTurn has run.
+	waitFor(t, "fail callback", func() bool {
+		_, fail, _ := backend.snapshot()
+		return len(fail) > 0
+	})
+
+	// The failure must be durably recorded as a fail fact, so a crash between
+	// the outcome and the in-process FailTask callback does not lose it.
+	waitFor(t, "fail fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "fail" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var failFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "fail" && facts[i].TaskID == "task-1" {
+			failFact = &facts[i]
+			break
+		}
+	}
+	if failFact == nil {
+		t.Fatalf("expected a fail fact for task-1 in outbox, got %+v", facts)
+	}
+	if failFact.FailureReason != "agent_error" {
+		t.Errorf("fact failure_reason = %q, want %q", failFact.FailureReason, "agent_error")
+	}
+	if failFact.Error == "" {
+		t.Errorf("fact error is empty; want the agent failure text")
+	}
+}
+
 func TestAdoptUserTurnRejectsDuplicate(t *testing.T) {
 	backend := newFakeAdoptBackend()
 	backendSrv := httptest.NewServer(backend.handler())
