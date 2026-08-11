@@ -85,6 +85,9 @@ type Driver struct {
 	// success via the normal CompleteTask path. execute remains the sole owner
 	// of task-status callbacks.
 	completion map[string]*completionState
+	// outbox is the durable task-fact outbox. Populated by Task 2.3; delivery
+	// loop methods tolerate a nil outbox and simply do nothing.
+	outbox *Outbox
 	// localBaseURL is this device's localserver URL, applied to the task
 	// runner on Start so in-task CLIs can call back into the driver. Set by
 	// the localserver (which knows its URL only after binding its listener).

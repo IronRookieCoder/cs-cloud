@@ -219,6 +219,31 @@ func (c *Client) FailTask(ctx context.Context, taskID string, reason string, fai
 	return c.request(ctx, http.MethodPost, path, body, nil)
 }
 
+// PostTaskFact delivers a task outcome to the modern /facts endpoint. If the
+// server responds 404 (old server without the endpoint), it falls back to the
+// legacy /complete or /fail path based on the fact kind. The returned error is
+// the delivery result: nil means accepted, *StatusError exposes HTTP status for
+// caller-side retry/ignore decisions.
+func (c *Client) PostTaskFact(ctx context.Context, f OutboxFact) error {
+	path := fmt.Sprintf(workflow.TaskFactsEndpoint, f.TaskID)
+	err := c.request(ctx, http.MethodPost, path, f, nil)
+	if err == nil {
+		return nil
+	}
+	var stErr *StatusError
+	if !errors.As(err, &stErr) || stErr.StatusCode != http.StatusNotFound {
+		return err
+	}
+	// Old server: fall back to legacy endpoint with the same payload shape.
+	if f.Kind == "complete" {
+		return c.CompleteTask(ctx, f.TaskID, f.Output, f.SessionID, f.WorkDir, agent.CompletionSignal{
+			Decision: f.Decision,
+			Reason:   f.Reason,
+		})
+	}
+	return c.FailTask(ctx, f.TaskID, f.Error, f.FailureReason)
+}
+
 // PostTaskMessages uploads task output as a single text message, matching
 // the server's batch shape ({"messages": [{seq, type, content}]}).
 func (c *Client) PostTaskMessages(ctx context.Context, taskID string, output string) error {

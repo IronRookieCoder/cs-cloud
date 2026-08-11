@@ -11,6 +11,7 @@ const (
 	TaskFailEndpoint       = "/api/daemon/tasks/%s/fail"
 	TaskUsageEndpoint      = "/api/daemon/tasks/%s/usage"
 	TaskMessagesEndpoint   = "/api/daemon/tasks/%s/messages"
+	TaskFactsEndpoint      = "/api/daemon/tasks/%s/facts"
 	TaskSessionEndpoint    = "/api/daemon/tasks/%s/session"
 	NodeRunSessionEndpoint = "/api/daemon/node-runs/%s/session"
 
