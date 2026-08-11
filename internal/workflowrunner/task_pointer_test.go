@@ -76,7 +76,11 @@ func TestWriteTaskPointerRejectsTraversal(t *testing.T) {
 // at <runs>/<taskID> cannot redirect the pointer write at an outside file.
 func TestWriteTaskPointerDoesNotFollowSymlink(t *testing.T) {
 	root := t.TempDir()
-	runsDir := RunsDir(root)
+	// RunsDir(workspacesRoot) resolves to a sibling of workspacesRoot; nest it
+	// under root so the runs dir (and the planted symlink) stay inside t.TempDir()
+	// and cannot leak across runs (a stale symlink → os.Symlink EEXIST → skipped).
+	workspacesRoot := filepath.Join(root, "workspaces")
+	runsDir := RunsDir(workspacesRoot)
 	if err := os.MkdirAll(runsDir, 0o755); err != nil {
 		t.Fatalf("mkdir runs: %v", err)
 	}
@@ -89,7 +93,7 @@ func TestWriteTaskPointerDoesNotFollowSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink not supported on this host: %v", err)
 	}
-	if err := WriteTaskPointer(root, "task-symlink", "/real/worktree"); err != nil {
+	if err := WriteTaskPointer(workspacesRoot, "task-symlink", "/real/worktree"); err != nil {
 		t.Fatalf("WriteTaskPointer: %v", err)
 	}
 	got, err := os.ReadFile(target)
@@ -100,7 +104,7 @@ func TestWriteTaskPointerDoesNotFollowSymlink(t *testing.T) {
 		t.Fatalf("symlink target was modified: %q, want %q", string(got), targetContent)
 	}
 	// The pointer path is now a regular file ReadTaskPointer accepts.
-	if g := ReadTaskPointer(root, "task-symlink"); g != "/real/worktree" {
+	if g := ReadTaskPointer(workspacesRoot, "task-symlink"); g != "/real/worktree" {
 		t.Fatalf("ReadTaskPointer = %q, want /real/worktree", g)
 	}
 }
