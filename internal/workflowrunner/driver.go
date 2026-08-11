@@ -93,6 +93,12 @@ type Driver struct {
 	// delivery). Created on Start and cancelled on Stop.
 	runCtx    context.Context
 	runCancel context.CancelFunc
+	// outboxWG tracks the outbox delivery goroutine so Stop can join it
+	// before returning; without this the loop can still be touching the
+	// outbox dir (ensureDirs) after Stop returns and race a test's tempdir
+	// cleanup. Safe to Wait on while holding d.mu: the delivery loop never
+	// acquires d.mu.
+	outboxWG sync.WaitGroup
 	// localBaseURL is this device's localserver URL, applied to the task
 	// runner on Start so in-task CLIs can call back into the driver. Set by
 	// the localserver (which knows its URL only after binding its listener).
@@ -215,7 +221,15 @@ func (d *Driver) Start() error {
 
 	d.state = driverStateRunning
 	d.runCtx, d.runCancel = context.WithCancel(context.Background())
-	go d.startOutboxDelivery(d.runCtx)
+	// Launch the outbox delivery loop with WaitGroup bookkeeping at the call
+	// site (not inside startOutboxDelivery) so the function body stays free of
+	// WaitGroup coupling and can be invoked directly from tests. Stop joins
+	// this goroutine to guarantee no outbox dir touches after it returns.
+	d.outboxWG.Add(1)
+	go func() {
+		defer d.outboxWG.Done()
+		d.startOutboxDelivery(d.runCtx)
+	}()
 	return nil
 }
 
@@ -275,6 +289,10 @@ func (d *Driver) Stop() error {
 		d.runCancel()
 		d.runCancel = nil
 	}
+	// Join the delivery loop so it has fully stopped (no more outbox dir
+	// touches) by the time Stop returns. See the outboxWG field comment for
+	// why holding d.mu here is safe.
+	d.outboxWG.Wait()
 	d.state = driverStateIdle
 	return nil
 }
