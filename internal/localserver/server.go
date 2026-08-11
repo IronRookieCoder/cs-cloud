@@ -348,6 +348,10 @@ func (s *Server) Start(addr string) error {
 		// Pass the localserver API key so those callbacks authenticate when
 		// apiAuth is enabled (no-op when no key is configured).
 		s.workflow.SetLocalAPIKey(apiKeyFromConfig(s.cfg))
+		// Hand the runtime EventBus to the driver so AdoptUserTurn can
+		// subscribe to an adopted session's events. The bus is constructed
+		// above (before this driver), so wire it now, before Start.
+		s.workflow.SetEventBus(s.eventBus)
 		if err := s.workflow.Start(); err != nil {
 			// The workflow subsystem is optional. A daemon registered
 			// against a server without the workflow backend (no server
@@ -421,26 +425,25 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
 }
 
-// resolveCSCAgent returns the csc agent instance the proxy is currently
-// forwarding to. It first tries a per-session agent lookup, then falls back
-// to the default backend agent so the single default csc process used by the
-// proxy is the same one that watches adopted turns.
+// resolveCSCAgent returns the csc agent bound to the given session — the same
+// agent the proxy forwards that session's prompts to.
+//
+// Only an agent registered for this exact session qualifies. There is
+// deliberately no fallback to a default/shared csc agent: an adopted turn
+// subscribes to that agent's session event stream, and a different agent that
+// does not own the session would emit no busy/idle events for it, so the turn
+// would hang silently until agent_timeout. If the session has no bound agent,
+// adoption is skipped and the prompt falls through as an ordinary conversation.
 func (s *Server) resolveCSCAgent(sessionID string) (*csc.Agent, error) {
-	if a, ok := s.manager.GetAgent(sessionID); ok {
-		if cscAgent, ok := a.(*csc.Agent); ok {
-			return cscAgent, nil
-		}
+	a, ok := s.manager.GetAgent(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("no agent bound to session %s", sessionID)
 	}
-	backend := s.manager.DefaultBackend()
-	for _, a := range s.manager.ListAgents() {
-		if a.Backend() != backend {
-			continue
-		}
-		if cscAgent, ok := a.(*csc.Agent); ok {
-			return cscAgent, nil
-		}
+	cscAgent, ok := a.(*csc.Agent)
+	if !ok {
+		return nil, fmt.Errorf("agent bound to session %s is not a csc agent", sessionID)
 	}
-	return nil, fmt.Errorf("no csc agent available for session %s", sessionID)
+	return cscAgent, nil
 }
 
 func (s *Server) TerminalManager() *terminal.TerminalManager {

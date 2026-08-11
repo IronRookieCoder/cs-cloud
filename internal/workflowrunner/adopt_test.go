@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"cs-cloud/internal/agent"
 	"cs-cloud/internal/agent/csc"
 	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
+	"cs-cloud/internal/runtime"
 	"cs-cloud/internal/workflow"
 )
 
@@ -275,7 +277,7 @@ func (f *fakeCSCServer) handler() http.Handler {
 	return mux
 }
 
-func startAdoptDriver(t *testing.T, backendURL string) *Driver {
+func startAdoptDriver(t *testing.T, backendURL string) (*Driver, *runtime.EventBus) {
 	t.Helper()
 	// Isolate the app dir so Driver.Start (which creates the durable outbox and
 	// starts its delivery loop) does not touch the real ~/.multica, and each
@@ -296,11 +298,28 @@ func startAdoptDriver(t *testing.T, backendURL string) *Driver {
 		BackendBaseURL: backendURL,
 		TokenProvider:  func() (*provider.Credentials, error) { return &provider.Credentials{AccessToken: "tok"}, nil },
 	})
+	// Wire a real EventBus onto the driver and return it so each test can route
+	// its fake csc agent's events onto the bus — mirroring how the localserver
+	// wires a managed agent's emitter. AdoptUserTurn consumes the session's
+	// events from the bus (not a private channel), so an unwired test agent
+	// would never produce the busy/idle transitions the watcher gates on.
+	bus := runtime.NewEventBus()
+	d.SetEventBus(bus)
 	if err := d.Start(); err != nil {
 		t.Fatalf("start driver: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Stop() })
-	return d
+	return d, bus
+}
+
+// wireAdoptAgent builds a csc agent whose parsed SSE events are emitted onto the
+// runtime EventBus, mirroring how the localserver wires a managed agent. The
+// adopt path consumes a session's events from the bus, so a test agent must
+// publish there rather than dropping its events.
+func wireAdoptAgent(bus *runtime.EventBus, endpoint string) *csc.Agent {
+	a := csc.NewAgentWithEndpoint(endpoint)
+	a.SetEventEmitter(func(ev agent.Event) { bus.Emit(ev) })
+	return a
 }
 
 func TestAdoptUserTurnCompletesOnIdle(t *testing.T) {
@@ -318,9 +337,8 @@ func TestAdoptUserTurnCompletesOnIdle(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
 	defer cscSrv.Close()
 
-	agent := csc.NewAgentWithEndpoint(cscSrv.URL)
-
-	d := startAdoptDriver(t, backendSrv.URL)
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
 	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
@@ -366,9 +384,8 @@ func TestAdoptedTurnCompleteWritesFactToOutbox(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
 	defer cscSrv.Close()
 
-	agent := csc.NewAgentWithEndpoint(cscSrv.URL)
-
-	d := startAdoptDriver(t, backendSrv.URL)
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
 	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
@@ -434,9 +451,8 @@ func TestAdoptedTurnCompleteFactIsDeliverable(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
 	defer cscSrv.Close()
 
-	agent := csc.NewAgentWithEndpoint(cscSrv.URL)
-
-	d := startAdoptDriver(t, backendSrv.URL)
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	agent := wireAdoptAgent(bus, cscSrv.URL)
 	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
@@ -494,8 +510,8 @@ func TestAdoptUserTurnFailsOnErrorEvent(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
 
@@ -534,8 +550,8 @@ func TestAdoptedTurnFailWritesFactToOutbox(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
 
@@ -594,12 +610,12 @@ func TestAdoptUserTurnRejectsDuplicate(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer("", json.RawMessage(`{"messages":[]}`), events).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("first AdoptUserTurn: %v", err)
 	}
 
-	err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", csc.NewAgentWithEndpoint(cscSrv.URL))
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", wireAdoptAgent(bus, cscSrv.URL))
 	if !errors.Is(err, ErrTaskAlreadyRunning) {
 		t.Fatalf("second AdoptUserTurn error = %v, want ErrTaskAlreadyRunning", err)
 	}
@@ -627,8 +643,8 @@ func TestAdoptUserTurnReleasesRunningSlot(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer("", messages, events).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("first AdoptUserTurn: %v", err)
 	}
 
@@ -638,7 +654,7 @@ func TestAdoptUserTurnReleasesRunningSlot(t *testing.T) {
 	})
 
 	// After the first turn completes, the same taskID can be adopted again.
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-2", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("second AdoptUserTurn after release: %v", err)
 	}
 
@@ -664,8 +680,8 @@ func TestAdoptUserTurnSubscribesBeforeReturn(t *testing.T) {
 	cscSrv := httptest.NewServer(fakeCSC.handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
 
@@ -688,8 +704,8 @@ func TestAdoptUserTurnSubscribeFailureReportsFailure(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServerWithEventFailure(http.StatusServiceUnavailable).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
 	if err == nil {
 		t.Fatal("AdoptUserTurn returned nil error on subscribe failure")
 	}
@@ -722,11 +738,11 @@ func TestAdoptUserTurnSubscribeEstablishmentTimeout(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServerWithHangingEvent().handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
+	d, bus := startAdoptDriver(t, backendSrv.URL)
 	d.adoptEstablishmentTimeout = 100 * time.Millisecond
 
 	start := time.Now()
-	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("AdoptUserTurn returned nil error on establishment timeout")
@@ -760,13 +776,13 @@ func TestAdoptUserTurnReserveErrorsAreNotDuplicate(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServer("", json.RawMessage(`{"messages":[]}`), nil).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
+	d, bus := startAdoptDriver(t, backendSrv.URL)
 	// Stop the driver so reserveTaskID fails the Health() check.
 	if err := d.Stop(); err != nil {
 		t.Fatalf("stop driver: %v", err)
 	}
 
-	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL))
+	err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL))
 	if errors.Is(err, ErrTaskAlreadyRunning) {
 		t.Fatalf("AdoptUserTurn error = %v, should not be ErrTaskAlreadyRunning", err)
 	}
@@ -790,8 +806,8 @@ func TestAdoptUserTurnAbortReportsCancelled(t *testing.T) {
 	cscSrv := httptest.NewServer(newFakeCSCServerHoldOpen(json.RawMessage(`{"messages":[]}`), events).handler())
 	defer cscSrv.Close()
 
-	d := startAdoptDriver(t, backendSrv.URL)
-	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", csc.NewAgentWithEndpoint(cscSrv.URL)); err != nil {
+	d, bus := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", wireAdoptAgent(bus, cscSrv.URL)); err != nil {
 		t.Fatalf("AdoptUserTurn: %v", err)
 	}
 

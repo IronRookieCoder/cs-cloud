@@ -16,6 +16,7 @@ import (
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/sessionevent"
 )
 
 const CLIBinary = "csc"
@@ -519,16 +520,13 @@ func (a *Agent) PromptSession(ctx context.Context, sessionID, content string) er
 	return err
 }
 
-// SessionEvent is one parsed SSE event from the csc event stream.
-type SessionEvent struct {
-	Name string
-	Data map[string]any
-}
-
 // subscribeSessionEvents opens the csc event stream filtered to the session
 // and returns only after the HTTP connection is established. Callers can then
 // send a prompt without missing the busy/idle events it produces.
-func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<-chan SessionEvent, error) {
+//
+// This is translation only — parse the SSE stream into agent.Event. Turn-
+// completion gating is the caller's job (see sessionevent.WaitForSessionDone).
+func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<-chan agent.Event, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
@@ -550,173 +548,104 @@ func (a *Agent) subscribeSessionEvents(ctx context.Context, sessionID string) (<
 		return nil, fmt.Errorf("event stream returned status %d", resp.StatusCode)
 	}
 
-	ch := make(chan SessionEvent, 64)
+	ch := make(chan agent.Event, 64)
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
-
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-		var event string
-		var data map[string]any
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "event: ") {
-				event = strings.TrimPrefix(line, "event: ")
-				continue
+		parseSessionSSE(resp.Body, ctx, func(name string, data map[string]any) {
+			select {
+			case ch <- agent.Event{Type: name, Data: data, Backend: "csc"}:
+			case <-ctx.Done():
 			}
-			if strings.HasPrefix(line, "data: ") {
-				data = nil
-				_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data)
-				continue
-			}
-			if line == "" {
-				if event != "" {
-					select {
-					case ch <- SessionEvent{Name: event, Data: data}:
-					case <-ctx.Done():
-						return
-					}
-				}
-				event = ""
-				data = nil
-			}
-		}
+		})
 	}()
 	return ch, nil
 }
 
-// SubscribeSessionEvents opens the csc event stream filtered to the session
-// and returns only after the HTTP connection is established. It is the public
-// entry used by the workflow driver to watch user-initiated turns on bound
-// sessions.
-func (a *Agent) SubscribeSessionEvents(ctx context.Context, sessionID string) (<-chan SessionEvent, error) {
-	return a.subscribeSessionEvents(ctx, sessionID)
+// EmitSessionEvents opens the csc event stream filtered to the session and
+// re-emits each parsed event through the agent's event emitter onto the runtime
+// EventBus, tagged with the session id so upper-layer subscribers receive
+// exactly this session's busy/idle/done transitions.
+//
+// It returns only after the HTTP connection is established, so a caller that
+// has already subscribed to the bus can forward the prompt without racing past
+// the busy/idle events. The stream keeps being parsed on a goroutine until ctx
+// is cancelled.
+//
+// This is translation only (HTTP + SSE parse → emit). The subscription itself
+// — who receives the events — is the upper-layer event center's job, and
+// turn-completion gating lives in the sessionevent package; neither belongs in
+// the agent layer.
+func (a *Agent) EmitSessionEvents(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.rawEndpoint+"/event?session_id="+sessionID, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return fmt.Errorf("event stream returned status %d", resp.StatusCode)
+	}
+	go func() {
+		defer resp.Body.Close()
+		parseSessionSSE(resp.Body, ctx, func(name string, data map[string]any) {
+			a.emit(agent.Event{
+				Type:           name,
+				ConversationID: sessionID,
+				Backend:        "csc",
+				Data:           data,
+			})
+		})
+		// The stream ended while the watch context is still alive — the
+		// transport closed early rather than being cancelled by the watcher.
+		// The EventBus delivery channel cannot close, so emit a sentinel so a
+		// subscriber gating on busy/idle fails fast instead of hanging until
+		// AgentTimeout. Skipped when ctx is already done (clean cancel/abort),
+		// where the watcher is tearing the stream down itself.
+		if ctx.Err() == nil {
+			a.emit(agent.Event{Type: agent.EventStreamClosed, ConversationID: sessionID, Backend: "csc"})
+		}
+	}()
+	return nil
 }
 
-// WaitForSessionDone consumes session events until the prompt finishes. It
-// gates completion on having seen the session go busy first, so an idle event
-// emitted before our prompt starts cannot end the wait early.
-func WaitForSessionDone(ctx context.Context, events <-chan SessionEvent) error {
-	busy := false
-	awaitingContinuation := false
-	terminalFailure := false
-	terminalSubtype := ""
-	terminalMessage := ""
-	finishIdle := func() (bool, error) {
-		if !busy {
-			return false, nil
-		}
-		if awaitingContinuation && !terminalFailure {
-			// CSC emits an idle boundary after a model turn that ended in a
-			// tool call (or token-limit continuation). The same prompt will
-			// become busy again once tool execution/continuation resumes.
-			busy = false
-			return false, nil
-		}
-		return true, sessionCompletionError(terminalFailure, terminalSubtype, terminalMessage)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case ev, ok := <-events:
-			if !ok {
-				return fmt.Errorf("event stream closed before the session finished")
-			}
-			switch ev.Name {
-			case "session.status":
-				if status, ok := ev.Data["status"].(map[string]any); ok {
-					if t, _ := status["type"].(string); t == "busy" {
-						if !busy {
-							busy = true
-							awaitingContinuation = false
-							terminalFailure = false
-							terminalSubtype = ""
-							terminalMessage = ""
-						}
-					} else if t == "idle" && busy {
-						if done, err := finishIdle(); done {
-							return err
-						}
-					}
-				}
-			case "session.result":
-				if !busy {
-					continue
-				}
-				terminalSubtype, _ = ev.Data["subtype"].(string)
-				isError, _ := ev.Data["isError"].(bool)
-				if snakeCaseError, _ := ev.Data["is_error"].(bool); snakeCaseError {
-					isError = true
-				}
-				terminalFailure = isError || (terminalSubtype != "" && terminalSubtype != "success")
-				stopReason, _ := ev.Data["stopReason"].(string)
-				if stopReason == "" {
-					stopReason, _ = ev.Data["stop_reason"].(string)
-				}
-				awaitingContinuation = stopReason == "tool_use" || stopReason == "max_tokens"
-				if message := sessionResultErrorMessage(ev.Data); message != "" {
-					terminalMessage = message
-				}
-			case "session.error":
-				if !busy {
-					continue
-				}
-				errorData, _ := ev.Data["error"].(map[string]any)
-				if subtype, _ := errorData["subtype"].(string); subtype != "api_retry" {
-					if message, _ := errorData["message"].(string); message != "" {
-						terminalMessage = message
-					}
-				}
-			case "session.idle":
-				if done, err := finishIdle(); done {
-					return err
-				}
-			}
-		}
-	}
-}
+// parseSessionSSE reads a csc text/event-stream body and invokes emit for each
+// parsed event. It returns when the body is exhausted or ctx is cancelled.
+func parseSessionSSE(body io.Reader, ctx context.Context, emit func(name string, data map[string]any)) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-func sessionResultErrorMessage(data map[string]any) string {
-	if errorsList, ok := data["errors"].([]any); ok {
-		for _, item := range errorsList {
-			if message, ok := item.(string); ok && message != "" {
-				return message
+	var event string
+	var data map[string]any
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if strings.HasPrefix(line, "data: ") {
+			data = nil
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data)
+			continue
+		}
+		if line == "" {
+			if event != "" {
+				emit(event, data)
 			}
-			if errorData, ok := item.(map[string]any); ok {
-				if message, _ := errorData["message"].(string); message != "" {
-					return message
-				}
-			}
+			event = ""
+			data = nil
 		}
 	}
-	if errorData, ok := data["error"].(map[string]any); ok {
-		if message, _ := errorData["message"].(string); message != "" {
-			return message
-		}
-	}
-	if message, _ := data["error"].(string); message != "" {
-		return message
-	}
-	if message, _ := data["message"].(string); message != "" {
-		return message
-	}
-	return ""
-}
-
-func sessionCompletionError(failed bool, subtype, message string) error {
-	if !failed {
-		return nil
-	}
-	if message != "" {
-		return fmt.Errorf("%s", message)
-	}
-	if subtype != "" {
-		return fmt.Errorf("csc session failed: %s", subtype)
-	}
-	return fmt.Errorf("csc session failed")
 }
 
 // abortSession asks csc to abort the currently running prompt in a session.
@@ -791,7 +720,7 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, cwd, prompt string, e
 	if err := a.PromptSession(ctx, sessionID, prompt); err != nil {
 		return nil, fmt.Errorf("send prompt: %w", err)
 	}
-	if err := WaitForSessionDone(subCtx, events); err != nil {
+	if err := sessionevent.WaitForSessionDone(subCtx, events); err != nil {
 		abortCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = a.abortSession(abortCtx, sessionID)
 		cancel()

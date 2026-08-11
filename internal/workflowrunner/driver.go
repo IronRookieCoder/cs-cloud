@@ -108,6 +108,13 @@ type Driver struct {
 	// authenticate to the localserver's apiAuth middleware. Set by the
 	// localserver alongside SetLocalBaseURL.
 	localAPIKey string
+	// eventBus is the runtime event center. AdoptUserTurn subscribes to it to
+	// watch an adopted session's busy/idle/done transitions instead of opening
+	// a private SSE channel, so session-event routing stays in one place (the
+	// bus) and the csc agent stays a pure translator. Injected by the
+	// localserver via SetEventBus after the bus is constructed; nil before
+	// that, in which case AdoptUserTurn reports the turn as unavailable.
+	eventBus SessionEventBus
 	// adoptEstablishmentTimeout bounds the SSE subscription setup phase in
 	// AdoptUserTurn. It defaults to defaultAdoptEstablishmentTimeout and is
 	// exposed only for tests.
@@ -966,6 +973,14 @@ func (d *Driver) SetLocalBaseURL(url string) {
 // called before Start; empty means the localserver has no API key configured.
 func (d *Driver) SetLocalAPIKey(key string) {
 	d.localAPIKey = key
+}
+
+// SetEventBus injects the runtime EventBus so AdoptUserTurn can subscribe to an
+// adopted session's events. The localserver owns the bus and constructs it
+// after the driver, so the bus cannot ride in Dependencies; it is wired here,
+// before Start. AdoptUserTurn is the only consumer.
+func (d *Driver) SetEventBus(bus SessionEventBus) {
+	d.eventBus = bus
 }
 
 // tokenProvider returns the configured credential provider, or nil if deps

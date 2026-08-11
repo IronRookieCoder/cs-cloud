@@ -104,3 +104,14 @@ type Event struct {
 	Backend        string `json:"backend,omitempty"`
 	Data           any    `json:"data"`
 }
+
+// EventStreamClosed is a synthetic event an agent emits onto the EventBus when
+// its transport stream ends before the watching context is cancelled. The EventBus
+// delivery channel itself cannot close (it is shared and would break other
+// subscribers), so without this sentinel a "stream ended early" signal — csc
+// crashed, the connection dropped, the turn never reached idle — would be lost
+// and a completion-gated subscriber would hang until the agent timeout.
+// sessionevent.WaitForSessionDone treats it as terminal, matching the
+// channel-close path used by direct (non-bus) consumers. Agents whose consumer
+// reads from a directly-closing channel (RunSession) never emit it.
+const EventStreamClosed = "session.stream_closed"

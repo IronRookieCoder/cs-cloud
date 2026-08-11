@@ -10,6 +10,7 @@ import (
 
 	csagent "cs-cloud/internal/agent"
 	"cs-cloud/internal/agent/csc"
+	"cs-cloud/internal/sessionevent"
 )
 
 // adoptEstablishmentTimeout bounds only the SSE subscription setup phase in
@@ -26,9 +27,19 @@ var ErrTaskAlreadyRunning = errors.New("task already running")
 // the multica backend exactly like a normal dispatch would. The prompt itself
 // is NOT sent here — the proxy path already delivered it to csc.
 //
-// The SSE subscription is established synchronously before this function
-// returns, so the caller can forward the prompt to csc without racing past the
-// busy/idle events.
+// The watch runs under a fresh context bounded by the driver's AgentTimeout,
+// NOT ctx: the HTTP request that triggers an adopt is short-lived (the gateway
+// caps it near 30s) while the agent turn can run for minutes. ctx is therefore
+// intentionally not used as the watch deadline; it is retained in the signature
+// so callers can pass a request-scoped context and so future synchronous setup
+// here can honour it.
+//
+// The session's events flow through the runtime EventBus, not a private SSE
+// channel: AdoptUserTurn subscribes to the bus for this session, then asks the
+// csc agent to re-emit its per-session SSE stream onto the bus. Both the bus
+// subscription and the SSE emission are established synchronously before this
+// function returns, so the caller can forward the prompt to csc without racing
+// past the busy/idle events.
 func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, agent *csc.Agent) error {
 	rec, err := d.reserveTaskID(taskID)
 	if err != nil {
@@ -42,6 +53,18 @@ func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, ag
 	// Wire the cancel into the task record so AbortTask and Stop can end the
 	// watch, exactly like a dispatched run.
 	d.armCancel(rec, cancel)
+
+	if d.eventBus == nil {
+		cancel()
+		d.release(taskID, rec)
+		slog.Warn("adopted turn: event bus not configured", "task_id", taskID)
+		_ = d.failAdoptedTurn(taskID, "adopted turn: event bus not configured", "agent_error")
+		return fmt.Errorf("adopted turn: event bus not configured")
+	}
+
+	// Subscribe to the bus BEFORE opening the SSE stream, so events the stream
+	// emits immediately on connect are buffered for the watcher, not missed.
+	events := d.eventBus.SubscribeSession(sessionID)
 
 	// Bound only the SSE subscription establishment; the long-lived watchCtx
 	// remains valid for the full agent timeout once the stream is connected.
@@ -60,31 +83,36 @@ func (d *Driver) AdoptUserTurn(ctx context.Context, taskID, sessionID string, ag
 			establishMu.Unlock()
 		}
 	}()
-	events, err := agent.SubscribeSessionEvents(establishCtx, sessionID)
+	emitErr := agent.EmitSessionEvents(establishCtx, sessionID)
 	establishMu.Lock()
 	establishDone = true
 	establishMu.Unlock()
-	if err != nil {
+	if emitErr != nil {
 		establishCancel()
 		cancel()
+		d.eventBus.Unsubscribe(events)
 		d.release(taskID, rec)
-		slog.Warn("adopted turn: subscribe failed", "task_id", taskID, "error", err)
+		slog.Warn("adopted turn: subscribe failed", "task_id", taskID, "error", emitErr)
 		_ = d.failAdoptedTurn(taskID, "adopted turn: event stream unavailable", "agent_error")
-		return err
+		return emitErr
 	}
 
 	go d.watchAdoptedTurn(watchCtx, cancel, taskID, sessionID, agent, rec, events)
 	return nil
 }
 
-// watchAdoptedTurn consumes the session's event stream until the turn ends,
-// forwards the final assistant message for the live transcript, then completes
-// or fails the task. Always releases the running-map slot and cancels watchCtx.
-func (d *Driver) watchAdoptedTurn(ctx context.Context, cancel context.CancelFunc, taskID, sessionID string, agent *csc.Agent, rec *taskRecord, events <-chan csc.SessionEvent) {
-	defer cancel()
+// watchAdoptedTurn consumes the session's events from the EventBus until the
+// turn ends, forwards the final assistant message for the live transcript, then
+// completes or fails the task. Always unsubscribes from the bus, releases the
+// running-map slot, and cancels watchCtx (which propagates to the SSE stream).
+func (d *Driver) watchAdoptedTurn(ctx context.Context, cancel context.CancelFunc, taskID, sessionID string, agent *csc.Agent, rec *taskRecord, events chan csagent.Event) {
+	// defer order (LIFO): stop the SSE producer (cancel watchCtx → establishCtx)
+	// first, then close the bus subscription, then free the running slot.
 	defer d.release(taskID, rec)
+	defer d.eventBus.Unsubscribe(events)
+	defer cancel()
 
-	waitErr := csc.WaitForSessionDone(ctx, events)
+	waitErr := sessionevent.WaitForSessionDone(ctx, events)
 	if waitErr != nil {
 		if d.aborted(taskID) {
 			// Mirror the dispatched-run path: a user abort is reported as
