@@ -1597,6 +1597,91 @@ func TestWorkflowEmptySessionEndToEndFailsTaskWithoutCompleting(t *testing.T) {
 	if failure.FailureReason != "agent_incomplete" {
 		t.Fatalf("failure reason = %q, want agent_incomplete", failure.FailureReason)
 	}
+
+	pending, err := d.Outbox().Pending()
+	if err != nil {
+		t.Fatalf("Outbox().Pending: %v", err)
+	}
+	var failFact *OutboxFact
+	for i := range pending {
+		if pending[i].Kind == "fail" && pending[i].TaskID == "task-silently-empty" {
+			failFact = &pending[i]
+			break
+		}
+	}
+	if failFact == nil {
+		t.Fatal("fail fact not found in outbox")
+	}
+	if failFact.FailureReason != "agent_incomplete" {
+		t.Errorf("outbox failure reason = %q, want agent_incomplete", failFact.FailureReason)
+	}
+}
+
+func TestDriverPersistsFailAndCompleteFactsWhenSignalArrivesAfterSessionEnd(t *testing.T) {
+	d, fm := newCSCSessionTestDriver(t, time.Minute, &silentlyEmptySessionRunner{}, nil)
+	fm.gateFailCallbacks()
+	t.Cleanup(fm.releaseFailCallbacks)
+
+	if err := d.RunTaskAsync(workflow.TaskRunPayload{
+		TaskID:      "task-signal-after-end",
+		WorkspaceID: "ws-1",
+		NodeRunID:   "nr-1",
+		AgentID:     "agent-1",
+		Agent:       "csc",
+		Prompt:      "do thing",
+	}); err != nil {
+		t.Fatalf("RunTaskAsync: %v", err)
+	}
+
+	// Wait until execute has entered the terminal-failure path.
+	select {
+	case <-fm.failCallbackStarted():
+	case <-time.After(3 * time.Second):
+		t.Fatal("fail callback did not start")
+	}
+
+	// The agent finishes its real work and signals completion after the session
+	// has already returned. The signal must be accepted and durably written to
+	// the outbox alongside the fail fact; the server arbitrates the race.
+	if err := d.SignalTaskCompletion("task-signal-after-end", agent.CompletionSignal{
+		Action: "complete", Summary: "late done",
+	}); err != nil {
+		t.Fatalf("SignalTaskCompletion: %v", err)
+	}
+
+	pending, err := d.Outbox().Pending()
+	if err != nil {
+		t.Fatalf("Outbox().Pending: %v", err)
+	}
+	var failFact, completeFact *OutboxFact
+	for i := range pending {
+		f := &pending[i]
+		if f.TaskID != "task-signal-after-end" {
+			continue
+		}
+		switch f.Kind {
+		case "fail":
+			failFact = f
+		case "complete":
+			completeFact = f
+		}
+	}
+	if failFact == nil {
+		t.Fatal("fail fact not found in outbox")
+	}
+	if failFact.FailureReason != "agent_incomplete" {
+		t.Errorf("fail fact failure_reason = %q, want agent_incomplete", failFact.FailureReason)
+	}
+	if completeFact == nil {
+		t.Fatal("complete fact not found in outbox")
+	}
+	if completeFact.Output != "late done" {
+		t.Errorf("complete fact output = %q, want %q", completeFact.Output, "late done")
+	}
+
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("unexpected legacy /complete HTTP callback")
+	}
 }
 
 func TestDriverReportsFailureBeforeSlowMessageCallback(t *testing.T) {

@@ -584,14 +584,6 @@ type agentRunResult struct {
 	err    error
 }
 
-// completionGracePeriod bounds how long runAgent waits for a completion signal
-// after a pure-tool CSC session ends its turn cleanly without calling the
-// complete tool. Once the session has returned, nothing more can arrive except
-// a signal already in flight; wait a short grace for that race, then surface
-// ErrIncomplete (→ agent_incomplete) instead of holding the slot for the full
-// remaining AgentTimeout.
-const completionGracePeriod = 5 * time.Second
-
 // runAgent supervises the agent boundary instead of trusting every SessionRunner
 // implementation to return when its context is cancelled. The worker only
 // produces a buffered result; execute remains the single owner of task status
@@ -635,28 +627,19 @@ func (d *Driver) runAgent(ctx context.Context, payload workflow.TaskRunPayload, 
 			return result.output, result.err
 		}
 		if pureTool {
-			// The csc session ended its turn cleanly. If completion raced with
-			// session end, treat as complete.
+			// The csc session ended its turn cleanly. A completion signal that
+			// already arrived before the session returned is treated as complete.
 			select {
 			case <-notify:
 				return nil, nil
 			default:
 			}
-			// Pure-tool mode: a clean idle is NOT a completion. The session has
-			// ended, so nothing more can arrive except a completion signal
-			// already in flight — wait a short grace for that race, then surface
-			// ErrIncomplete (→ agent_incomplete) so a task whose agent stopped
-			// without calling complete never silently advances the workflow.
-			grace := time.NewTimer(completionGracePeriod)
-			defer grace.Stop()
-			select {
-			case <-grace.C:
-				return nil, agent.ErrIncomplete
-			case <-ctx.Done():
-				return nil, agent.ErrIncomplete
-			case <-notify:
-				return nil, nil
-			}
+			// A clean idle is not a completion. Any complete signal that arrives
+			// after the session has ended is persisted to the outbox by
+			// SignalTaskCompletion; the server's ApplyTaskFacts resurrects a
+			// failed task into completed when the complete fact falls inside the
+			// server's grace window. The device no longer waits here.
+			return nil, agent.ErrIncomplete
 		}
 		return result.output, result.err
 	case <-ctx.Done():
