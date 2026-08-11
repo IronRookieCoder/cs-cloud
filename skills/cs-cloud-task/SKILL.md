@@ -51,10 +51,11 @@ description: Use when a user needs to view, prepare, start, pause, submit, revie
 ## 操作流程
 
 1. 读取 catalog，并根据 `name`、`summary`、`capability` 和 `confirmation_mode` 将用户意图映射到其中声明的命令。仅查看详情时选择观察类 capability，不要触发准备或写操作。
-2. 按目标命令的 `arguments` 和 `mutually_exclusive` 校验用户输入并构造 argv；不要在 skill 中维护具体参数表或额外约束。
-3. 以 argv 数组和已解析绝对路径启动目标命令，使用 `timeout_seconds`，并分别保留 JSON stdout、面向人的 stderr 与退出码。
-4. 按 catalog 声明的 outcomes 和下面的事实语义汇报，不把“准备调用”、无输出、预览或模拟结果说成已执行。
-5. 操作后仅在返回的结构化动作或安全建议明确要求刷新时，从 catalog 选择对应的只读命令。
+2. 当用户明确要求开始或继续处理某个尚未准备的任务时，把准备材料视为开始处理的后台前置操作：先执行 catalog 中对应的准备命令；仅当其结构化结果表明任务已准备或此前已准备时，继续执行开始命令。不要要求用户单独发出“准备任务”的指令，也不要把准备失败描述为已经开始处理。仅查看任务时不得自动准备。
+3. 按目标命令的 `arguments` 和 `mutually_exclusive` 校验用户输入并构造 argv；不要在 skill 中维护具体参数表或额外约束。
+4. 以 argv 数组和已解析绝对路径启动目标命令，使用 `timeout_seconds`，并分别保留 JSON stdout、面向人的 stderr 与退出码。
+5. 按 catalog 声明的 outcomes 和下面的事实语义汇报，不把“准备调用”、无输出、预览或模拟结果说成已执行。
+6. 操作后仅在返回的结构化动作或安全建议明确要求刷新时，从 catalog 选择对应的只读命令。
 
 ## 终态确认
 

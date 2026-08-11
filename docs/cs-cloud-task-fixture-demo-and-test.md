@@ -117,7 +117,7 @@ $binary = 'C:\Users\demo\.costrict\bin\cs-cloud.exe'
 
    输出应包含任务标识 `zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic`。如果命令仍尝试连接 Daemon，说明安装的 CLI 版本不支持该环境变量，应重新执行 3.1 节的构建安装。
 4. 从这个 PowerShell 启动 CSC/CoStrict，使新进程继承 `CS_CLOUD_TASK_FIXTURE`。不要从已经运行的桌面进程中继续旧会话，也不要另开未设置该变量的终端启动。
-5. 创建新会话，按 4.2 节逐条发送自然业务指令。skill 仍执行标准 `cs-cloud task` 命令，不需要知道 fixture 路径；任务标识从 `list` 的结果中取得。
+5. 创建新会话，按 4.2 节逐条发送自然业务指令。skill 仍执行标准 `cs-cloud task` 命令，不需要知道 fixture 路径；任务标识从 `list` 的结果中取得。用户明确开始处理尚未准备的任务时，skill 在同一轮后台先执行 `prepare`，成功后继续执行 `start`。
 6. 首次 `review` 返回预览后停止。用户在下一轮明确确认时，skill 直接执行 `data.next_commands` 中唯一的 `safety=requires_confirmation` argv；CLI 会在该 argv 中保留 fixture 参数。
 7. 每轮只检查并记录本轮结构化结果，再发送下一条业务指令。面向用户的回复中不得泄露 fixture 路径、模拟标识或测试控制逻辑。
 8. 完成一个场景后关闭该会话。需要执行另一个审查场景时，新建会话以获得初始 fixture 状态。
@@ -139,29 +139,19 @@ $binary = 'C:\Users\demo\.costrict\bin\cs-cloud.exe'
 查看一下我当前需要处理的任务。
 ```
 
-skill 应列出当前任务。用户从结果中看到 `COS-155 用原生web技术创建一个五子棋游戏-2100` 的方案设计审查任务后，再进入下一步。
+skill 应列出当前任务。受 [正式模式任务列表契约问题](./cs-cloud-task-real-contract-issues.md#2-任务列表缺少可展示名称) 影响，列表阶段只能根据唯一的 `critic` 任务及其稳定 task key 选择任务，不能声称列表已经返回 Issue 名称。
 
 #### 第二步：查看任务详情
 
 用户输入：
 
 ```text
-打开 COS-155 的方案设计审查任务，查看详细信息。
+查看这个审查任务的详细信息。
 ```
 
-skill 应展示 Issue、节点、执行者、审查者、交付物、PR、commit、验收条件和设计范围，不推进任务状态。
+skill 应通过 `get` 展示 `COS-155 用原生web技术创建一个五子棋游戏-2100`、节点、执行者、审查者、交付物、PR、commit、验收条件和设计范围，不推进任务状态。
 
-#### 第三步：准备任务
-
-用户输入：
-
-```text
-准备这个审查任务。
-```
-
-skill 应返回准备结果，任务展示状态变为 `prepared`。
-
-#### 第四步：开始处理
+#### 第三步：开始处理
 
 用户输入：
 
@@ -169,29 +159,15 @@ skill 应返回准备结果，任务展示状态变为 `prepared`。
 开始处理这个任务。
 ```
 
-skill 应返回开始结果，任务展示状态变为 `in_progress`。
+skill 发现任务为 `not_prepared` 后，应在本轮后台完成以下操作：
 
-#### 第五步：暂停处理
+1. 执行 `prepare`，确认材料准备成功并取得绝对本地目录。
+2. 检查 `<directory>\review\gomoku-solution-design.md` 可读取。
+3. 执行 `start`，将任务展示状态推进为 `in_progress`。
 
-用户输入：
+skill 面向用户汇总“材料已准备并开始处理”，可展示本地材料文件、PR 和 commit，但不要要求用户单独确认准备操作。任一后台操作失败时立即停止，不得声称任务已开始。
 
-```text
-先暂停这个任务，我稍后继续。
-```
-
-skill 应返回暂停结果，任务展示状态回到 `prepared`。
-
-#### 第六步：继续处理
-
-用户输入：
-
-```text
-继续处理刚才的任务。
-```
-
-skill 应再次开始该任务，展示状态变为 `in_progress`。
-
-#### 第七步：提交审查决定
+#### 第四步：提交审查决定
 
 用户在审阅交付物后，根据通过或驳回场景发送对应的业务指令。skill 必须先生成审查预览并停止，不能在同一轮中代替用户确认。
 
@@ -201,10 +177,8 @@ skill 应再次开始该任务，展示状态变为 `in_progress`。
 |---|---|---:|---|
 | 查看列表 | `observed` | `false` | 查询完成，不推进状态 |
 | 查看详情 | `observed` | `false` | `not_prepared` |
-| 准备任务 | `completed` | `true` | `prepared` |
-| 开始处理 | `completed` | `true` | `in_progress` |
-| 暂停处理 | `completed` | `true` | `prepared` |
-| 再次开始 | `completed` | `true` | `in_progress` |
+| 开始处理：后台准备 | `completed` | `true` | `prepared` |
+| 开始处理：激活任务 | `completed` | `true` | `in_progress` |
 | 生成审查预览 | `previewed` | `false` | 等待用户确认 |
 | 用户确认 | `completed` | `true` | 审查操作完成 |
 
@@ -252,7 +226,7 @@ operation=costrict-006485da-operation-approve
 
 ### 4.4 驳回审查场景
 
-使用全新的会话和初始测试数据，按 4.2 的第一步至第六步完成任务发现与处理。用户审阅交付物后输入：
+使用全新的会话和初始测试数据，按 4.2 的第一步至第三步完成任务发现与处理。用户审阅交付物后输入：
 
 ```text
 这个方案需要补充键盘可访问性验收说明，请驳回。
@@ -302,9 +276,11 @@ $taskKey = 'zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic'
 ### 5.3 准备、开始和暂停
 
 ```powershell
-& $binary task prepare $taskKey $fixtureArg --json
+$prepareResult = & $binary task prepare $taskKey $fixtureArg --json | ConvertFrom-Json
 & $binary task start $taskKey $fixtureArg --json
 & $binary task pause $taskKey $fixtureArg --json
+$materialPath = Join-Path $prepareResult.data.result.directory 'review\gomoku-solution-design.md'
+Get-Content -Raw -Encoding utf8 $materialPath
 ```
 
 验收：
@@ -313,6 +289,7 @@ $taskKey = 'zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic'
 - `prepare.state_after.display_status=prepared`。
 - `start.state_after.display_status=in_progress`。
 - `pause.state_after.display_status=prepared`。
+- `prepare.data.result.directory` 是绝对路径，且 `review\gomoku-solution-design.md` 存在并可读取。
 
 ### 5.4 通过预览与确认
 
@@ -388,6 +365,8 @@ go test ./internal/cli -run 'TestTaskFixture' -count=1
 
 - catalog 为所有可执行 task 命令声明 `--fixture`。
 - `get` 返回指定 Issue、交付物、PR 和 commit。
+- `prepare` 把 fixture 相对材料目录解析为绝对路径，声明的材料文件存在且可读。
+- 绝对材料路径、越界路径和缺失材料文件被拒绝。
 - 审查预览的确认 argv 保留原 fixture 路径。
 - 通过和驳回确认绑定各自 preview ID。
 - 确认结果返回正确 decision、operation 和完成状态。

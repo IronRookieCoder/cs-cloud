@@ -1,6 +1,10 @@
 {
   "schema_version": "1.0",
   "task_key": "zgsm/costrict/006485da-3f92-443e-8c5d-677bfbd82225/critic",
+  "material_directory": "costrict-006485da-solution-review",
+  "material_files": [
+    "review/gomoku-solution-design.md"
+  ],
   "responses": {
     "list": [
       {
@@ -101,7 +105,7 @@
             "source_version": "b015f800da59abd2cfdb3795de8201b449bcc982",
             "relative_path": "review/gomoku-solution-design.md",
             "role": "reference_only",
-            "sha256": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730"
+            "sha256": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3"
           }
         ],
         "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
@@ -125,7 +129,7 @@
       "remote_version": "1:1:1",
       "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
       "attempt": 1,
-      "directory": "demo/costrict-006485da-solution-review",
+      "directory": "costrict-006485da-solution-review",
       "prepared": true,
       "activity": "prepared",
       "dirty": false,
@@ -139,6 +143,19 @@
       "reconfirmation_required": false,
       "sync_pending": false,
       "ended": false,
+      "manifest": {
+        "schema_version": "1.0",
+        "files": [
+          {
+            "identity": "gomoku-solution-design.md",
+            "source_version": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "relative_path": "review/gomoku-solution-design.md",
+            "role": "reference_only",
+            "sha256": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3"
+          }
+        ],
+        "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
       "outcome": "completed",
       "performed": true
     },
@@ -152,7 +169,7 @@
       "remote_version": "1:1:1",
       "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
       "attempt": 1,
-      "directory": "demo/costrict-006485da-solution-review",
+      "directory": "costrict-006485da-solution-review",
       "prepared": true,
       "activity": "active",
       "dirty": false,
@@ -166,6 +183,19 @@
       "reconfirmation_required": false,
       "sync_pending": false,
       "ended": false,
+      "manifest": {
+        "schema_version": "1.0",
+        "files": [
+          {
+            "identity": "gomoku-solution-design.md",
+            "source_version": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "relative_path": "review/gomoku-solution-design.md",
+            "role": "reference_only",
+            "sha256": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3"
+          }
+        ],
+        "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
       "outcome": "completed",
       "performed": true
     },
@@ -179,7 +209,7 @@
       "remote_version": "1:1:1",
       "cloud_material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
       "attempt": 1,
-      "directory": "demo/costrict-006485da-solution-review",
+      "directory": "costrict-006485da-solution-review",
       "prepared": true,
       "activity": "prepared",
       "dirty": false,
@@ -193,6 +223,19 @@
       "reconfirmation_required": false,
       "sync_pending": false,
       "ended": false,
+      "manifest": {
+        "schema_version": "1.0",
+        "files": [
+          {
+            "identity": "gomoku-solution-design.md",
+            "source_version": "b015f800da59abd2cfdb3795de8201b449bcc982",
+            "relative_path": "review/gomoku-solution-design.md",
+            "role": "reference_only",
+            "sha256": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3"
+          }
+        ],
+        "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71"
+      },
       "outcome": "completed",
       "performed": true
     },
@@ -204,7 +247,7 @@
       "context_version": 1,
       "attempt": 1,
       "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
-      "content_digest": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730",
+      "content_digest": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3",
       "risk_digest": "a31eccc3f8d5d9e13e827b7e68cd00f48b0f25201d29234cef8aa9db455c733a",
       "preview_digest": "a31eccc3f8d5d9e13e827b7e68cd00f48b0f25201d29234cef8aa9db455c733a",
       "review_snapshot_id": "costrict-006485da-b015f800da59",
@@ -233,7 +276,7 @@
       "context_version": 1,
       "attempt": 1,
       "material_digest": "bb349760c4bc7a59abf0e564a59bdd1875f3da341338c38c7201494e401c7c71",
-      "content_digest": "7956cdcaba1bc3d2bfa1e9b61f0a367211cdb932f88d60da77f31e9794fc8730",
+      "content_digest": "1d2ce7f3019956eba73ead936f2b785640f7e68a6d87c6403d2c2902970561f3",
       "risk_digest": "6dce922b5b8f5261a03aabb3ba9da3e0299648ad73304ea029be21aa61d61fde",
       "preview_digest": "6dce922b5b8f5261a03aabb3ba9da3e0299648ad73304ea029be21aa61d61fde",
       "review_snapshot_id": "costrict-006485da-b015f800da59",

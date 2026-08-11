@@ -83,6 +83,61 @@ func TestTaskFixtureArgumentOverridesEnvironment(t *testing.T) {
 	}
 }
 
+func TestTaskFixturePrepareReturnsReadableMaterialDirectory(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	materialRoot := filepath.Join(fixtureRoot, "review-task")
+	materialPath := filepath.Join(materialRoot, "review", "design.md")
+	if err := os.MkdirAll(filepath.Dir(materialPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(materialPath, []byte("# captured design\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixturePath := filepath.Join(fixtureRoot, "fixture.json")
+	writeFixtureDocument(t, fixturePath, `{
+  "schema_version":"1.0",
+  "task_key":"zgsm/costrict/node/critic",
+  "material_directory":"review-task",
+  "material_files":["review/design.md"],
+  "responses":{"prepare":{
+    "key":{"cloud_instance_id":"zgsm","workspace_id":"costrict","node_run_id":"node","role":"critic"},
+    "prepared":true,"outcome":"completed","performed":true
+  }}
+}`)
+	result, err := (&fixtureMemberTaskAPI{}).Execute(context.Background(), memberTaskRequest{Command: "prepare", TaskKey: "zgsm/costrict/node/critic", FixturePath: fixturePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := result.(membertask.LocalTransition)
+	if !filepath.IsAbs(transition.Directory) || transition.Directory != materialRoot {
+		t.Fatalf("directory = %q, want %q", transition.Directory, materialRoot)
+	}
+	if data, err := os.ReadFile(filepath.Join(transition.Directory, "review", "design.md")); err != nil || string(data) != "# captured design\n" {
+		t.Fatalf("material = %q, %v", data, err)
+	}
+}
+
+func TestTaskFixtureRejectsMaterialPathOutsideFixtureDirectory(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	fixturePath := filepath.Join(fixtureRoot, "fixture.json")
+	writeFixtureDocument(t, fixturePath, `{
+  "schema_version":"1.0",
+  "task_key":"zgsm/costrict/node/critic",
+  "material_directory":"../outside",
+  "responses":{}
+}`)
+	if _, err := loadMemberTaskFixture(fixturePath); err == nil {
+		t.Fatal("expected escaping material directory to be rejected")
+	}
+}
+
+func writeFixtureDocument(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTaskFixtureGetReturnsCapturedIssueAndReviewArtifact(t *testing.T) {
 	fixturePath := writeMemberTaskFixture(t)
 	api := &fixtureMemberTaskAPI{}
