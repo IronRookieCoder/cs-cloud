@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/autostart"
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
@@ -235,6 +236,8 @@ waitDone:
 		}
 	}
 
+	suggestAutostart(a)
+
 	if mode == "cloud" {
 		webURL := strings.TrimSuffix(a.CloudBaseURL(), "/cloud-api") + "/cloud"
 		fmt.Println()
@@ -378,4 +381,24 @@ func restartWithNewBinary(exe string) {
 	}
 
 	os.Exit(0)
+}
+
+// suggestAutostart prints a one-line hint when boot autostart is not yet
+// configured. Best-effort: any error short-circuits to silence so it never
+// interferes with an otherwise successful start. Stays quiet when autostart
+// is already enabled (no noise for configured users).
+func suggestAutostart(a *app.App) {
+	cfg, err := buildAutostartConfig(a)
+	if err != nil {
+		return
+	}
+	mgr, err := autostart.New(cfg)
+	if err != nil {
+		return
+	}
+	enabled, err := mgr.Enabled()
+	if err != nil || enabled {
+		return
+	}
+	printInfo("Tip: enable boot autostart with 'autostart enable'")
 }
