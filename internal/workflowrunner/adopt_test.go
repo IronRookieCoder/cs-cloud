@@ -26,6 +26,7 @@ type fakeAdoptBackend struct {
 	completeCalls []adoptCompleteCall
 	failCalls     []adoptFailCall
 	messageCalls  []adoptMessageCall
+	factCalls     []adoptFactCall
 }
 
 type adoptCompleteCall struct {
@@ -44,6 +45,14 @@ type adoptFailCall struct {
 type adoptMessageCall struct {
 	TaskID  string
 	Content string
+}
+
+type adoptFactCall struct {
+	FactID        string
+	TaskID        string
+	Kind          string
+	Output        string
+	FailureReason string
 }
 
 func newFakeAdoptBackend() *fakeAdoptBackend {
@@ -93,6 +102,14 @@ func (f *fakeAdoptBackend) handler() http.Handler {
 				TaskID:  taskID,
 				Content: content,
 			})
+		case "facts":
+			f.factCalls = append(f.factCalls, adoptFactCall{
+				FactID:        stringValue(bodyMap, "fact_id"),
+				TaskID:        taskID,
+				Kind:          stringValue(bodyMap, "kind"),
+				Output:        stringValue(bodyMap, "output"),
+				FailureReason: stringValue(bodyMap, "failure_reason"),
+			})
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -105,6 +122,12 @@ func (f *fakeAdoptBackend) snapshot() (complete []adoptCompleteCall, fail []adop
 	return append([]adoptCompleteCall{}, f.completeCalls...),
 		append([]adoptFailCall{}, f.failCalls...),
 		append([]adoptMessageCall{}, f.messageCalls...)
+}
+
+func (f *fakeAdoptBackend) factSnapshot() []adoptFactCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]adoptFactCall{}, f.factCalls...)
 }
 
 func stringValue(m map[string]any, key string) string {
@@ -393,6 +416,66 @@ func TestAdoptedTurnCompleteWritesFactToOutbox(t *testing.T) {
 	}
 	if completeFact.WorkDir != sessionDir {
 		t.Errorf("fact work_dir = %q, want %q", completeFact.WorkDir, sessionDir)
+	}
+}
+
+func TestAdoptedTurnCompleteFactIsDeliverable(t *testing.T) {
+	backend := newFakeAdoptBackend()
+	backendSrv := httptest.NewServer(backend.handler())
+	defer backendSrv.Close()
+
+	sessionDir := t.TempDir()
+	messages := json.RawMessage(`{"messages":[{"role":"assistant","parts":[{"type":"text","text":"hello from assistant"}]}]}`)
+	events := []cscEvent{
+		{Name: "session.status", Data: `{"status":{"type":"busy"}}`},
+		{Name: "session.result", Data: `{"subtype":"success"}`},
+		{Name: "session.idle", Data: `{}`},
+	}
+	cscSrv := httptest.NewServer(newFakeCSCServer(sessionDir, messages, events).handler())
+	defer cscSrv.Close()
+
+	agent := csc.NewAgentWithEndpoint(cscSrv.URL)
+
+	d := startAdoptDriver(t, backendSrv.URL)
+	if err := d.AdoptUserTurn(context.Background(), "task-1", "session-1", agent); err != nil {
+		t.Fatalf("AdoptUserTurn: %v", err)
+	}
+
+	// Wait for the complete callback so the fact is definitely persisted.
+	waitFor(t, "complete callback", func() bool {
+		complete, _, _ := backend.snapshot()
+		return len(complete) > 0
+	})
+
+	// Force a delivery pass instead of waiting for the 10s tick. Concurrent
+	// with the driver's own loop this is at-least-once and benign.
+	d.deliverOutboxPass(context.Background())
+
+	waitFor(t, "complete fact delivered to /facts", func() bool {
+		for _, fc := range backend.factSnapshot() {
+			if fc.Kind == "complete" && fc.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	var delivered *adoptFactCall
+	for _, fc := range backend.factSnapshot() {
+		if fc.Kind == "complete" && fc.TaskID == "task-1" {
+			f := fc
+			delivered = &f
+			break
+		}
+	}
+	if delivered == nil {
+		t.Fatalf("expected a complete fact for task-1 delivered to /facts, got %+v", backend.factSnapshot())
+	}
+	if delivered.Output != "hello from assistant" {
+		t.Errorf("delivered fact output = %q, want %q", delivered.Output, "hello from assistant")
+	}
+	if delivered.FactID == "" {
+		t.Errorf("delivered fact has empty fact_id")
 	}
 }
 
@@ -730,5 +813,39 @@ func TestAdoptUserTurnAbortReportsCancelled(t *testing.T) {
 	}
 	if fail[0].FailureReason != "cancelled" {
 		t.Errorf("failure_reason = %q, want %q", fail[0].FailureReason, "cancelled")
+	}
+
+	// The abort failure must be durably recorded as a fail fact, so a crash
+	// between the abort outcome and the in-process FailTask callback does not
+	// leave the task stuck in a running state on the server.
+	waitFor(t, "abort fail fact in outbox", func() bool {
+		facts, err := d.Outbox().All()
+		if err != nil {
+			return false
+		}
+		for _, f := range facts {
+			if f.Kind == "fail" && f.TaskID == "task-1" {
+				return true
+			}
+		}
+		return false
+	})
+
+	facts, err := d.Outbox().All()
+	if err != nil {
+		t.Fatalf("outbox All: %v", err)
+	}
+	var abortFact *OutboxFact
+	for i := range facts {
+		if facts[i].Kind == "fail" && facts[i].TaskID == "task-1" {
+			abortFact = &facts[i]
+			break
+		}
+	}
+	if abortFact == nil {
+		t.Fatalf("expected a fail fact for task-1 in outbox, got %+v", facts)
+	}
+	if abortFact.FailureReason != "cancelled" {
+		t.Errorf("fact failure_reason = %q, want %q", abortFact.FailureReason, "cancelled")
 	}
 }
