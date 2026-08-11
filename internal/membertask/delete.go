@@ -50,6 +50,9 @@ func (s *Service) PreviewDelete(ctx context.Context, key TaskKey, mode DeleteMod
 	}
 	risks := deleteRisks(record, s.now())
 	requiresForce := len(risks) > 0
+	if mode == DeleteModeNormal && requiresForce {
+		return DeletePreview{}, newTaskError("force_discard_required", "task contains local or recoverable state", nil)
+	}
 	riskDigest := digestJSON(struct {
 		Directory string
 		Risks     []string
