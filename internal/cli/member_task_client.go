@@ -125,6 +125,9 @@ func memberTaskHTTPRequest(request memberTaskRequest) (string, string, []byte, e
 	if request.Command == "delete" && request.PreviewID == "" {
 		body["mode"] = request.DeleteMode
 	}
+	if request.Command == "prepare" && request.WorkDir != "" {
+		body["workdir"] = request.WorkDir
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", "", nil, &membertask.TaskError{Code: "invalid_arguments", Message: "cannot encode task request"}

@@ -102,9 +102,17 @@ func (s *Service) ConfirmDelete(ctx context.Context, key TaskKey, previewID stri
 	if len(risks) > 0 && preview.Mode != DeleteModeForceDiscard {
 		return newTaskError("force_discard_required", "task contains local or recoverable state", nil)
 	}
+	originalRoot := record.PreparationRoot
+	if originalRoot == "" {
+		originalRoot = s.store.Layout().TasksRoot()
+	}
+	quarantineRoot := s.store.Layout().QuarantineRoot()
+	if record.PreparationRoot != "" && !samePath(record.PreparationRoot, s.store.Layout().TasksRoot()) {
+		quarantineRoot = filepath.Join(record.PreparationRoot, ".quarantine")
+	}
 	journal := DeleteJournal{
 		ID: preview.ID, Key: key, Phase: DeletePhaseDeleting, Original: record.Directory,
-		Quarantine: filepath.Join(s.store.Layout().QuarantineRoot(), preview.ID), CreatedAt: s.now().UTC(),
+		OriginalRoot: originalRoot, Quarantine: filepath.Join(quarantineRoot, preview.ID), QuarantineRoot: quarantineRoot, CreatedAt: s.now().UTC(),
 	}
 	if err := s.saveDeleteJournal(journal); err != nil {
 		return err
@@ -152,12 +160,20 @@ func (s *Service) RecoverDeleteJournals(ctx context.Context) error {
 }
 
 func (s *Service) continueDelete(journal DeleteJournal) error {
+	originalRoot := journal.OriginalRoot
+	if originalRoot == "" {
+		originalRoot = s.store.Layout().TasksRoot()
+	}
+	quarantineRoot := journal.QuarantineRoot
+	if quarantineRoot == "" {
+		quarantineRoot = s.store.Layout().QuarantineRoot()
+	}
 	if journal.Original != "" {
-		if err := ValidateContainedPath(s.store.Layout().TasksRoot(), journal.Original); err != nil {
+		if err := ValidateContainedPath(originalRoot, journal.Original); err != nil {
 			return err
 		}
 	}
-	if err := ValidateContainedPath(s.store.Layout().QuarantineRoot(), journal.Quarantine); err != nil {
+	if err := ValidateContainedPath(quarantineRoot, journal.Quarantine); err != nil {
 		return err
 	}
 	originalExists := journal.Original != "" && pathExists(journal.Original)

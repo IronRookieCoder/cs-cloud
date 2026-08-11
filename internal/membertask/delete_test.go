@@ -29,6 +29,31 @@ func TestDeleteCleanEndedTaskWithBoundPreview(t *testing.T) {
 	}
 }
 
+func TestDeleteTaskPreparedInCustomWorkDir(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	transition, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := svc.PreviewDelete(context.Background(), key, DeleteModeForceDiscard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ConfirmDelete(context.Background(), key, preview.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(transition.Directory); !os.IsNotExist(err) {
+		t.Fatalf("task directory still exists: %v", err)
+	}
+	if _, found, err := store.LoadTask(key); err != nil || found {
+		t.Fatalf("task record found=%t err=%v", found, err)
+	}
+}
+
 func TestDeleteDirtyTaskRequiresForceDiscardPreview(t *testing.T) {
 	store, key, _ := seedDeleteTask(t, TaskRecord{Dirty: true, DirtyPaths: []string{"output/result.md"}})
 	svc := NewService(store, nil)

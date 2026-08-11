@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type memberTaskRequest struct {
 	Decision   string
 	Reason     string
 	DeleteMode membertask.DeleteMode
+	WorkDir    string
 }
 
 type memberTaskAPI interface {
@@ -78,6 +80,12 @@ func runMemberTaskCommandWithFormat(parent context.Context, args []string, api m
 	if err != nil {
 		return reportTaskCommandError(stdout, stderr, args, taskKeyFromArgs(args), 2, err, asJSON)
 	}
+	if request.WorkDir != "" {
+		request.WorkDir, err = filepath.Abs(request.WorkDir)
+		if err != nil {
+			return reportTaskCommandError(stdout, stderr, args, optionalString(request.TaskKey), 2, invalidArguments("workdir cannot be resolved"), asJSON)
+		}
+	}
 	timeout := time.Duration(taskCommandTimeout(request.Command))*time.Second + 2*time.Second
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -118,12 +126,20 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 			return request, invalidArguments("list accepts no arguments")
 		}
 		return request, nil
-	case "get", "prepare", "start", "pause":
+	case "get", "start", "pause":
 		if len(args) != 2 {
 			return request, invalidArguments(command + " requires exactly one task key")
 		}
 		request.TaskKey = args[1]
 		return validateRequestTaskKey(request)
+	case "prepare":
+		if len(args) < 2 {
+			return request, invalidArguments("prepare requires a task key")
+		}
+		request.TaskKey = args[1]
+		if _, err := membertask.ParseTaskKey(request.TaskKey); err != nil {
+			return request, invalidArguments("task key is invalid")
+		}
 	case "submit", "review", "delete":
 		if len(args) < 2 {
 			return request, invalidArguments(command + " requires a task key")
@@ -141,6 +157,11 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 	}
 	request.PreviewID = flags["confirm"]
 	switch command {
+	case "prepare":
+		request.WorkDir = flags["workdir"]
+		if len(flags) > boolMapLen(flags, "workdir") {
+			return request, invalidArguments("prepare accepts only --workdir")
+		}
 	case "submit":
 		if len(flags) > boolMapLen(flags, "confirm") {
 			return request, invalidArguments("submit accepts only --confirm")
@@ -191,7 +212,7 @@ func validateRequestTaskKey(request memberTaskRequest) (memberTaskRequest, error
 
 func parseMemberTaskFlags(args []string) (map[string]string, error) {
 	flags := make(map[string]string)
-	valueFlags := map[string]bool{"confirm": true, "decision": true, "reason": true}
+	valueFlags := map[string]bool{"confirm": true, "decision": true, "reason": true, "workdir": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "--") || arg == "--" {

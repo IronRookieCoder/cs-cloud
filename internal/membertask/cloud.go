@@ -25,6 +25,9 @@ const (
 
 type RemoteTask struct {
 	Ref             TaskKey `json:"ref,omitempty"`
+	DisplayName     string  `json:"display_name,omitempty"`
+	IssueTitle      string  `json:"issue_title,omitempty"`
+	NodeName        string  `json:"node_name,omitempty"`
 	CloudInstanceID string  `json:"cloud_instance_id"`
 	WorkspaceID     string  `json:"workspace_id"`
 	NodeRunID       string  `json:"node_run_id"`
@@ -47,6 +50,8 @@ type MaterialSource struct {
 	Identity      string             `json:"identity"`
 	Kind          string             `json:"kind"`
 	Name          string             `json:"name,omitempty"`
+	Title         string             `json:"title,omitempty"`
+	SourceURL     string             `json:"source_url,omitempty"`
 	Version       string             `json:"version,omitempty"`
 	ReadOnly      bool               `json:"read_only,omitempty"`
 	SourceVersion string             `json:"source_version"`
@@ -71,6 +76,7 @@ type RemoteDeliverable struct {
 type RepositoryContext struct {
 	Provider       string   `json:"provider,omitempty"`
 	Identity       string   `json:"identity"`
+	SourceURL      string   `json:"source_url,omitempty"`
 	CloneURL       string   `json:"clone_url"`
 	BaseRef        string   `json:"base_ref"`
 	BaseSHA        string   `json:"base_sha"`

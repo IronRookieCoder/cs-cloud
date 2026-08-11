@@ -5,17 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 type Task struct {
-	Key        TaskKey            `json:"task_key"`
-	Remote     *RemoteTask        `json:"remote,omitempty"`
-	Local      *TaskRecord        `json:"local,omitempty"`
-	Context    *RemoteTaskContext `json:"context,omitempty"`
-	Projection Projection         `json:"projection"`
+	Key               TaskKey            `json:"task_key"`
+	DisplayName       string             `json:"display_name"`
+	DisplayNameSource DisplayNameSource  `json:"display_name_source"`
+	Remote            *RemoteTask        `json:"remote,omitempty"`
+	Local             *TaskRecord        `json:"local,omitempty"`
+	Context           *RemoteTaskContext `json:"context,omitempty"`
+	Projection        Projection         `json:"projection"`
 }
+
+type DisplayNameSource string
+
+const (
+	DisplayNameSourceCloud    DisplayNameSource = "cloud"
+	DisplayNameSourceIssue    DisplayNameSource = "issue_title"
+	DisplayNameSourceNode     DisplayNameSource = "node_name"
+	DisplayNameSourceLocal    DisplayNameSource = "local"
+	DisplayNameSourceIdentity DisplayNameSource = "task_identity"
+)
 
 type Service struct {
 	store     *Store
@@ -44,7 +57,9 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 	merged := make(map[string]Task, len(local))
 	for i := range local {
 		record := local[i]
-		merged[record.Key.String()] = Task{Key: record.Key, Local: &record, Projection: projectRecord(record, "")}
+		task := Task{Key: record.Key, Local: &record, Projection: projectRecord(record, "")}
+		setTaskDisplay(&task)
+		merged[record.Key.String()] = task
 	}
 
 	remote, remoteErr := s.cloud.List(ctx)
@@ -77,6 +92,11 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 			task = Task{Key: key}
 		}
 		task.Remote = &remoteTask
+		if name, source := displayNameFromRemote(remoteTask); name != "" && task.Local != nil {
+			record := *task.Local
+			record.DisplayName, record.DisplayNameSource = name, source
+			task.Local = &record
+		}
 		if task.Local != nil {
 			record := *task.Local
 			record.Offline = false
@@ -92,6 +112,7 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 		} else {
 			task.Projection = ProjectStatus(Facts{Role: key.Role, RemoteState: remoteTask.CloudStatus})
 		}
+		setTaskDisplay(&task)
 		merged[key.String()] = task
 	}
 	for raw, task := range merged {
@@ -108,6 +129,10 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 		}
 		task.Local = &record
 		task.Projection = projectRecord(record, "")
+		merged[raw] = task
+	}
+	for raw, task := range merged {
+		setTaskDisplay(&task)
 		merged[raw] = task
 	}
 	return sortedTasks(merged), nil
@@ -132,7 +157,9 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 		if err := s.store.SaveTask(record); err != nil {
 			return Task{}, err
 		}
-		return Task{Key: key, Local: &record, Projection: projectRecord(record, "")}, nil
+		task := Task{Key: key, Local: &record, Projection: projectRecord(record, "")}
+		setTaskDisplay(&task)
+		return task, nil
 	}
 	remote := remoteContext.RemoteTask
 	task := Task{Key: key, Remote: &remote, Context: &remoteContext}
@@ -143,6 +170,9 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 		record.LastVerifiedAt = &now
 		record.RemoteVersion = versionString(remote)
 		record.Attempt = remote.Attempt
+		if name, source := displayNameFromRemote(remote); name != "" {
+			record.DisplayName, record.DisplayNameSource = name, source
+		}
 		if err := s.store.SaveTask(record); err != nil {
 			return Task{}, err
 		}
@@ -151,7 +181,43 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 	} else {
 		task.Projection = ProjectStatus(Facts{Role: key.Role, RemoteState: remote.CloudStatus})
 	}
+	setTaskDisplay(&task)
 	return task, nil
+}
+
+func displayNameFromRemote(remote RemoteTask) (string, DisplayNameSource) {
+	if name := normalizeDisplayName(remote.DisplayName); name != "" {
+		return name, DisplayNameSourceCloud
+	}
+	if name := normalizeDisplayName(remote.IssueTitle); name != "" {
+		return name, DisplayNameSourceIssue
+	}
+	if name := normalizeDisplayName(remote.NodeName); name != "" {
+		return name, DisplayNameSourceNode
+	}
+	return "", ""
+}
+
+func normalizeDisplayName(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func setTaskDisplay(task *Task) {
+	if task == nil {
+		return
+	}
+	if task.Remote != nil {
+		if name, source := displayNameFromRemote(*task.Remote); name != "" {
+			task.DisplayName, task.DisplayNameSource = name, source
+			return
+		}
+	}
+	if task.Local != nil && strings.TrimSpace(task.Local.DisplayName) != "" {
+		task.DisplayName, task.DisplayNameSource = task.Local.DisplayName, DisplayNameSourceLocal
+		return
+	}
+	task.DisplayName = strings.Join([]string{task.Key.WorkspaceID, task.Key.NodeRunID, string(task.Key.Role)}, "/")
+	task.DisplayNameSource = DisplayNameSourceIdentity
 }
 
 func isCloudUnavailable(err error) bool {

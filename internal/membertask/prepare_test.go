@@ -144,6 +144,95 @@ func TestReprepareArchivesCleanDirectoryWhenContextChanges(t *testing.T) {
 	}
 }
 
+func TestReprepareKeepsCustomDirectoryAndArchivesWithinManagedRoot(t *testing.T) {
+	var contextVersion atomic.Int32
+	contextVersion.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		version := contextVersion.Load()
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":%d,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"requirements","kind":"file","source_version":"v%d","relative_path":"input/requirements.md","role":"input_protected","content":"version %d"}]}`, version, version, version)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	workDir := t.TempDir()
+	first, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextVersion.Store(2)
+	second, err := svc.Prepare(context.Background(), key)
+	if err != nil {
+		t.Fatalf("reprepare: %v", err)
+	}
+	if second.Directory != first.Directory {
+		t.Fatalf("directory moved from %q to %q", first.Directory, second.Directory)
+	}
+	archive := filepath.Join(first.PreparationRoot, ".history", "cloud", "ws", "node-worker", "attempt-1-context-1")
+	if _, err := os.Stat(filepath.Join(archive, "input", "requirements.md")); err != nil {
+		t.Fatalf("managed-root archive missing: %v", err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(store.Layout().HistoryRoot(), "cloud", "ws", "node-worker", "*")); len(entries) != 0 {
+		t.Fatalf("custom task archived in profile history: %v", entries)
+	}
+}
+
+func TestPrepareMetadataRefreshPersistsDisplayName(t *testing.T) {
+	var version atomic.Int32
+	version.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := version.Load()
+		name := ""
+		if current == 2 {
+			name = `,"display_name":"修复后的名称"`
+		}
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"%s,"attempt":1,"task_version":%d,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`, name, current)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if _, err := svc.Prepare(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	version.Store(2)
+	if _, err := svc.Prepare(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.LoadTask(key)
+	if err != nil || !found || record.DisplayName != "修复后的名称" || record.DisplayNameSource != DisplayNameSourceCloud {
+		t.Fatalf("record=%+v found=%t err=%v", record, found, err)
+	}
+}
+
+func TestReprepareKeepsCachedDisplayNameWhenCloudOmitsIt(t *testing.T) {
+	var contextVersion atomic.Int32
+	contextVersion.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := contextVersion.Load()
+		name := ""
+		if current == 1 {
+			name = `,"display_name":"缓存名称"`
+		}
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"%s,"attempt":1,"task_version":1,"context_version":%d,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`, name, current)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if _, err := svc.Prepare(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	contextVersion.Store(2)
+	record, err := svc.Prepare(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.DisplayName != "缓存名称" || record.DisplayNameSource != DisplayNameSourceCloud {
+		t.Fatalf("record = %+v", record)
+	}
+}
+
 func TestPrepareRejectsUnsupportedProviderBeforeCreatingTaskDirectories(t *testing.T) {
 	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":false,"providers":["github"]}`)
 	defer srv.Close()
@@ -195,6 +284,72 @@ func TestPrepareMaterializesFilesAndPublishesAtomically(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(record.Directory, "manifest.json")); err != nil {
 		t.Fatalf("manifest missing: %v", err)
+	}
+}
+
+func TestPrepareWithWorkDirCreatesManagedTaskDirectory(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"requirements","kind":"file","source_version":"v1","relative_path":"input/requirements.md","role":"input_protected","content":"build it"}]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	workDir := t.TempDir()
+
+	transition, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatalf("PrepareWithFacts: %v", err)
+	}
+	want := filepath.Join(workDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
+	if transition.Directory != want || transition.PreparationRoot != filepath.Join(workDir, ".cs-cloud-tasks") {
+		t.Fatalf("transition = %+v, want directory %q", transition, want)
+	}
+	if _, err := os.Stat(filepath.Join(want, "input", "requirements.md")); err != nil {
+		t.Fatalf("prepared material missing: %v", err)
+	}
+}
+
+func TestPrepareRejectsRelativeWorkDir(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+
+	_, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: "."})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_workdir" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestPrepareTargetRejectsWhitespaceWorkDir(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, nil)
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	_, _, err := svc.prepareTarget(key, "   ")
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_workdir" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestPreparePersistsSanitizedDeliverableOrigin(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"critic","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"predecessor_results":[{"id":"result-1","title":"实现结果","content":"done","url":"https://gitea.example/team/repo/pulls/7?token=secret#discussion"}]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/critic")
+
+	record, err := svc.Prepare(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Manifest == nil || len(record.Manifest.Files) != 1 || record.Manifest.Files[0].Origin == nil {
+		t.Fatalf("manifest = %+v", record.Manifest)
+	}
+	origin := record.Manifest.Files[0].Origin
+	if origin.Title != "实现结果" || origin.SourceURL != "https://gitea.example/team/repo/pulls/7" || origin.RelativePath != "input/predecessors/result-1.md" {
+		t.Fatalf("origin = %+v", origin)
 	}
 }
 

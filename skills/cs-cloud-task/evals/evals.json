@@ -1,0 +1,23 @@
+{
+  "skill_name": "cs-cloud-task",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "用户说：看看我的任务。假设 list 已返回两个任务：第一个 display_name=修复登录流程、role=worker、display_status=not_prepared、available_actions=[get,prepare]；第二个 display_name=评审支付修复、role=critic、display_status=in_progress、available_actions=[get,pause,review,delete]。不要执行真实命令，只输出应返回给用户的内容。",
+      "expected_output": "以带序号的结构化列表展示任务描述、角色、状态和可操作项，并明确给出中文快捷命令与下一步。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "上一轮列表中 1 对应尚未准备的 worker 任务“修复登录流程”，用户回复：准备 1。当前工作目录是 F:\\work\\demo；假设 prepare 成功返回 directory=F:\\work\\demo\\.cs-cloud-tasks\\cloud\\ws\\node-worker，manifest 来源标题=登录修复需求、source_url=https://gitea.example/team/app/pulls/7。不要执行真实命令，只输出应返回给用户的内容。",
+      "expected_output": "简短报告准备目录和材料来源，不展示底层命令或 JSON，并给出适用的中文下一步快捷命令。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "用户说：提交 1。假设 submit 返回 outcome=previewed、performed=false，预览显示将发布仓库 team/app 的 commit abc123，next_commands 只有一个 requires_confirmation 候选。不要执行真实命令，只输出应返回给用户的内容。",
+      "expected_output": "明确说明尚未提交，展示预览事实并单独请求确认，不泄露确认 argv 或伪造完成状态。",
+      "files": []
+    }
+  ]
+}

@@ -29,7 +29,11 @@ func (l Layout) DeleteJournalsRoot() string {
 	return filepath.Join(l.StoreRoot(), "delete-journals")
 }
 func (l Layout) TaskDir(k TaskKey) string {
-	return filepath.Join(l.TasksRoot(), k.CloudInstanceID, k.WorkspaceID, k.NodeRunID+"-"+string(k.Role))
+	return TaskDirIn(l.TasksRoot(), k)
+}
+
+func TaskDirIn(root string, k TaskKey) string {
+	return filepath.Join(root, k.CloudInstanceID, k.WorkspaceID, k.NodeRunID+"-"+string(k.Role))
 }
 
 func ValidateContainedPath(root, path string) error {

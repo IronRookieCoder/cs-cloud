@@ -98,6 +98,34 @@ func TestServiceListMergesOnlineTasksAndLocalHistory(t *testing.T) {
 	}
 }
 
+func TestServiceListUsesCloudDisplayNameAndMarksIdentityFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tasks":[
+			{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"named","role":"worker","display_name":"修复登录流程","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned"},
+			{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"fallback","role":"critic","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned"}
+		]}`))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	tasks, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	byNode := map[string]Task{}
+	for _, task := range tasks {
+		byNode[task.Key.NodeRunID] = task
+	}
+	if got := byNode["named"]; got.DisplayName != "修复登录流程" || got.DisplayNameSource != DisplayNameSourceCloud {
+		t.Fatalf("named task = %+v", got)
+	}
+	if got := byNode["fallback"]; got.DisplayName != "ws/fallback/critic" || got.DisplayNameSource != DisplayNameSourceIdentity {
+		t.Fatalf("fallback task = %+v", got)
+	}
+}
+
 func TestServiceListFallsBackToLocalHistoryOffline(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	key, _ := ParseTaskKey("cloud/ws/local/worker")
@@ -135,6 +163,21 @@ func TestServiceGetContextDoesNotCreateTaskDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(store.Layout().TasksRoot()); !os.IsNotExist(err) {
 		t.Fatalf("tasks root exists after Get: %v", err)
+	}
+}
+
+func TestServiceGetOfflineUsesPersistedDisplayName(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if err := store.SaveTask(TaskRecord{Key: key, DisplayName: "离线任务", DisplayNameSource: DisplayNameSourceCloud, Prepared: true}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := NewService(store, NewCloudClient("http://127.0.0.1:1", testCredentials)).Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.DisplayName != "离线任务" || task.DisplayNameSource != DisplayNameSourceLocal {
+		t.Fatalf("task = %+v", task)
 	}
 }
 

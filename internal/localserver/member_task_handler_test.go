@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,6 +62,31 @@ func TestMemberTaskRouteStrictlyDecodesTaskKey(t *testing.T) {
 	}
 }
 
+func TestMemberTaskPrepareUsesRequestedWorkDir(t *testing.T) {
+	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
+	workDir := t.TempDir()
+	body, _ := json.Marshal(map[string]string{"workdir": workDir})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/prepare", strings.NewReader(string(body)))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer private-secret")
+	recorder := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data membertask.LocalTransition `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(workDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
+	if response.Data.Directory != want {
+		t.Fatalf("directory = %q, want %q", response.Data.Directory, want)
+	}
+}
+
 func TestMemberTaskServerRejectsEmptySecretBeforeListen(t *testing.T) {
 	srv := New(WithMemberTask(memberTaskTestService(t), ""))
 	if err := srv.Start("127.0.0.1:0"); err == nil {
@@ -99,6 +125,25 @@ func TestMemberTaskCapabilityErrorsAreUnprocessable(t *testing.T) {
 			}
 			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil || body.Error.Code != code {
 				t.Fatalf("body = %s, err = %v", recorder.Body.String(), err)
+			}
+		})
+	}
+}
+
+func TestMemberTaskWorkDirErrorsUseClientStatuses(t *testing.T) {
+	tests := []struct {
+		code string
+		want int
+	}{
+		{code: "invalid_workdir", want: http.StatusBadRequest},
+		{code: "prepare_location_conflict", want: http.StatusConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeMemberTaskError(recorder, &membertask.TaskError{Code: test.code, Message: "workdir error"})
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d, body = %s", recorder.Code, test.want, recorder.Body.String())
 			}
 		})
 	}

@@ -19,30 +19,33 @@ const (
 )
 
 type TaskRecord struct {
-	Key                    TaskKey        `json:"key"`
-	RemoteVersion          string         `json:"remote_version,omitempty"`
-	CloudMaterialDigest    string         `json:"cloud_material_digest,omitempty"`
-	Attempt                int            `json:"attempt,omitempty"`
-	Directory              string         `json:"directory,omitempty"`
-	Prepared               bool           `json:"prepared"`
-	Activity               Activity       `json:"activity,omitempty"`
-	Dirty                  bool           `json:"dirty"`
-	DirtyPaths             []string       `json:"dirty_paths,omitempty"`
-	LastVerifiedAt         *time.Time     `json:"last_verified_at,omitempty"`
-	Offline                bool           `json:"offline"`
-	CloudStateUnverified   bool           `json:"cloud_state_unverified"`
-	ReadOnly               bool           `json:"read_only"`
-	WriteAuthorityLost     bool           `json:"write_authority_lost"`
-	WonByOtherOperation    bool           `json:"won_by_other_operation"`
-	CleanupPending         bool           `json:"cleanup_pending"`
-	ReprepareRequired      bool           `json:"reprepare_required"`
-	ReconfirmationRequired bool           `json:"reconfirmation_required"`
-	SyncPending            bool           `json:"sync_pending"`
-	Ended                  bool           `json:"ended"`
-	Manifest               *Manifest      `json:"manifest,omitempty"`
-	Preview                *Preview       `json:"preview,omitempty"`
-	Operation              *Operation     `json:"operation,omitempty"`
-	DeletePreview          *DeletePreview `json:"delete_preview,omitempty"`
+	Key                    TaskKey           `json:"key"`
+	DisplayName            string            `json:"display_name,omitempty"`
+	DisplayNameSource      DisplayNameSource `json:"display_name_source,omitempty"`
+	RemoteVersion          string            `json:"remote_version,omitempty"`
+	CloudMaterialDigest    string            `json:"cloud_material_digest,omitempty"`
+	Attempt                int               `json:"attempt,omitempty"`
+	Directory              string            `json:"directory,omitempty"`
+	PreparationRoot        string            `json:"preparation_root,omitempty"`
+	Prepared               bool              `json:"prepared"`
+	Activity               Activity          `json:"activity,omitempty"`
+	Dirty                  bool              `json:"dirty"`
+	DirtyPaths             []string          `json:"dirty_paths,omitempty"`
+	LastVerifiedAt         *time.Time        `json:"last_verified_at,omitempty"`
+	Offline                bool              `json:"offline"`
+	CloudStateUnverified   bool              `json:"cloud_state_unverified"`
+	ReadOnly               bool              `json:"read_only"`
+	WriteAuthorityLost     bool              `json:"write_authority_lost"`
+	WonByOtherOperation    bool              `json:"won_by_other_operation"`
+	CleanupPending         bool              `json:"cleanup_pending"`
+	ReprepareRequired      bool              `json:"reprepare_required"`
+	ReconfirmationRequired bool              `json:"reconfirmation_required"`
+	SyncPending            bool              `json:"sync_pending"`
+	Ended                  bool              `json:"ended"`
+	Manifest               *Manifest         `json:"manifest,omitempty"`
+	Preview                *Preview          `json:"preview,omitempty"`
+	Operation              *Operation        `json:"operation,omitempty"`
+	DeletePreview          *DeletePreview    `json:"delete_preview,omitempty"`
 }
 
 type Index struct {
@@ -60,13 +63,15 @@ const (
 )
 
 type PrepareJournal struct {
-	ID        string       `json:"id"`
-	Key       TaskKey      `json:"key"`
-	Phase     PreparePhase `json:"phase"`
-	Staging   string       `json:"staging"`
-	Final     string       `json:"final"`
-	Archive   string       `json:"archive,omitempty"`
-	CreatedAt time.Time    `json:"created_at"`
+	ID          string       `json:"id"`
+	Key         TaskKey      `json:"key"`
+	Phase       PreparePhase `json:"phase"`
+	Staging     string       `json:"staging"`
+	Final       string       `json:"final"`
+	Root        string       `json:"root,omitempty"`
+	Archive     string       `json:"archive,omitempty"`
+	ArchiveRoot string       `json:"archive_root,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
 }
 
 type DeletePhase string
@@ -79,12 +84,14 @@ const (
 )
 
 type DeleteJournal struct {
-	ID         string      `json:"id"`
-	Key        TaskKey     `json:"key"`
-	Phase      DeletePhase `json:"phase"`
-	Original   string      `json:"original"`
-	Quarantine string      `json:"quarantine"`
-	CreatedAt  time.Time   `json:"created_at"`
+	ID             string      `json:"id"`
+	Key            TaskKey     `json:"key"`
+	Phase          DeletePhase `json:"phase"`
+	Original       string      `json:"original"`
+	OriginalRoot   string      `json:"original_root,omitempty"`
+	Quarantine     string      `json:"quarantine"`
+	QuarantineRoot string      `json:"quarantine_root,omitempty"`
+	CreatedAt      time.Time   `json:"created_at"`
 }
 
 type Store struct {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,11 +16,21 @@ import (
 )
 
 type FileManifest struct {
-	Identity      string       `json:"identity"`
-	SourceVersion string       `json:"source_version"`
-	RelativePath  string       `json:"relative_path"`
-	Role          MaterialRole `json:"role"`
-	SHA256        string       `json:"sha256"`
+	Identity      string          `json:"identity"`
+	SourceVersion string          `json:"source_version"`
+	RelativePath  string          `json:"relative_path"`
+	Role          MaterialRole    `json:"role"`
+	SHA256        string          `json:"sha256"`
+	Origin        *MaterialOrigin `json:"origin,omitempty"`
+}
+
+type MaterialOrigin struct {
+	Title              string `json:"title,omitempty"`
+	SourceURL          string `json:"source_url,omitempty"`
+	Provider           string `json:"provider,omitempty"`
+	RepositoryIdentity string `json:"repository_identity,omitempty"`
+	CommitSHA          string `json:"commit_sha,omitempty"`
+	RelativePath       string `json:"relative_path"`
 }
 
 type RepositoryManifest struct {
@@ -33,6 +44,7 @@ type RepositoryManifest struct {
 	TargetRef      string            `json:"target_ref"`
 	ProtectedBlobs map[string]string `json:"protected_blobs,omitempty"`
 	OutputPaths    []string          `json:"output_paths,omitempty"`
+	Origin         *MaterialOrigin   `json:"origin,omitempty"`
 }
 
 type Manifest struct {
@@ -68,7 +80,7 @@ func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
 			if source.SHA256 != "" && !strings.EqualFold(source.SHA256, digest) {
 				return Manifest{}, newTaskError("input_material_modified", "material hash does not match cloud context", nil)
 			}
-			manifest.Files = append(manifest.Files, FileManifest{Identity: source.Identity, SourceVersion: source.SourceVersion, RelativePath: rel, Role: source.Role, SHA256: digest})
+			manifest.Files = append(manifest.Files, FileManifest{Identity: source.Identity, SourceVersion: source.SourceVersion, RelativePath: rel, Role: source.Role, SHA256: digest, Origin: materialOrigin(source, rel)})
 		case "git":
 			if source.Repository == nil {
 				return Manifest{}, newTaskError("invalid_cloud_response", "git material has no repository context", nil)
@@ -87,10 +99,18 @@ func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
 	for i := range manifest.Repositories {
 		sort.Strings(manifest.Repositories[i].OutputPaths)
 	}
+	digestFiles := append([]FileManifest(nil), manifest.Files...)
+	for i := range digestFiles {
+		digestFiles[i].Origin = nil
+	}
+	digestRepositories := append([]RepositoryManifest(nil), manifest.Repositories...)
+	for i := range digestRepositories {
+		digestRepositories[i].Origin = nil
+	}
 	digestInput := struct {
 		Files        []FileManifest       `json:"files"`
 		Repositories []RepositoryManifest `json:"repositories"`
-	}{manifest.Files, manifest.Repositories}
+	}{digestFiles, digestRepositories}
 	manifest.MaterialDigest = digestJSON(digestInput)
 	return manifest, nil
 }
@@ -167,7 +187,35 @@ func buildRepositoryManifest(repoDir, rel string, source MaterialSource) (Reposi
 	if beforeSHA == "" {
 		beforeSHA = repo.BaseSHA
 	}
-	return RepositoryManifest{Identity: repo.Identity, RelativePath: rel, Role: source.Role, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs}, nil
+	return RepositoryManifest{Identity: repo.Identity, RelativePath: rel, Role: source.Role, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs, Origin: materialOrigin(source, rel)}, nil
+}
+
+func materialOrigin(source MaterialSource, relativePath string) *MaterialOrigin {
+	title := strings.TrimSpace(source.Title)
+	if title == "" {
+		title = strings.TrimSpace(source.Name)
+	}
+	origin := &MaterialOrigin{Title: title, SourceURL: sanitizeSourceURL(source.SourceURL), RelativePath: relativePath}
+	if source.Repository != nil {
+		origin.Provider = source.Repository.Provider
+		origin.RepositoryIdentity = source.Repository.Identity
+		origin.CommitSHA = source.Repository.BaseSHA
+		if origin.SourceURL == "" {
+			origin.SourceURL = sanitizeSourceURL(source.Repository.SourceURL)
+		}
+	}
+	return origin
+}
+
+func sanitizeSourceURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func verifyRepository(repoDir string, manifest RepositoryManifest) ([]string, string, error) {

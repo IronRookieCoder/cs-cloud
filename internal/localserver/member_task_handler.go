@@ -90,6 +90,7 @@ type memberTaskActionRequest struct {
 	Decision   string                `json:"decision"`
 	Reason     string                `json:"reason"`
 	DeleteMode membertask.DeleteMode `json:"mode"`
+	WorkDir    string                `json:"workdir"`
 }
 
 func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWriter, r *http.Request, key membertask.TaskKey, action string) {
@@ -105,7 +106,7 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 	var err error
 	switch action {
 	case "prepare":
-		result, err = s.memberTasks.PrepareWithFacts(ctx, key)
+		result, err = s.memberTasks.PrepareWithFacts(ctx, key, membertask.PrepareOptions{WorkDir: request.WorkDir})
 	case "start":
 		result, err = s.memberTasks.Start(ctx, key)
 	case "pause":
@@ -150,7 +151,7 @@ func writeMemberTaskError(w http.ResponseWriter, err error) {
 	}
 	status := http.StatusInternalServerError
 	switch taskErr.Code {
-	case "invalid_arguments", "invalid_task_key", "invalid_task_role", "invalid_task_state", "unsafe_task_path":
+	case "invalid_arguments", "invalid_task_key", "invalid_task_role", "invalid_task_state", "invalid_workdir", "unsafe_task_path":
 		status = http.StatusBadRequest
 	case "authentication_required":
 		status = http.StatusUnauthorized
@@ -158,7 +159,7 @@ func writeMemberTaskError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	case "task_not_found", "operation_not_found":
 		status = http.StatusNotFound
-	case "preview_stale", "remote_ref_changed", "operation_ref_conflict", "delete_recovery_required", "force_discard_required":
+	case "preview_stale", "remote_ref_changed", "operation_ref_conflict", "delete_recovery_required", "force_discard_required", "prepare_location_conflict":
 		status = http.StatusConflict
 	case "provider_not_supported", "input_material_modified", "local_changes_present", "material_content_unavailable", "repository_access_unavailable":
 		status = http.StatusUnprocessableEntity

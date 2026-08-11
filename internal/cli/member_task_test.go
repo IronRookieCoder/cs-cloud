@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -50,6 +51,13 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Name: "confirm", Kind: "flag", Flag: "--confirm", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		Summary: "Previously issued preview id",
 	}
+	wantWorkDir := ArgumentSpec{
+		Name: "workdir", Kind: "flag", Flag: "--workdir", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
+		Summary: "Existing working directory that will contain .cs-cloud-tasks",
+	}
+	if got := commands["prepare"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantWorkDir}) {
+		t.Fatalf("prepare arguments = %+v", got)
+	}
 	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm}) {
 		t.Fatalf("submit arguments = %+v", got)
 	}
@@ -82,6 +90,36 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 	}
 	if got := deleteCommand.MutuallyExclusive; len(got) != 1 || len(got[0]) != 2 || got[0][0] != "confirm" || got[0][1] != "force_discard" {
 		t.Fatalf("delete mutually_exclusive = %+v", got)
+	}
+}
+
+func TestPrepareRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {
+	request, err := parseMemberTaskRequest([]string{"prepare", "cloud/ws/node/worker", "--workdir=./project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.WorkDir != "./project" {
+		t.Fatalf("workdir = %q", request.WorkDir)
+	}
+	method, endpoint, body, err := memberTaskHTTPRequest(request)
+	if err != nil || method != "POST" || endpoint == "" {
+		t.Fatalf("method=%q endpoint=%q err=%v", method, endpoint, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload["workdir"] != "./project" {
+		t.Fatalf("payload=%s err=%v", body, err)
+	}
+}
+
+func TestPrepareCommandResolvesWorkDirBeforeTransport(t *testing.T) {
+	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
+	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key}}}
+	var stdout, stderr bytes.Buffer
+	if err := runMemberTaskCommand(context.Background(), []string{"prepare", key.String(), "--workdir=."}, api, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.calls) != 1 || !filepath.IsAbs(api.calls[0].WorkDir) {
+		t.Fatalf("calls = %+v", api.calls)
 	}
 }
 

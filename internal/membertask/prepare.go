@@ -14,25 +14,39 @@ import (
 )
 
 type preparedMetadata struct {
-	SchemaVersion       string   `json:"schema_version"`
-	Key                 TaskKey  `json:"key"`
-	RemoteVersion       string   `json:"remote_version"`
-	CloudMaterialDigest string   `json:"cloud_material_digest,omitempty"`
-	Attempt             int      `json:"attempt"`
-	Goal                string   `json:"goal,omitempty"`
-	Acceptance          []string `json:"acceptance_criteria,omitempty"`
-	ReworkReason        string   `json:"rework_reason,omitempty"`
+	SchemaVersion       string            `json:"schema_version"`
+	Key                 TaskKey           `json:"key"`
+	RemoteVersion       string            `json:"remote_version"`
+	CloudMaterialDigest string            `json:"cloud_material_digest,omitempty"`
+	Attempt             int               `json:"attempt"`
+	Goal                string            `json:"goal,omitempty"`
+	Acceptance          []string          `json:"acceptance_criteria,omitempty"`
+	ReworkReason        string            `json:"rework_reason,omitempty"`
+	DisplayName         string            `json:"display_name,omitempty"`
+	DisplayNameSource   DisplayNameSource `json:"display_name_source,omitempty"`
+	PreparationRoot     string            `json:"preparation_root,omitempty"`
 }
 
-func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey) (LocalTransition, error) {
+type PrepareOptions struct {
+	WorkDir string `json:"workdir,omitempty"`
+}
+
+func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey, options ...PrepareOptions) (LocalTransition, error) {
 	unlock := s.lockTask(key)
 	defer unlock()
+	if len(options) > 1 {
+		return LocalTransition{}, newTaskError("invalid_arguments", "prepare accepts one options value", nil)
+	}
+	var option PrepareOptions
+	if len(options) == 1 {
+		option = options[0]
+	}
 
 	existing, found, err := s.store.LoadTask(key)
 	if err != nil {
 		return LocalTransition{}, err
 	}
-	record, err := s.prepare(ctx, key)
+	record, err := s.prepare(ctx, key, option)
 	if err != nil {
 		return LocalTransition{}, err
 	}
@@ -45,10 +59,10 @@ func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey) (LocalTrans
 func (s *Service) Prepare(ctx context.Context, key TaskKey) (TaskRecord, error) {
 	unlock := s.lockTask(key)
 	defer unlock()
-	return s.prepare(ctx, key)
+	return s.prepare(ctx, key, PrepareOptions{})
 }
 
-func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) {
+func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptions) (TaskRecord, error) {
 	remote, err := s.cloud.GetContext(ctx, key)
 	if err != nil {
 		return TaskRecord{}, err
@@ -60,11 +74,42 @@ func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) 
 	if err != nil {
 		return TaskRecord{}, err
 	}
+	preparationRoot, final, err := s.prepareTarget(key, options.WorkDir)
+	if err != nil {
+		return TaskRecord{}, err
+	}
+	displayName, displaySource := displayNameFromRemote(remote.RemoteTask)
 	var archive string
+	var archiveRoot string
 	if existing, found, err := s.store.LoadTask(key); err != nil {
 		return TaskRecord{}, err
 	} else if found {
+		if displayName == "" && existing.DisplayName != "" {
+			displayName, displaySource = existing.DisplayName, existing.DisplayNameSource
+		}
+		if options.WorkDir == "" && existing.Directory != "" {
+			preparationRoot = existing.PreparationRoot
+			if preparationRoot == "" {
+				preparationRoot = s.store.Layout().TasksRoot()
+			}
+			final = existing.Directory
+		}
+		if err := ValidateContainedPath(preparationRoot, final); err != nil {
+			return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task directory is outside its managed root", err)
+		}
+		if options.WorkDir != "" && !samePath(existing.Directory, final) {
+			return TaskRecord{}, newTaskError("prepare_location_conflict", fmt.Sprintf("task is already prepared at %s", existing.Directory), nil)
+		}
+		displayChanged := syncRecordDisplay(&existing, remote.RemoteTask)
 		if existing.RemoteVersion == versionString(remote.RemoteTask) && existing.Prepared {
+			if displayChanged {
+				if err := updatePreparedMetadata(s.store, existing, remote); err != nil {
+					return TaskRecord{}, err
+				}
+				if err := s.store.SaveTask(existing); err != nil {
+					return TaskRecord{}, err
+				}
+			}
 			return existing, nil
 		}
 		oldAttempt, _, oldContextVersion, versionErr := parseRemoteVersion(existing.RemoteVersion)
@@ -111,10 +156,13 @@ func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) 
 		if verification.Dirty || existing.Dirty {
 			return TaskRecord{}, newTaskError("local_changes_present", "local task has changes that must be preserved manually", nil)
 		}
-		archive = filepath.Join(s.store.Layout().HistoryRoot(), key.CloudInstanceID, key.WorkspaceID, key.NodeRunID+"-"+string(key.Role), fmt.Sprintf("attempt-%d-context-%d", oldAttempt, oldContextVersion))
+		archiveRoot = s.store.Layout().HistoryRoot()
+		if !samePath(preparationRoot, s.store.Layout().TasksRoot()) {
+			archiveRoot = filepath.Join(preparationRoot, ".history")
+		}
+		archive = filepath.Join(archiveRoot, key.CloudInstanceID, key.WorkspaceID, key.NodeRunID+"-"+string(key.Role), fmt.Sprintf("attempt-%d-context-%d", oldAttempt, oldContextVersion))
 	}
 
-	final := s.store.Layout().TaskDir(key)
 	if _, err := os.Lstat(final); err == nil {
 		if archive == "" {
 			return TaskRecord{}, newTaskError("local_task_store_corrupt", "task directory exists without an index record", nil)
@@ -126,12 +174,17 @@ func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) 
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return TaskRecord{}, newTaskError("local_task_store_unavailable", "cannot create task parent directory", err)
 	}
+	if options.WorkDir != "" {
+		if err := ensureManagedTaskRoot(preparationRoot); err != nil {
+			return TaskRecord{}, err
+		}
+	}
 	prepareID := digestJSON(struct {
 		Key     string
 		Version string
 	}{key.String(), versionString(remote.RemoteTask)})[:24]
 	staging := filepath.Join(parent, "."+filepath.Base(final)+".staging-"+prepareID)
-	journal := PrepareJournal{ID: prepareID, Key: key, Phase: PreparePhasePreparing, Staging: staging, Final: final, Archive: archive, CreatedAt: s.now().UTC()}
+	journal := PrepareJournal{ID: prepareID, Key: key, Phase: PreparePhasePreparing, Staging: staging, Final: final, Root: preparationRoot, Archive: archive, ArchiveRoot: archiveRoot, CreatedAt: s.now().UTC()}
 	if err := s.savePrepareJournal(journal); err != nil {
 		return TaskRecord{}, err
 	}
@@ -149,7 +202,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) 
 		_ = s.removePrepareJournal(journal.ID)
 		return TaskRecord{}, err
 	}
-	metadata := preparedMetadata{SchemaVersion: SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason}
+	metadata := preparedMetadata{SchemaVersion: SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot}
 	if err := writePreparedFiles(s.store, staging, metadata, manifest); err != nil {
 		_ = os.RemoveAll(staging)
 		_ = s.removePrepareJournal(journal.ID)
@@ -173,7 +226,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey) (TaskRecord, error) 
 	if err := os.Rename(staging, final); err != nil {
 		return TaskRecord{}, newTaskError("prepare_failed", "cannot publish prepared task directory", err)
 	}
-	record := TaskRecord{Key: key, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	record := TaskRecord{Key: key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
 	if err := s.store.SaveTask(record); err != nil {
 		return TaskRecord{}, err
 	}
@@ -213,7 +266,10 @@ func (s *Service) RecoverPrepareJournals(ctx context.Context) error {
 }
 
 func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
-	tasksRoot := s.store.Layout().TasksRoot()
+	tasksRoot := journal.Root
+	if tasksRoot == "" {
+		tasksRoot = s.store.Layout().TasksRoot()
+	}
 	if err := ValidateContainedPath(tasksRoot, journal.Staging); err != nil {
 		return err
 	}
@@ -221,7 +277,11 @@ func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
 		return err
 	}
 	if journal.Archive != "" {
-		if err := ValidateContainedPath(s.store.Layout().HistoryRoot(), journal.Archive); err != nil {
+		archiveRoot := journal.ArchiveRoot
+		if archiveRoot == "" {
+			archiveRoot = s.store.Layout().HistoryRoot()
+		}
+		if err := ValidateContainedPath(archiveRoot, journal.Archive); err != nil {
 			return err
 		}
 	}
@@ -301,7 +361,22 @@ func updatePreparedMetadata(store *Store, record TaskRecord, remote RemoteTaskCo
 	metadata.Goal = remote.Goal
 	metadata.Acceptance = remote.AcceptanceCriteria
 	metadata.ReworkReason = remote.ReworkReason
+	if name, source := displayNameFromRemote(remote.RemoteTask); name != "" {
+		metadata.DisplayName, metadata.DisplayNameSource = name, source
+	}
 	return store.writeJSON(path, metadata)
+}
+
+func syncRecordDisplay(record *TaskRecord, remote RemoteTask) bool {
+	if record == nil {
+		return false
+	}
+	name, source := displayNameFromRemote(remote)
+	if name == "" || (record.DisplayName == name && record.DisplayNameSource == source) {
+		return false
+	}
+	record.DisplayName, record.DisplayNameSource = name, source
+	return true
 }
 
 func materializeSources(ctx context.Context, root string, sources []MaterialSource) error {
@@ -379,8 +454,63 @@ func readPreparedRecord(root string) (TaskRecord, error) {
 	if err != nil || json.Unmarshal(b, &manifest) != nil || manifest.SchemaVersion != SchemaVersion {
 		return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task manifest is invalid", err)
 	}
-	record := TaskRecord{Key: metadata.Key, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	preparationRoot := metadata.PreparationRoot
+	if preparationRoot == "" {
+		preparationRoot = filepath.Dir(filepath.Dir(filepath.Dir(root)))
+	}
+	record := TaskRecord{Key: metadata.Key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
 	return record, nil
+}
+
+func (s *Service) prepareTarget(key TaskKey, workDir string) (string, string, error) {
+	if workDir == "" {
+		root := s.store.Layout().TasksRoot()
+		return root, TaskDirIn(root, key), nil
+	}
+	if !filepath.IsAbs(workDir) {
+		return "", "", newTaskError("invalid_workdir", "prepare working directory must be absolute", nil)
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", "", newTaskError("invalid_workdir", "cannot resolve prepare working directory", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return "", "", newTaskError("invalid_workdir", "prepare working directory must already exist", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", "", newTaskError("invalid_workdir", "cannot resolve prepare working directory links", err)
+	}
+	root := filepath.Join(resolved, ".cs-cloud-tasks")
+	return root, TaskDirIn(root, key), nil
+}
+
+func ensureManagedTaskRoot(root string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return newTaskError("local_task_store_unavailable", "cannot create managed task root", err)
+	}
+	ignore := filepath.Join(root, ".gitignore")
+	if _, err := os.Stat(ignore); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(ignore, []byte("*\n!.gitignore\n"), 0o600); err != nil {
+			return newTaskError("local_task_store_unavailable", "cannot protect managed task root from source control", err)
+		}
+	}
+	return nil
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	leftInfo, leftStatErr := os.Stat(leftAbs)
+	rightInfo, rightStatErr := os.Stat(rightAbs)
+	if leftStatErr == nil && rightStatErr == nil {
+		return os.SameFile(leftInfo, rightInfo)
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
 }
 
 func (s *Service) savePrepareJournal(journal PrepareJournal) error {
@@ -450,13 +580,13 @@ func prepareSources(remote RemoteTaskContext, key TaskKey) ([]MaterialSource, er
 		if key.Role == RoleCritic {
 			role = MaterialReferenceOnly
 		}
-		sources = append(sources, MaterialSource{Identity: repository.Identity, Kind: "git", SourceVersion: repository.BaseSHA, RelativePath: "repositories/" + safeMaterialName(repository.Identity), Role: role, Repository: &repository})
+		sources = append(sources, MaterialSource{Identity: repository.Identity, SourceURL: repository.SourceURL, Kind: "git", SourceVersion: repository.BaseSHA, RelativePath: "repositories/" + safeMaterialName(repository.Identity), Role: role, Repository: &repository})
 	}
 	return sources, nil
 }
 
 func deliverableSource(deliverable RemoteDeliverable, root string, role MaterialRole) MaterialSource {
-	return MaterialSource{Identity: deliverable.ID, Kind: "file", SourceVersion: "1", RelativePath: root + "/" + safeMaterialName(deliverable.ID) + ".md", Role: role, Content: deliverable.Content}
+	return MaterialSource{Identity: deliverable.ID, Title: deliverable.Title, SourceURL: deliverable.URL, Kind: "file", SourceVersion: "1", RelativePath: root + "/" + safeMaterialName(deliverable.ID) + ".md", Role: role, Content: deliverable.Content}
 }
 
 func safeMaterialName(raw string) string {
