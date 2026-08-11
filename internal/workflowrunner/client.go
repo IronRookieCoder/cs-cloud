@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -225,7 +226,7 @@ func (c *Client) FailTask(ctx context.Context, taskID string, reason string, fai
 // the delivery result: nil means accepted, *StatusError exposes HTTP status for
 // caller-side retry/ignore decisions.
 func (c *Client) PostTaskFact(ctx context.Context, f OutboxFact) error {
-	path := fmt.Sprintf(workflow.TaskFactsEndpoint, f.TaskID)
+	path := fmt.Sprintf(workflow.TaskFactsEndpoint, url.PathEscape(f.TaskID))
 	err := c.request(ctx, http.MethodPost, path, f, nil)
 	if err == nil {
 		return nil
@@ -297,7 +298,7 @@ func (c *Client) CreateChatSession(ctx context.Context, workspaceID, agentID, ti
 
 // PinTaskSession persists the chat session binding for a task.
 func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir string) error {
-	path := fmt.Sprintf(workflow.TaskSessionEndpoint, taskID)
+	path := fmt.Sprintf(workflow.TaskSessionEndpoint, url.PathEscape(taskID))
 	return c.request(ctx, http.MethodPost, path, workflow.PinTaskSessionRequest{
 		SessionID: sessionID,
 		WorkDir:   workDir,
@@ -307,7 +308,7 @@ func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir 
 // BindNodeRunSession persists the runtime/device/session binding for a
 // workflow node run.
 func (c *Client) BindNodeRunSession(ctx context.Context, nodeRunID, runtimeID, deviceID, sessionID string) error {
-	path := fmt.Sprintf(workflow.NodeRunSessionEndpoint, nodeRunID)
+	path := fmt.Sprintf(workflow.NodeRunSessionEndpoint, url.PathEscape(nodeRunID))
 	return c.request(ctx, http.MethodPost, path, workflow.BindNodeRunSessionRequest{
 		RuntimeID: runtimeID,
 		DeviceID:  deviceID,
@@ -384,7 +385,7 @@ var ErrTaskNotResumable = errors.New("task not resumable")
 // A 404 response maps to ErrSessionNotBound so the proxy layer can fall
 // through to a plain conversation.
 func (c *Client) GetSessionBinding(ctx context.Context, sessionID string) (*SessionBinding, error) {
-	path := fmt.Sprintf("/api/daemon/sessions/%s/binding", sessionID)
+	path := fmt.Sprintf("/api/daemon/sessions/%s/binding", url.PathEscape(sessionID))
 	var binding SessionBinding
 	err := c.request(ctx, http.MethodGet, path, nil, &binding)
 	if err != nil {
@@ -401,7 +402,7 @@ func (c *Client) GetSessionBinding(ctx context.Context, sessionID string) (*Sess
 // A 409 response maps to ErrTaskNotResumable; callers treat it as a plain
 // conversation.
 func (c *Client) ResumeBeginTask(ctx context.Context, taskID, sessionID string) error {
-	path := fmt.Sprintf("/api/daemon/tasks/%s/resume-begin", taskID)
+	path := fmt.Sprintf("/api/daemon/tasks/%s/resume-begin", url.PathEscape(taskID))
 	err := c.request(ctx, http.MethodPost, path, map[string]string{"session_id": sessionID}, nil)
 	if err != nil {
 		var stErr *StatusError
