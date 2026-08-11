@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	cloudRequestTimeout = 15 * time.Second
-	cloudReadAttempts   = 3
-	maxErrorBodyBytes   = 64 << 10
+	cloudRequestTimeout  = 15 * time.Second
+	cloudReadAttempts    = 3
+	maxErrorBodyBytes    = 64 << 10
+	maxResponseBodyBytes = 16 << 20
 )
 
 type RemoteTask struct {
@@ -135,10 +136,13 @@ func (c *CloudClient) List(ctx context.Context) ([]RemoteTask, error) {
 	var out struct {
 		Tasks []RemoteTask `json:"tasks"`
 	}
-	if err := json.Unmarshal(raw, &out); err != nil || out.Tasks == nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		if err := json.Unmarshal(raw, &out.Tasks); err != nil {
 			return nil, newTaskError("invalid_cloud_response", "cloud returned an invalid task list", nil)
 		}
+	}
+	if out.Tasks == nil {
+		out.Tasks = []RemoteTask{}
 	}
 	for _, task := range out.Tasks {
 		if _, err := ParseTaskKey(task.Key().String()); err != nil {
@@ -265,20 +269,25 @@ func (c *CloudClient) doJSONOnce(ctx context.Context, key *TaskKey, method, endp
 		return newTaskError("cloud_unavailable", "cloud request failed", err)
 	}
 	defer resp.Body.Close()
-	limited := io.LimitReader(resp.Body, maxErrorBodyBytes+1)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		payload, _ := io.ReadAll(limited)
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
 		var envelope apiErrorEnvelope
 		if len(payload) <= maxErrorBodyBytes && json.Unmarshal(payload, &envelope) == nil && envelope.Error.Code != "" {
 			return newTaskError(envelope.Error.Code, envelope.Error.Message, nil)
 		}
 		return &TaskError{Code: httpErrorCode(resp.StatusCode), Message: fmt.Sprintf("cloud request failed with status %d", resp.StatusCode)}
 	}
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
+	if err != nil {
+		return newTaskError("invalid_cloud_response", "cannot read cloud response", err)
+	}
+	if len(payload) > maxResponseBodyBytes {
+		return newTaskError("invalid_cloud_response", "cloud response exceeds the size limit", nil)
+	}
 	if out == nil {
-		_, _ = io.Copy(io.Discard, limited)
 		return nil
 	}
-	decoder := json.NewDecoder(limited)
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	if err := decoder.Decode(out); err != nil {
 		return newTaskError("invalid_cloud_response", "cloud returned invalid JSON", nil)
 	}

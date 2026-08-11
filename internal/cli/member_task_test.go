@@ -111,6 +111,21 @@ func TestPrepareRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {
 	}
 }
 
+func TestDeleteRequestRejectsInvalidBooleanFlagValue(t *testing.T) {
+	_, err := parseMemberTaskRequest([]string{"delete", "cloud/ws/node/worker", "--force-discard=garbage"})
+	var taskErr *membertask.TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != "invalid_arguments" {
+		t.Fatalf("parseMemberTaskRequest error = %#v", err)
+	}
+}
+
+func TestWriteTaskTextRejectsMissingCommand(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeTaskText(&out, &taskCommandData{}); err == nil {
+		t.Fatal("writeTaskText accepted missing command")
+	}
+}
+
 func TestPrepareCommandResolvesWorkDirBeforeTransport(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
 	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key}}}

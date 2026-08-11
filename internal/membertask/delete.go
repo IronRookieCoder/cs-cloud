@@ -2,10 +2,14 @@ package membertask
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +29,14 @@ type DeletePreview struct {
 	RequiresForce     bool       `json:"requires_force"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 }
+
+type deleteReceipt struct {
+	ID        string    `json:"id"`
+	Key       TaskKey   `json:"key"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+var deletePreviewIDPattern = regexp.MustCompile(`^[0-9a-f]{24}$`)
 
 func (s *Service) PreviewDelete(ctx context.Context, key TaskKey, mode DeleteMode) (DeletePreview, error) {
 	unlock := s.lockTask(key)
@@ -77,7 +89,17 @@ func (s *Service) ConfirmDelete(ctx context.Context, key TaskKey, previewID stri
 	if err != nil {
 		return err
 	}
-	if !found || record.DeletePreview == nil || record.DeletePreview.ID != previewID {
+	if !found {
+		completed, err := s.loadDeleteReceipt(key, previewID)
+		if err != nil {
+			return err
+		}
+		if completed {
+			return nil
+		}
+		return newTaskError("preview_stale", "delete preview does not match local task", nil)
+	}
+	if record.DeletePreview == nil || record.DeletePreview.ID != previewID {
 		return newTaskError("preview_stale", "delete preview does not match local task", nil)
 	}
 	preview := *record.DeletePreview
@@ -134,7 +156,6 @@ func refreshDeleteFacts(record TaskRecord) (TaskRecord, error) {
 }
 
 func (s *Service) RecoverDeleteJournals(ctx context.Context) error {
-	_ = ctx
 	root := s.store.Layout().DeleteJournalsRoot()
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -144,22 +165,72 @@ func (s *Service) RecoverDeleteJournals(ctx context.Context) error {
 		return newTaskError("local_task_store_unavailable", "cannot list delete journals", err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var recoveryErr error
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return appendRecoveryError(recoveryErr, err)
+		}
+		path := filepath.Join(root, entry.Name())
+		if filepath.Ext(entry.Name()) == ".done" {
+			if err := s.removeExpiredDeleteReceipt(path); err != nil {
+				recoveryErr = appendRecoveryError(recoveryErr, err)
+			}
+			continue
+		}
+		if filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		var journal DeleteJournal
-		if err := s.store.readJSON(filepath.Join(root, entry.Name()), &journal); err != nil {
-			return newTaskError("local_task_store_corrupt", "delete journal is invalid", err)
+		if err := s.store.readJSON(path, &journal); err != nil {
+			recoveryErr = appendRecoveryError(recoveryErr, newTaskError("local_task_store_corrupt", "delete journal is invalid", err))
+			recoveryErr = appendRecoveryError(recoveryErr, quarantineCorruptJournal(path))
+			continue
 		}
-		if err := s.continueDelete(journal); err != nil {
-			return err
+		unlock := s.lockTask(journal.Key)
+		err := s.continueDelete(journal)
+		unlock()
+		if err != nil {
+			recoveryErr = appendRecoveryError(recoveryErr, err)
 		}
 	}
-	return nil
+	return recoveryErr
+}
+
+func quarantineCorruptJournal(path string) error {
+	for suffix := 0; ; suffix++ {
+		target := path + ".corrupt"
+		if suffix > 0 {
+			target += "." + strconv.Itoa(suffix)
+		}
+		if _, err := os.Stat(target); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return newTaskError("local_task_store_unavailable", "cannot inspect corrupt journal quarantine", err)
+		}
+		if err := os.Rename(path, target); err != nil {
+			return newTaskError("local_task_store_unavailable", "cannot quarantine corrupt journal", err)
+		}
+		return nil
+	}
+}
+
+func appendRecoveryError(current, next error) error {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		return next
+	}
+	return errors.Join(current, next)
 }
 
 func (s *Service) continueDelete(journal DeleteJournal) error {
+	if err := validateJournalID(journal.ID); err != nil {
+		return err
+	}
 	originalRoot := journal.OriginalRoot
 	if originalRoot == "" {
 		originalRoot = s.store.Layout().TasksRoot()
@@ -226,7 +297,75 @@ func (s *Service) continueDelete(journal DeleteJournal) error {
 		}
 	}
 	if journal.Phase == DeletePhaseCompleted {
+		if deletePreviewIDPattern.MatchString(journal.ID) {
+			if err := s.saveDeleteReceipt(deleteReceipt{ID: journal.ID, Key: journal.Key, ExpiresAt: s.now().UTC().Add(24 * time.Hour)}); err != nil {
+				return err
+			}
+		}
 		return s.removeDeleteJournal(journal.ID)
+	}
+	return nil
+}
+
+func (s *Service) saveDeleteReceipt(receipt deleteReceipt) error {
+	if !deletePreviewIDPattern.MatchString(receipt.ID) {
+		return newTaskError("local_task_store_corrupt", "delete receipt identity is invalid", nil)
+	}
+	if _, err := ParseTaskKey(receipt.Key.String()); err != nil {
+		return newTaskError("local_task_store_corrupt", "delete receipt task identity is invalid", err)
+	}
+	if err := os.MkdirAll(s.store.Layout().DeleteJournalsRoot(), 0o700); err != nil {
+		return newTaskError("local_task_store_unavailable", "cannot create delete receipt directory", err)
+	}
+	return s.store.writeJSON(filepath.Join(s.store.Layout().DeleteJournalsRoot(), receipt.ID+".done"), receipt)
+}
+
+func (s *Service) loadDeleteReceipt(key TaskKey, previewID string) (bool, error) {
+	if !deletePreviewIDPattern.MatchString(previewID) {
+		return false, nil
+	}
+	path := filepath.Join(s.store.Layout().DeleteJournalsRoot(), previewID+".done")
+	var receipt deleteReceipt
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || json.Unmarshal(b, &receipt) != nil {
+		return false, newTaskError("local_task_store_corrupt", "delete receipt is invalid", err)
+	}
+	if receipt.ID != previewID || receipt.Key != key {
+		return false, newTaskError("local_task_store_corrupt", "delete receipt identity does not match", nil)
+	}
+	if !s.now().Before(receipt.ExpiresAt) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, newTaskError("local_task_store_unavailable", "cannot remove expired delete receipt", err)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Service) removeExpiredDeleteReceipt(path string) error {
+	var receipt deleteReceipt
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return newTaskError("local_task_store_unavailable", "cannot read delete receipt", err)
+	}
+	if err := json.Unmarshal(b, &receipt); err != nil {
+		return newTaskError("local_task_store_corrupt", "delete receipt is invalid", err)
+	}
+	filenameID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if receipt.ID != filenameID || !deletePreviewIDPattern.MatchString(receipt.ID) {
+		return newTaskError("local_task_store_corrupt", "delete receipt identity does not match", nil)
+	}
+	if _, err := ParseTaskKey(receipt.Key.String()); err != nil {
+		return newTaskError("local_task_store_corrupt", "delete receipt task identity is invalid", err)
+	}
+	if s.now().Before(receipt.ExpiresAt) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return newTaskError("local_task_store_unavailable", "cannot remove expired delete receipt", err)
 	}
 	return nil
 }
@@ -273,6 +412,9 @@ func directoryIdentity(record TaskRecord) string {
 }
 
 func (s *Service) saveDeleteJournal(journal DeleteJournal) error {
+	if err := validateJournalID(journal.ID); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.store.Layout().DeleteJournalsRoot(), 0o700); err != nil {
 		return newTaskError("local_task_store_unavailable", "cannot create delete journal directory", err)
 	}
@@ -280,6 +422,9 @@ func (s *Service) saveDeleteJournal(journal DeleteJournal) error {
 }
 
 func (s *Service) removeDeleteJournal(id string) error {
+	if err := validateJournalID(id); err != nil {
+		return err
+	}
 	err := os.Remove(filepath.Join(s.store.Layout().DeleteJournalsRoot(), id+".json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return newTaskError("local_task_store_unavailable", "cannot remove delete journal", err)

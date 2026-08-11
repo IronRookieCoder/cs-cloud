@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -31,16 +32,19 @@ type PrepareOptions struct {
 	WorkDir string `json:"workdir,omitempty"`
 }
 
-func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey, options ...PrepareOptions) (LocalTransition, error) {
+var gitCommandContext = exec.CommandContext
+
+var (
+	gitObjectIDPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`)
+	gitANSISequence    = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+	gitURLUserInfo     = regexp.MustCompile(`(https://)[^/@\s]+@`)
+)
+
+const maxGitDiagnosticBytes = 4 << 10
+
+func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey, option PrepareOptions) (LocalTransition, error) {
 	unlock := s.lockTask(key)
 	defer unlock()
-	if len(options) > 1 {
-		return LocalTransition{}, newTaskError("invalid_arguments", "prepare accepts one options value", nil)
-	}
-	var option PrepareOptions
-	if len(options) == 1 {
-		option = options[0]
-	}
 
 	existing, found, err := s.store.LoadTask(key)
 	if err != nil {
@@ -83,7 +87,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	var archiveRoot string
 	if existing, found, err := s.store.LoadTask(key); err != nil {
 		return TaskRecord{}, err
-	} else if found {
+	} else if found && existing.Directory != "" {
 		if displayName == "" && existing.DisplayName != "" {
 			displayName, displaySource = existing.DisplayName, existing.DisplayNameSource
 		}
@@ -116,7 +120,13 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		if versionErr != nil {
 			return TaskRecord{}, versionErr
 		}
-		if oldAttempt != remote.Attempt && existing.Directory != "" {
+		if remote.Attempt < oldAttempt {
+			return TaskRecord{}, newTaskError("invalid_cloud_response", "cloud task attempt moved backwards", nil)
+		}
+		if remote.Attempt > oldAttempt && existing.Directory != "" {
+			if existing.Operation != nil && existing.Operation.Status != OperationCompleted {
+				return TaskRecord{}, newTaskError("operation_recovery_required", "accepted operation must be recovered before rework", nil)
+			}
 			existing.Attempt = remote.Attempt
 			existing.RemoteVersion = versionString(remote.RemoteTask)
 			existing.CloudMaterialDigest = remote.MaterialDigest
@@ -174,7 +184,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return TaskRecord{}, newTaskError("local_task_store_unavailable", "cannot create task parent directory", err)
 	}
-	if options.WorkDir != "" {
+	if !samePath(preparationRoot, s.store.Layout().TasksRoot()) {
 		if err := ensureManagedTaskRoot(preparationRoot); err != nil {
 			return TaskRecord{}, err
 		}
@@ -239,7 +249,6 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 }
 
 func (s *Service) RecoverPrepareJournals(ctx context.Context) error {
-	_ = ctx
 	root := s.store.Layout().PrepareJournalsRoot()
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -249,23 +258,35 @@ func (s *Service) RecoverPrepareJournals(ctx context.Context) error {
 		return newTaskError("local_task_store_unavailable", "cannot list prepare journals", err)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var recoveryErr error
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return appendRecoveryError(recoveryErr, err)
+		}
 		var journal PrepareJournal
 		path := filepath.Join(root, entry.Name())
 		if err := s.store.readJSON(path, &journal); err != nil {
-			return newTaskError("local_task_store_corrupt", "prepare journal is invalid", err)
+			recoveryErr = appendRecoveryError(recoveryErr, newTaskError("local_task_store_corrupt", "prepare journal is invalid", err))
+			recoveryErr = appendRecoveryError(recoveryErr, quarantineCorruptJournal(path))
+			continue
 		}
-		if err := s.recoverPrepareJournal(journal); err != nil {
-			return err
+		unlock := s.lockTask(journal.Key)
+		err := s.recoverPrepareJournal(journal)
+		unlock()
+		if err != nil {
+			recoveryErr = appendRecoveryError(recoveryErr, err)
 		}
 	}
-	return nil
+	return recoveryErr
 }
 
 func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
+	if err := validateJournalID(journal.ID); err != nil {
+		return err
+	}
 	tasksRoot := journal.Root
 	if tasksRoot == "" {
 		tasksRoot = s.store.Layout().TasksRoot()
@@ -349,6 +370,13 @@ func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
 }
 
 func updatePreparedMetadata(store *Store, record TaskRecord, remote RemoteTaskContext) error {
+	root := record.PreparationRoot
+	if root == "" {
+		root = store.Layout().TasksRoot()
+	}
+	if err := ValidateContainedPath(root, record.Directory); err != nil {
+		return err
+	}
 	path := filepath.Join(record.Directory, "task.json")
 	var metadata preparedMetadata
 	b, err := os.ReadFile(path)
@@ -416,21 +444,51 @@ func cloneExactRepository(ctx context.Context, target string, repo RepositoryCon
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return newTaskError("unsafe_repository_url", "repository URL is invalid or contains credentials", nil)
 	}
+	if !gitObjectIDPattern.MatchString(repo.BaseSHA) {
+		return newTaskError("invalid_cloud_response", "repository base SHA is not a full object ID", nil)
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return err
+		return newTaskError("prepare_failed", "cannot create repository material directory", err)
 	}
-	cmd := exec.CommandContext(ctx, "git", "clone", "--no-checkout", "--", repo.CloneURL, target)
+	cmd := gitCommandContext(ctx, "git", "clone", "--no-checkout", "--", repo.CloneURL, target)
+	cmd.Env = nonInteractiveGitEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
-		_ = output
-		return newTaskError("prepare_failed", "repository clone failed", errors.New("git clone failed"))
+		return gitPreparationError("repository clone", output, err)
 	}
-	cmd = exec.CommandContext(ctx, "git", "checkout", "--detach", repo.BaseSHA)
+	cmd = gitCommandContext(ctx, "git", "checkout", "--detach", repo.BaseSHA)
 	cmd.Dir = target
+	cmd.Env = nonInteractiveGitEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
-		_ = output
-		return newTaskError("prepare_failed", "repository checkout failed", errors.New("git checkout failed"))
+		return gitPreparationError("repository checkout", output, err)
 	}
 	return nil
+}
+
+func nonInteractiveGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		if strings.EqualFold(name, "GIT_TERMINAL_PROMPT") || strings.EqualFold(name, "GIT_ASKPASS") {
+			continue
+		}
+		env = append(env, value)
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
+}
+
+func gitPreparationError(action string, output []byte, err error) error {
+	if len(output) > maxGitDiagnosticBytes {
+		output = output[:maxGitDiagnosticBytes]
+	}
+	diagnostic := strings.ToValidUTF8(string(output), "?")
+	diagnostic = gitANSISequence.ReplaceAllString(diagnostic, "")
+	diagnostic = gitURLUserInfo.ReplaceAllString(diagnostic, "$1")
+	diagnostic = strings.Join(strings.Fields(diagnostic), " ")
+	if diagnostic == "" {
+		diagnostic = "no diagnostic output"
+	}
+	cause := fmt.Errorf("%s: %s: %w", action, diagnostic, err)
+	return newTaskError("prepare_failed", action+" failed", cause)
 }
 
 func writePreparedFiles(store *Store, root string, metadata preparedMetadata, manifest Manifest) error {
@@ -482,6 +540,9 @@ func (s *Service) prepareTarget(key TaskKey, workDir string) (string, string, er
 	if err != nil {
 		return "", "", newTaskError("invalid_workdir", "cannot resolve prepare working directory links", err)
 	}
+	if err := ValidateContainedPath(s.store.Layout().StoreRoot(), resolved); err == nil {
+		return "", "", newTaskError("invalid_workdir", "prepare working directory cannot be inside the profile store", nil)
+	}
 	root := filepath.Join(resolved, ".cs-cloud-tasks")
 	return root, TaskDirIn(root, key), nil
 }
@@ -514,6 +575,9 @@ func samePath(left, right string) bool {
 }
 
 func (s *Service) savePrepareJournal(journal PrepareJournal) error {
+	if err := validateJournalID(journal.ID); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.store.Layout().PrepareJournalsRoot(), 0o700); err != nil {
 		return newTaskError("local_task_store_unavailable", "cannot create prepare journal directory", err)
 	}
@@ -521,9 +585,19 @@ func (s *Service) savePrepareJournal(journal PrepareJournal) error {
 }
 
 func (s *Service) removePrepareJournal(id string) error {
+	if err := validateJournalID(id); err != nil {
+		return err
+	}
 	err := os.Remove(filepath.Join(s.store.Layout().PrepareJournalsRoot(), id+".json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return newTaskError("local_task_store_unavailable", "cannot remove prepare journal", err)
+	}
+	return nil
+}
+
+func validateJournalID(id string) error {
+	if !taskKeyPartPattern.MatchString(id) {
+		return newTaskError("local_task_store_corrupt", "journal identity is invalid", nil)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -49,10 +50,12 @@ func serve(a *app.App) error {
 	if err := srv.Start(net.JoinHostPort(host, fmt.Sprintf("%d", port))); err != nil {
 		return err
 	}
-	if err := memberTasks.ReconcileAll(ctx); err != nil {
-		return fmt.Errorf("reconcile member tasks: %w", err)
-	}
-	if err := a.SaveServerURL(srv.URL()); err != nil {
+	if err := initializeStartedServer(srv, func() error {
+		if err := memberTasks.ReconcileAll(ctx); err != nil {
+			return fmt.Errorf("reconcile member tasks: %w", err)
+		}
+		return a.SaveServerURL(srv.URL())
+	}); err != nil {
 		return err
 	}
 
@@ -80,4 +83,16 @@ func serve(a *app.App) error {
 	fmt.Println()
 	printInfo("Shutting down...")
 	return srv.Shutdown(shutdownCtx)
+}
+
+func initializeStartedServer(srv *localserver.Server, initialize func() error) error {
+	if err := initialize(); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil {
+			return errors.Join(err, fmt.Errorf("shutdown server after initialization failure: %w", shutdownErr))
+		}
+		return err
+	}
+	return nil
 }

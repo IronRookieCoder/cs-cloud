@@ -55,6 +55,26 @@ func TestMemberTaskClientRetriesTransientReadAtMostThreeTimes(t *testing.T) {
 	}
 }
 
+func TestMemberTaskClientDoesNotDecodeResponsePairedWithTransportError(t *testing.T) {
+	var reads atomic.Int32
+	client := &memberTaskClient{
+		ensureDaemon: func(context.Context) error { return nil },
+		resolve:      func() (string, string, error) { return "http://127.0.0.1:9876", "secret", nil },
+		do: func(req *http.Request) (*http.Response, error) {
+			body := &countingReadCloser{reader: strings.NewReader(`{"ok":true,"data":[]}`), reads: &reads}
+			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, errors.New("transport failed after headers")
+		},
+	}
+	_, err := client.Execute(context.Background(), memberTaskRequest{Command: "list"})
+	var taskErr *membertask.TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != "local_transport_unavailable" {
+		t.Fatalf("Execute error = %#v", err)
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("response body read %d times despite transport error", reads.Load())
+	}
+}
+
 func TestTaskConfirmRecoveryRetriesSamePreviewAfterResponseLoss(t *testing.T) {
 	var attempts atomic.Int32
 	client := &memberTaskClient{
@@ -98,3 +118,15 @@ func TestMemberTaskClientDecodesPrepareTransitionFacts(t *testing.T) {
 func taskHTTPResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
 }
+
+type countingReadCloser struct {
+	reader io.Reader
+	reads  *atomic.Int32
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	r.reads.Add(1)
+	return r.reader.Read(p)
+}
+
+func (r *countingReadCloser) Close() error { return nil }

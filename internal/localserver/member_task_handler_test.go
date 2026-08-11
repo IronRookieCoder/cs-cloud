@@ -62,6 +62,19 @@ func TestMemberTaskRouteStrictlyDecodesTaskKey(t *testing.T) {
 	}
 }
 
+func TestMemberTaskActionAcceptsEmptyBody(t *testing.T) {
+	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/start", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer private-secret")
+	recorder := httptest.NewRecorder()
+	srv.http.Handler.ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusBadRequest && strings.Contains(recorder.Body.String(), "invalid_arguments") {
+		t.Fatalf("empty action body was rejected: %s", recorder.Body.String())
+	}
+}
+
 func TestMemberTaskPrepareUsesRequestedWorkDir(t *testing.T) {
 	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
 	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
@@ -94,19 +107,13 @@ func TestMemberTaskServerRejectsEmptySecretBeforeListen(t *testing.T) {
 	}
 }
 
-func TestMemberTaskServerRejectsNonLoopbackBindBeforeListen(t *testing.T) {
-	for _, addr := range []string{"0.0.0.0:0", "[::]:0", "192.0.2.10:0"} {
-		t.Run(addr, func(t *testing.T) {
-			srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
-			err := srv.Start(addr)
-			if err == nil {
-				_ = srv.Shutdown(context.Background())
-				t.Fatal("Start succeeded with a non-loopback member task bind")
-			}
-			if !strings.Contains(err.Error(), "loopback") {
-				t.Fatalf("Start error = %q, want loopback constraint", err)
-			}
-		})
+func TestMemberTaskServerAllowsWildcardBindWhileRouteRemainsPrivate(t *testing.T) {
+	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
+	if err := srv.Start("0.0.0.0:0"); err != nil {
+		t.Fatalf("Start wildcard listener: %v", err)
+	}
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 

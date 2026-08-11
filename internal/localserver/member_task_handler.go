@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -97,7 +98,7 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 	var request memberTaskActionRequest
 	if r.Body != nil {
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-		if err := decoder.Decode(&request); err != nil && !errors.Is(err, context.Canceled) {
+		if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 			writeErr(w, http.StatusBadRequest, "invalid_arguments", "request body is invalid")
 			return
 		}

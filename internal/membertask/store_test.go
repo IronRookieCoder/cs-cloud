@@ -4,7 +4,47 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 )
+
+func TestStoreRejectsTaskRecordWithInvalidKey(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	err := store.SaveTask(TaskRecord{Key: TaskKey{CloudInstanceID: "../escape", WorkspaceID: "ws", NodeRunID: "node", Role: RoleWorker}})
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != "invalid_task_key" {
+		t.Fatalf("SaveTask error = %#v", err)
+	}
+}
+
+func TestStoresForSameProfileShareIndexLock(t *testing.T) {
+	root := t.TempDir()
+	first, _ := OpenStore(root)
+	second, _ := OpenStore(root)
+	if first.mu != second.mu {
+		t.Fatal("stores for the same profile do not share an index lock")
+	}
+	first.mu.Lock()
+	result := make(chan error, 1)
+	go func() {
+		key, _ := ParseTaskKey("cloud/ws/node/worker")
+		result <- second.SaveTask(TaskRecord{Key: key})
+	}()
+	select {
+	case err := <-result:
+		first.mu.Unlock()
+		t.Fatalf("second store bypassed profile index lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	first.mu.Unlock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second store did not resume after profile index lock release")
+	}
+}
 
 func TestStoreKeepsOldIndexWhenReplaceFails(t *testing.T) {
 	store, err := OpenStore(t.TempDir())

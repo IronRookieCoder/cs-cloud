@@ -5,11 +5,40 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"cs-cloud/internal/provider"
 )
+
+func TestCloudClientDecodesLargeSuccessfulTaskContext(t *testing.T) {
+	content := strings.Repeat("material", 16<<10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/member/tasks/node/worker/context" {
+			t.Errorf("request = %s %s, want GET /api/member/tasks/node/worker/context", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(RemoteTaskContext{
+			RemoteTask: RemoteTask{Ref: TaskKey{CloudInstanceID: "cloud", WorkspaceID: "ws", NodeRunID: "node", Role: RoleWorker}},
+			Materials:  []MaterialSource{{Identity: "requirements", Content: content}},
+		})
+	}))
+	defer srv.Close()
+
+	key, err := ParseTaskKey("cloud/ws/node/worker")
+	if err != nil {
+		t.Fatalf("ParseTaskKey: %v", err)
+	}
+	contextValue, err := NewCloudClient(srv.URL, testCredentials).GetContext(context.Background(), key)
+	if err != nil {
+		t.Fatalf("GetContext: %v", err)
+	}
+	if len(contextValue.Materials) != 1 || contextValue.Materials[0].Content != content {
+		t.Fatalf("large material content was not decoded")
+	}
+}
 
 func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
@@ -85,6 +114,26 @@ func TestCloudClientListsTasksWithBearerAuthAndRetriesReadFailure(t *testing.T) 
 	}
 	if attempts.Load() != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestCloudClientTreatsMissingOrNullTasksAsEmptyList(t *testing.T) {
+	for _, body := range []string{`{}`, `{"tasks":null}`} {
+		t.Run(body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/member/tasks" {
+					t.Errorf("request = %s %s, want GET /api/member/tasks", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			tasks, err := NewCloudClient(srv.URL, testCredentials).List(context.Background())
+			if err != nil || tasks == nil || len(tasks) != 0 {
+				t.Fatalf("List tasks=%+v err=%v", tasks, err)
+			}
+		})
 	}
 }
 

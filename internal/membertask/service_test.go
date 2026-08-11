@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"cs-cloud/internal/provider"
 )
@@ -38,6 +40,84 @@ func TestServiceGetAuthorityErrorsAreNotOfflineSuccess(t *testing.T) {
 	}
 }
 
+func TestServiceStartWaitsForTaskLock(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if err := store.SaveTask(TaskRecord{Key: key, Prepared: true, Activity: ActivityPrepared}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, nil)
+	unlock := svc.lockTask(key)
+	result := make(chan error, 1)
+	go func() {
+		_, err := svc.Start(context.Background(), key)
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		unlock()
+		t.Fatalf("Start completed while task lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not resume after task lock was released")
+	}
+}
+
+func TestServiceListReloadsTaskAfterAcquiringLock(t *testing.T) {
+	requestStarted := make(chan struct{})
+	allowResponse := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-allowResponse
+		_, _ = w.Write([]byte(`{"tasks":[{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned"}]}`))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	initial := TaskRecord{Key: key, Prepared: true, Activity: ActivityPrepared}
+	if err := store.SaveTask(initial); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	unlock := svc.lockTask(key)
+	result := make(chan error, 1)
+	go func() {
+		_, err := svc.List(context.Background())
+		result <- err
+	}()
+	<-requestStarted
+	updated := initial
+	updated.Activity = ActivityActive
+	if err := store.SaveTask(updated); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	close(allowResponse)
+
+	select {
+	case err := <-result:
+		unlock()
+		t.Fatalf("List completed while task lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	if err := <-result; err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	record, _, err := store.LoadTask(key)
+	if err != nil || record.Activity != ActivityActive {
+		t.Fatalf("record = %+v, err = %v", record, err)
+	}
+}
+
 func TestServiceListPersistsVerificationAndMakesMissingLocalTasksReadOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"tasks":[{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"both","role":"worker","attempt":2,"task_version":3,"context_version":4,"cloud_status":"assigned"}]}`))
@@ -46,7 +126,7 @@ func TestServiceListPersistsVerificationAndMakesMissingLocalTasksReadOnly(t *tes
 	store, _ := OpenStore(t.TempDir())
 	present, _ := ParseTaskKey("cloud/ws/both/worker")
 	missing, _ := ParseTaskKey("cloud/ws/missing/worker")
-	if err := store.SaveTask(TaskRecord{Key: present, Prepared: true}); err != nil {
+	if err := store.SaveTask(TaskRecord{Key: present, Prepared: true, ReadOnly: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveTask(TaskRecord{Key: missing, Prepared: true}); err != nil {
@@ -59,12 +139,19 @@ func TestServiceListPersistsVerificationAndMakesMissingLocalTasksReadOnly(t *tes
 		t.Fatal(err)
 	}
 	presentRecord, _, _ := store.LoadTask(present)
-	if presentRecord.RemoteVersion != "2:3:4" || presentRecord.LastVerifiedAt == nil || !presentRecord.LastVerifiedAt.Equal(now) {
+	if presentRecord.RemoteVersion != "2:3:4" || presentRecord.LastVerifiedAt == nil || !presentRecord.LastVerifiedAt.Equal(now) || presentRecord.ReadOnly {
 		t.Fatalf("present record = %+v", presentRecord)
 	}
 	missingRecord, _, _ := store.LoadTask(missing)
 	if !missingRecord.ReadOnly || missingRecord.CloudStateUnverified {
 		t.Fatalf("missing record = %+v", missingRecord)
+	}
+}
+
+func TestNormalizeDisplayNameBoundsUnicodeRunes(t *testing.T) {
+	got := normalizeDisplayName(strings.Repeat("界", 200))
+	if utf8.RuneCountInString(got) != maxDisplayNameRunes {
+		t.Fatalf("display name rune count = %d, want %d", utf8.RuneCountInString(got), maxDisplayNameRunes)
 	}
 }
 

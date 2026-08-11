@@ -4,6 +4,7 @@ package membertask
 
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -44,6 +45,9 @@ func ValidateProfilePermissions(root, secretPath string) error {
 		if err != nil || sd == nil {
 			return newTaskError("insecure_profile_permissions", "cannot inspect profile DACL", err)
 		}
+		if !isDACLProtected(sd) {
+			return newTaskError("insecure_profile_permissions", "profile DACL inherits permissions", nil)
+		}
 		dacl, _, err := sd.DACL()
 		if err != nil || dacl == nil {
 			return newTaskError("insecure_profile_permissions", "profile has no protected DACL", err)
@@ -64,6 +68,22 @@ func ValidateProfilePermissions(root, secretPath string) error {
 		}
 	}
 	return nil
+}
+
+func isDACLProtected(sd *windows.SECURITY_DESCRIPTOR) bool {
+	if sd == nil {
+		return false
+	}
+	sddl := sd.String()
+	start := strings.Index(sddl, "D:")
+	if start < 0 {
+		return false
+	}
+	flags := sddl[start+2:]
+	if end := strings.IndexByte(flags, '('); end >= 0 {
+		flags = flags[:end]
+	}
+	return strings.Contains(flags, "P")
 }
 
 func currentUserSID() (string, error) {

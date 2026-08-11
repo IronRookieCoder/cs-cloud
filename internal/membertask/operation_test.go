@@ -162,6 +162,12 @@ func TestRecoverOperationUsesOriginalOperationAndMarksCompleted(t *testing.T) {
 	}
 }
 
+func TestParseRemoteVersionRejectsTrailingInput(t *testing.T) {
+	if _, _, _, err := parseRemoteVersion("1:2:3garbage"); err == nil {
+		t.Fatal("parseRemoteVersion accepted trailing input")
+	}
+}
+
 func TestRecoverOperationSavesRepreviewRequiredWithoutPublishingOrReporting(t *testing.T) {
 	var reportCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

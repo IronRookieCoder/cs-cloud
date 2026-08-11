@@ -97,8 +97,10 @@ type DeleteJournal struct {
 type Store struct {
 	layout  Layout
 	replace replaceFunc
-	mu      sync.Mutex
+	mu      *sync.Mutex
 }
+
+var storeIndexLocks sync.Map
 
 func OpenStore(profileRoot string) (*Store, error) {
 	if profileRoot == "" {
@@ -108,7 +110,12 @@ func OpenStore(profileRoot string) (*Store, error) {
 	if err := os.MkdirAll(layout.StoreRoot(), 0o700); err != nil {
 		return nil, newTaskError("local_task_store_unavailable", "cannot create task store", err)
 	}
-	return &Store{layout: layout, replace: atomicReplace}, nil
+	indexPath, err := filepath.Abs(filepath.Join(layout.StoreRoot(), "index.json"))
+	if err != nil {
+		return nil, newTaskError("local_task_store_unavailable", "cannot resolve task store index", err)
+	}
+	lock, _ := storeIndexLocks.LoadOrStore(filepath.Clean(indexPath), &sync.Mutex{})
+	return &Store{layout: layout, replace: atomicReplace, mu: lock.(*sync.Mutex)}, nil
 }
 
 func (s *Store) Layout() Layout    { return s.layout }
@@ -157,6 +164,12 @@ func (s *Store) saveUnlocked(index Index) error {
 	if index.Tasks == nil {
 		index.Tasks = map[string]TaskRecord{}
 	}
+	for raw, record := range index.Tasks {
+		key, err := ParseTaskKey(raw)
+		if err != nil || key != record.Key {
+			return newTaskError("invalid_task_key", "task store record identity is invalid", err)
+		}
+	}
 	b, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return newTaskError("local_task_store_unavailable", "cannot encode task store", err)
@@ -170,6 +183,10 @@ func (s *Store) saveUnlocked(index Index) error {
 func (s *Store) SaveTask(record TaskRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key, err := ParseTaskKey(record.Key.String())
+	if err != nil || key != record.Key {
+		return newTaskError("invalid_task_key", "task record identity is invalid", err)
+	}
 	index, err := s.loadUnlocked()
 	if err != nil {
 		return err

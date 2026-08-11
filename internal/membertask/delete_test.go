@@ -2,6 +2,7 @@ package membertask
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,25 @@ func TestDeleteTaskPreparedInCustomWorkDir(t *testing.T) {
 	}
 	if _, found, err := store.LoadTask(key); err != nil || found {
 		t.Fatalf("task record found=%t err=%v", found, err)
+	}
+	entries, err := filepath.Glob(filepath.Join(transition.PreparationRoot, ".quarantine", "*"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("custom quarantine not cleaned: %v, err=%v", entries, err)
+	}
+}
+
+func TestConfirmDeleteIsIdempotentForCompletedPreview(t *testing.T) {
+	store, key, _ := seedDeleteTask(t, TaskRecord{Ended: true})
+	svc := NewService(store, nil)
+	preview, err := svc.PreviewDelete(context.Background(), key, DeleteModeForceDiscard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ConfirmDelete(context.Background(), key, preview.ID); err != nil {
+		t.Fatalf("first ConfirmDelete: %v", err)
+	}
+	if err := svc.ConfirmDelete(context.Background(), key, preview.ID); err != nil {
+		t.Fatalf("repeated ConfirmDelete: %v", err)
 	}
 }
 
@@ -171,6 +191,84 @@ func TestRecoverDeleteJournalContinuesQuarantinedDelete(t *testing.T) {
 	}
 	if _, found, _ := store.LoadTask(key); found {
 		t.Fatal("task index record remains")
+	}
+}
+
+func TestRecoverDeleteJournalsContinuesAfterCorruptEntry(t *testing.T) {
+	store, key, dir := seedDeleteTask(t, TaskRecord{Ended: true})
+	quarantine := filepath.Join(store.Layout().QuarantineRoot(), "delete-1")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, quarantine); err != nil {
+		t.Fatal(err)
+	}
+	root := store.Layout().DeleteJournalsRoot()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "000-corrupt.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal := DeleteJournal{ID: "delete-1", Key: key, Phase: DeletePhaseQuarantined, Original: dir, Quarantine: quarantine, CreatedAt: time.Now()}
+	if err := store.writeJSON(filepath.Join(root, journal.ID+".json"), journal); err != nil {
+		t.Fatal(err)
+	}
+
+	err := NewService(store, nil).RecoverDeleteJournals(context.Background())
+	if err == nil {
+		t.Fatal("RecoverDeleteJournals error = nil, want corrupt journal error")
+	}
+	if _, statErr := os.Stat(quarantine); !os.IsNotExist(statErr) {
+		t.Fatalf("valid quarantine remains after corrupt journal: %v", statErr)
+	}
+	if _, found, loadErr := store.LoadTask(key); loadErr != nil || found {
+		t.Fatalf("task record found=%t err=%v", found, loadErr)
+	}
+}
+
+func TestRecoverDeleteJournalsPreservesExistingCorruptQuarantine(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	root := store.Layout().DeleteJournalsRoot()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "broken.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existing := path + ".corrupt"
+	if err := os.WriteFile(existing, []byte("previous"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(store, nil).RecoverDeleteJournals(context.Background()); err == nil {
+		t.Fatal("RecoverDeleteJournals error = nil, want corrupt journal error")
+	}
+	content, err := os.ReadFile(existing)
+	if err != nil || string(content) != "previous" {
+		t.Fatalf("existing quarantine changed: content=%q err=%v", content, err)
+	}
+	if _, err := os.Stat(path + ".corrupt.1"); err != nil {
+		t.Fatalf("new corrupt journal was not quarantined separately: %v", err)
+	}
+}
+
+func TestRecoverDeleteJournalsRemovesExpiredReceipts(t *testing.T) {
+	store, key, _ := seedDeleteTask(t, TaskRecord{Ended: true})
+	svc := NewService(store, nil)
+	svc.now = func() time.Time { return time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC) }
+	receipt := deleteReceipt{ID: "0123456789abcdef01234567", Key: key, ExpiresAt: svc.now().Add(-time.Minute)}
+	if err := svc.saveDeleteReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.Layout().DeleteJournalsRoot(), receipt.ID+".done")
+
+	if err := svc.RecoverDeleteJournals(context.Background()); err != nil {
+		t.Fatalf("RecoverDeleteJournals: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired receipt remains: %v", err)
 	}
 }
 

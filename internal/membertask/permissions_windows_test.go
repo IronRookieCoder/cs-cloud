@@ -35,3 +35,20 @@ func TestProfilePermissionsRejectAnotherWindowsPrincipal(t *testing.T) {
 		t.Fatal("insecure Everyone DACL was accepted")
 	}
 }
+
+func TestWindowsDACLProtectionFlagIsRequired(t *testing.T) {
+	protected, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unprotected, err := windows.SecurityDescriptorFromString("D:(A;;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isDACLProtected(protected) {
+		t.Fatal("protected DACL was not recognized")
+	}
+	if isDACLProtected(unprotected) {
+		t.Fatal("unprotected DACL was accepted")
+	}
+}

@@ -17,3 +17,5 @@ func atomicReplace(oldPath, newPath string) error {
 	}
 	return windows.MoveFileEx(oldPtr, newPtr, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
+
+func syncParentDirectory(string) error { return nil }

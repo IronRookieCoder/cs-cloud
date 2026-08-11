@@ -115,6 +115,13 @@ func (a *App) memberTaskSecret() (string, error) {
 		if err := file.Close(); err != nil {
 			return "", fmt.Errorf("close member task secret: %w", err)
 		}
+		if err := membertask.SecureProfilePermissions(a.rootDir, path); err != nil {
+			return "", err
+		}
+		if err := membertask.ValidateProfilePermissions(a.rootDir, path); err != nil {
+			return "", err
+		}
+		return secret, nil
 	}
 	return "", fmt.Errorf("member task secret creation raced repeatedly")
 }

@@ -137,6 +137,9 @@ func VerifyManifest(root string, manifest Manifest) (Verification, error) {
 	}
 	for _, repo := range manifest.Repositories {
 		repoDir := filepath.Join(root, filepath.FromSlash(repo.RelativePath))
+		if err := ValidateContainedPath(root, repoDir); err != nil {
+			return Verification{}, err
+		}
 		repoChanged, head, err := verifyRepository(repoDir, repo)
 		if err != nil {
 			return Verification{}, err
@@ -203,6 +206,9 @@ func materialOrigin(source MaterialSource, relativePath string) *MaterialOrigin 
 		if origin.SourceURL == "" {
 			origin.SourceURL = sanitizeSourceURL(source.Repository.SourceURL)
 		}
+	}
+	if origin.Title == "" && origin.SourceURL == "" && origin.Provider == "" && origin.RepositoryIdentity == "" && origin.CommitSHA == "" {
+		return nil
 	}
 	return origin
 }

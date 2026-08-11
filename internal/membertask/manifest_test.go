@@ -35,6 +35,12 @@ func TestBuildAndVerifyManifestDetectsProtectedFileModification(t *testing.T) {
 	}
 }
 
+func TestMaterialOriginOmitsRelativePathOnlyMetadata(t *testing.T) {
+	if origin := materialOrigin(MaterialSource{}, "input/file.txt"); origin != nil {
+		t.Fatalf("materialOrigin = %+v, want nil", origin)
+	}
+}
+
 func TestVerifyManifestAllowsOutputFileModificationAndReportsDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "output", "result.md")
@@ -59,6 +65,17 @@ func TestVerifyManifestAllowsOutputFileModificationAndReportsDirty(t *testing.T)
 	}
 	if !verification.Dirty || len(verification.ChangedPaths) != 1 || verification.ChangedPaths[0] != "output/result.md" {
 		t.Fatalf("verification = %+v", verification)
+	}
+}
+
+func TestVerifyManifestRejectsRepositoryOutsideTaskRoot(t *testing.T) {
+	root := t.TempDir()
+	_, err := VerifyManifest(root, Manifest{Repositories: []RepositoryManifest{{
+		Identity: "outside", RelativePath: "../outside", BaseSHA: "deadbeef",
+	}}})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "unsafe_task_path" {
+		t.Fatalf("VerifyManifest error = %#v, want unsafe_task_path", err)
 	}
 }
 

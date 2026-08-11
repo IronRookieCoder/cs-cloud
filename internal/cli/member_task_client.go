@@ -64,13 +64,14 @@ func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskReques
 		attempts = 3
 	}
 	var response *http.Response
+	var requestErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		var reader io.Reader
 		if len(body) > 0 {
 			reader = bytes.NewReader(body)
 		}
-		httpRequest, err := http.NewRequestWithContext(ctx, method, base.String(), reader)
-		if err != nil {
+		httpRequest, buildErr := http.NewRequestWithContext(ctx, method, base.String(), reader)
+		if buildErr != nil {
 			return nil, &membertask.TaskError{Code: "local_transport_unavailable", Message: "cannot build private task request"}
 		}
 		httpRequest.Header.Set("Authorization", "Bearer "+secret)
@@ -78,12 +79,13 @@ func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskReques
 		if len(body) > 0 {
 			httpRequest.Header.Set("Content-Type", "application/json")
 		}
-		response, err = c.do(httpRequest)
-		if err == nil && (response.StatusCode < 500 || attempt == attempts) {
+		response, requestErr = c.do(httpRequest)
+		if requestErr == nil && (response.StatusCode < 500 || attempt == attempts) {
 			break
 		}
 		if response != nil {
 			_ = response.Body.Close()
+			response = nil
 		}
 		if attempt < attempts {
 			select {
@@ -93,7 +95,7 @@ func (c *memberTaskClient) Execute(ctx context.Context, request memberTaskReques
 			}
 		}
 	}
-	if err != nil || response == nil {
+	if requestErr != nil || response == nil {
 		return nil, &membertask.TaskError{Code: "local_transport_unavailable", Message: "private member task request failed"}
 	}
 	defer response.Body.Close()

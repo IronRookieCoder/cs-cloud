@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -47,6 +49,91 @@ func TestReworkReusesDirectoryAndKeepsLocalOutput(t *testing.T) {
 	}
 }
 
+func TestReworkDoesNotDiscardPendingOperation(t *testing.T) {
+	var attempt atomic.Int32
+	attempt.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := attempt.Load()
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":%d,"task_version":%d,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`, value, value)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if _, err := svc.Prepare(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ := store.LoadTask(key)
+	record.Operation = &Operation{ID: "operation-1", Status: OperationAccepted}
+	record.Ended = true
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+	attempt.Store(2)
+
+	_, err := svc.Prepare(context.Background(), key)
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "operation_recovery_required" {
+		t.Fatalf("Prepare error = %#v", err)
+	}
+	stored, _, _ := store.LoadTask(key)
+	if stored.Operation == nil || stored.Operation.ID != "operation-1" || !stored.Ended {
+		t.Fatalf("pending operation was discarded: %+v", stored)
+	}
+}
+
+func TestReworkRejectsDecreasingAttempt(t *testing.T) {
+	var attempt atomic.Int32
+	attempt.Store(2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := attempt.Load()
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":%d,"task_version":%d,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`, value, value)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if _, err := svc.Prepare(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	attempt.Store(1)
+	_, err := svc.Prepare(context.Background(), key)
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_cloud_response" {
+		t.Fatalf("Prepare error = %#v", err)
+	}
+	stored, _, _ := store.LoadTask(key)
+	if stored.Attempt != 2 {
+		t.Fatalf("stored attempt = %d, want 2", stored.Attempt)
+	}
+}
+
+func TestUpdatePreparedMetadataRejectsDirectoryOutsideManagedRoot(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	record := TaskRecord{Key: key, PreparationRoot: store.Layout().TasksRoot(), Directory: t.TempDir()}
+	err := updatePreparedMetadata(store, record, RemoteTaskContext{})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "unsafe_task_path" {
+		t.Fatalf("updatePreparedMetadata error = %#v", err)
+	}
+}
+
+func TestRemovePrepareJournalRejectsInvalidID(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, nil)
+	outside := filepath.Join(store.Layout().StoreRoot(), "outside.json")
+	if err := os.WriteFile(outside, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.removePrepareJournal("../outside"); err == nil {
+		t.Fatal("removePrepareJournal accepted invalid ID")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside journal was removed: %v", err)
+	}
+}
+
 func TestPrepareWithFactsReportsRepeatedPreparationAsAlreadyCompleted(t *testing.T) {
 	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`)
 	defer srv.Close()
@@ -54,11 +141,11 @@ func TestPrepareWithFactsReportsRepeatedPreparationAsAlreadyCompleted(t *testing
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 
-	first, err := svc.PrepareWithFacts(context.Background(), key)
+	first, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{})
 	if err != nil || !first.Performed || first.Outcome != OutcomeCompleted {
 		t.Fatalf("first = %+v, err=%v", first, err)
 	}
-	second, err := svc.PrepareWithFacts(context.Background(), key)
+	second, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{})
 	if err != nil || second.Performed || second.Outcome != OutcomeAlreadyCompleted || !second.Prepared {
 		t.Fatalf("second = %+v, err=%v", second, err)
 	}
@@ -160,6 +247,9 @@ func TestReprepareKeepsCustomDirectoryAndArchivesWithinManagedRoot(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(filepath.Join(first.PreparationRoot, ".gitignore")); err != nil {
+		t.Fatal(err)
+	}
 	contextVersion.Store(2)
 	second, err := svc.Prepare(context.Background(), key)
 	if err != nil {
@@ -168,12 +258,43 @@ func TestReprepareKeepsCustomDirectoryAndArchivesWithinManagedRoot(t *testing.T)
 	if second.Directory != first.Directory {
 		t.Fatalf("directory moved from %q to %q", first.Directory, second.Directory)
 	}
+	if _, err := os.Stat(filepath.Join(second.PreparationRoot, ".gitignore")); err != nil {
+		t.Fatalf("managed-root .gitignore was not restored: %v", err)
+	}
 	archive := filepath.Join(first.PreparationRoot, ".history", "cloud", "ws", "node-worker", "attempt-1-context-1")
 	if _, err := os.Stat(filepath.Join(archive, "input", "requirements.md")); err != nil {
 		t.Fatalf("managed-root archive missing: %v", err)
 	}
 	if entries, _ := filepath.Glob(filepath.Join(store.Layout().HistoryRoot(), "cloud", "ws", "node-worker", "*")); len(entries) != 0 {
 		t.Fatalf("custom task archived in profile history: %v", entries)
+	}
+}
+
+func TestPrepareWithWorkDirRepairsRecordWithEmptyDirectory(t *testing.T) {
+	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"]}`)
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	if err := store.SaveTask(TaskRecord{Key: key, Prepared: true}); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("PrepareWithFacts: %v", err)
+	}
+	if transition.Directory == "" || !transition.Prepared {
+		t.Fatalf("transition = %+v", transition)
+	}
+}
+
+func TestPrepareTargetRejectsWorkDirInsideProfileStore(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, nil)
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	_, _, err := svc.prepareTarget(key, store.Layout().StoreRoot())
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_workdir" {
+		t.Fatalf("prepareTarget error = %#v", err)
 	}
 }
 
@@ -265,6 +386,89 @@ func TestPrepareRejectsUnsafeRepositoryCloneURL(t *testing.T) {
 	}
 }
 
+func TestCloneExactRepositoryRejectsInvalidBaseSHABeforeGit(t *testing.T) {
+	err := cloneExactRepository(context.Background(), filepath.Join(t.TempDir(), "repo"), RepositoryContext{
+		CloneURL: "https://example.invalid/team/repo.git",
+		BaseSHA:  "--upload-pack=malicious",
+	})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_cloud_response" {
+		t.Fatalf("error = %#v, want invalid_cloud_response", err)
+	}
+}
+
+func TestCloneExactRepositoryDisablesInteractiveAuthentication(t *testing.T) {
+	previous := gitCommandContext
+	t.Cleanup(func() { gitCommandContext = previous })
+	t.Setenv("GO_WANT_GIT_HELPER", "1")
+	gitCommandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestGitHelperProcess", "--"}, args...)
+		return exec.CommandContext(ctx, os.Args[0], helperArgs...)
+	}
+
+	err := cloneExactRepository(context.Background(), filepath.Join(t.TempDir(), "repo"), RepositoryContext{
+		CloneURL: "https://gitea.example/team/repo.git",
+		BaseSHA:  strings.Repeat("a", 40),
+	})
+	if err != nil {
+		t.Fatalf("cloneExactRepository: %v", err)
+	}
+}
+
+func TestCloneExactRepositoryReturnsSanitizedBoundedGitDiagnostic(t *testing.T) {
+	previous := gitCommandContext
+	t.Cleanup(func() { gitCommandContext = previous })
+	t.Setenv("GO_WANT_GIT_HELPER", "1")
+	t.Setenv("GO_GIT_HELPER_FAIL", "1")
+	gitCommandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestGitHelperProcess", "--"}, args...)
+		return exec.CommandContext(ctx, os.Args[0], helperArgs...)
+	}
+
+	err := cloneExactRepository(context.Background(), filepath.Join(t.TempDir(), "repo"), RepositoryContext{
+		CloneURL: "https://gitea.example/team/repo.git",
+		BaseSHA:  strings.Repeat("a", 40),
+	})
+	te, ok := err.(*TaskError)
+	if !ok || !strings.Contains(te.Cause, "authentication rejected") {
+		t.Fatalf("error = %#v, want Git diagnostic", err)
+	}
+	if strings.Contains(te.Cause, "secret") || strings.Contains(te.Cause, "\x1b") {
+		t.Fatalf("unsafe Git diagnostic = %q", te.Cause)
+	}
+}
+
+func TestGitHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_GIT_HELPER") != "1" {
+		return
+	}
+	if value, ok := os.LookupEnv("GIT_TERMINAL_PROMPT"); !ok || value != "0" {
+		t.Fatalf("GIT_TERMINAL_PROMPT = %q, present=%t", value, ok)
+	}
+	if value, ok := os.LookupEnv("GIT_ASKPASS"); !ok || value != "" {
+		t.Fatalf("GIT_ASKPASS = %q, present=%t", value, ok)
+	}
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(os.Args) {
+		t.Fatal("git helper arguments are missing")
+	}
+	args := os.Args[separator+1:]
+	if os.Getenv("GO_GIT_HELPER_FAIL") == "1" {
+		t.Fatalf("\x1b[31mauthentication rejected for https://user:secret@gitea.example\x1b[0m")
+	}
+	if args[0] == "clone" {
+		if err := os.MkdirAll(args[len(args)-1], 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestPrepareMaterializesFilesAndPublishesAtomically(t *testing.T) {
 	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"requirements","kind":"file","source_version":"v1","relative_path":"input/requirements.md","role":"input_protected","content":"build it"},{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`)
 	defer srv.Close()
@@ -294,13 +498,17 @@ func TestPrepareWithWorkDirCreatesManagedTaskDirectory(t *testing.T) {
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	transition, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("PrepareWithFacts: %v", err)
 	}
-	want := filepath.Join(workDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
-	if transition.Directory != want || transition.PreparationRoot != filepath.Join(workDir, ".cs-cloud-tasks") {
+	want := filepath.Join(resolvedWorkDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
+	if transition.Directory != want || transition.PreparationRoot != filepath.Join(resolvedWorkDir, ".cs-cloud-tasks") {
 		t.Fatalf("transition = %+v, want directory %q", transition, want)
 	}
 	if _, err := os.Stat(filepath.Join(want, "input", "requirements.md")); err != nil {

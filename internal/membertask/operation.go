@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -114,6 +114,8 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey) (Preview, erro
 	if key.Role != RoleWorker {
 		return Preview{}, newTaskError("invalid_task_role", "only workers can preview a submission", nil)
 	}
+	unlock := s.lockTask(key)
+	defer unlock()
 	record, verification, err := s.loadVerifiedTask(key)
 	if err != nil {
 		return Preview{}, err
@@ -158,6 +160,8 @@ func (s *Service) PreviewReview(ctx context.Context, key TaskKey, decision, reas
 	if decision == "reject" && strings.TrimSpace(reason) == "" {
 		return Preview{}, newTaskError("invalid_arguments", "reject requires a reason", nil)
 	}
+	unlock := s.lockTask(key)
+	defer unlock()
 	record, verification, err := s.loadVerifiedTask(key)
 	if err != nil {
 		return Preview{}, err
@@ -237,6 +241,8 @@ func effectiveMaterialDigest(record TaskRecord) string {
 }
 
 func (s *Service) RecoverOperation(ctx context.Context, key TaskKey) (Operation, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
 		return Operation{}, err
@@ -409,12 +415,26 @@ func validatePreview(preview Preview, attempt int, taskVersion, contextVersion i
 }
 
 func parseRemoteVersion(raw string) (int, int64, int64, error) {
-	var attempt int
-	var taskVersion, contextVersion int64
-	if _, err := fmt.Sscanf(raw, "%d:%d:%d", &attempt, &taskVersion, &contextVersion); err != nil || attempt < 1 || taskVersion < 1 || contextVersion < 1 {
-		return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", err)
+	parts := strings.Split(raw, ":")
+	if len(parts) != 3 {
+		return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
 	}
-	return attempt, taskVersion, contextVersion, nil
+	values := make([]int64, 3)
+	for i, part := range parts {
+		if part == "" || strings.IndexFunc(part, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
+		}
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || value < 1 {
+			return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", err)
+		}
+		values[i] = value
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if values[0] > maxInt {
+		return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
+	}
+	return int(values[0]), values[1], values[2], nil
 }
 
 func repositoryByIdentity(manifest *Manifest, identity string) (RepositoryManifest, bool) {

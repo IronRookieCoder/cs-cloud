@@ -101,6 +101,9 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 	if data == nil {
 		return errors.New("task command data is missing")
 	}
+	if len(data.Command) < 2 {
+		return errors.New("task command is missing")
+	}
 	command := strings.Join(data.Command[1:], " ")
 	_, err := fmt.Fprintf(out, "%s\noutcome: %s\nperformed: %t\n", command, data.Outcome, data.Performed)
 	return err

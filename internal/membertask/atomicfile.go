@@ -8,6 +8,8 @@ import (
 
 type replaceFunc func(oldPath, newPath string) error
 
+var syncDirectory = syncParentDirectory
+
 func atomicWriteFile(path string, data []byte, replace replaceFunc) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -37,9 +39,8 @@ func atomicWriteFile(path string, data []byte, replace replaceFunc) (err error) 
 	if err := replace(tmpPath, path); err != nil {
 		return fmt.Errorf("replace %s: %w", filepath.Base(path), err)
 	}
-	if dirFile, openErr := os.Open(dir); openErr == nil {
-		_ = dirFile.Sync()
-		_ = dirFile.Close()
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
 	}
 	return nil
 }

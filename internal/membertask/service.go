@@ -30,6 +30,8 @@ const (
 	DisplayNameSourceIdentity DisplayNameSource = "task_identity"
 )
 
+const maxDisplayNameRunes = 128
+
 type Service struct {
 	store     *Store
 	cloud     *CloudClient
@@ -68,11 +70,16 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 			return nil, remoteErr
 		}
 		for raw, task := range merged {
-			record := *task.Local
-			record.Offline = true
-			record.CloudStateUnverified = true
-			if err := s.store.SaveTask(record); err != nil {
+			record, found, err := s.updateTaskForList(task.Key, func(record *TaskRecord) {
+				record.Offline = true
+				record.CloudStateUnverified = true
+			})
+			if err != nil {
 				return nil, err
+			}
+			if !found {
+				delete(merged, raw)
+				continue
 			}
 			task.Local = &record
 			task.Projection = projectRecord(record, "")
@@ -92,23 +99,28 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 			task = Task{Key: key}
 		}
 		task.Remote = &remoteTask
-		if name, source := displayNameFromRemote(remoteTask); name != "" && task.Local != nil {
-			record := *task.Local
-			record.DisplayName, record.DisplayNameSource = name, source
-			task.Local = &record
-		}
 		if task.Local != nil {
-			record := *task.Local
-			record.Offline = false
-			record.CloudStateUnverified = false
-			record.LastVerifiedAt = &now
-			record.RemoteVersion = versionString(remoteTask)
-			record.Attempt = remoteTask.Attempt
-			if err := s.store.SaveTask(record); err != nil {
+			record, found, err := s.updateTaskForList(key, func(record *TaskRecord) {
+				if name, source := displayNameFromRemote(remoteTask); name != "" {
+					record.DisplayName, record.DisplayNameSource = name, source
+				}
+				record.Offline = false
+				record.CloudStateUnverified = false
+				record.ReadOnly = false
+				record.LastVerifiedAt = &now
+				record.RemoteVersion = versionString(remoteTask)
+				record.Attempt = remoteTask.Attempt
+			})
+			if err != nil {
 				return nil, err
 			}
-			task.Local = &record
-			task.Projection = projectRecord(record, remoteTask.CloudStatus)
+			if found {
+				task.Local = &record
+				task.Projection = projectRecord(record, remoteTask.CloudStatus)
+			} else {
+				task.Local = nil
+				task.Projection = ProjectStatus(Facts{Role: key.Role, RemoteState: remoteTask.CloudStatus})
+			}
 		} else {
 			task.Projection = ProjectStatus(Facts{Role: key.Role, RemoteState: remoteTask.CloudStatus})
 		}
@@ -119,13 +131,18 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 		if _, ok := seen[raw]; ok || task.Local == nil {
 			continue
 		}
-		record := *task.Local
-		record.Offline = false
-		record.CloudStateUnverified = false
-		record.ReadOnly = true
-		record.LastVerifiedAt = &now
-		if err := s.store.SaveTask(record); err != nil {
+		record, found, err := s.updateTaskForList(task.Key, func(record *TaskRecord) {
+			record.Offline = false
+			record.CloudStateUnverified = false
+			record.ReadOnly = true
+			record.LastVerifiedAt = &now
+		})
+		if err != nil {
 			return nil, err
+		}
+		if !found {
+			delete(merged, raw)
+			continue
 		}
 		task.Local = &record
 		task.Projection = projectRecord(record, "")
@@ -138,7 +155,23 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 	return sortedTasks(merged), nil
 }
 
+func (s *Service) updateTaskForList(key TaskKey, update func(*TaskRecord)) (TaskRecord, bool, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+	record, found, err := s.store.LoadTask(key)
+	if err != nil || !found {
+		return record, found, err
+	}
+	update(&record)
+	if err := s.store.SaveTask(record); err != nil {
+		return TaskRecord{}, false, err
+	}
+	return record, true, nil
+}
+
 func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
 		return Task{}, err
@@ -199,7 +232,12 @@ func displayNameFromRemote(remote RemoteTask) (string, DisplayNameSource) {
 }
 
 func normalizeDisplayName(value string) string {
-	return strings.Join(strings.Fields(value), " ")
+	normalized := strings.Join(strings.Fields(value), " ")
+	runes := []rune(normalized)
+	if len(runes) > maxDisplayNameRunes {
+		normalized = string(runes[:maxDisplayNameRunes])
+	}
+	return normalized
 }
 
 func setTaskDisplay(task *Task) {
@@ -226,6 +264,8 @@ func isCloudUnavailable(err error) bool {
 }
 
 func (s *Service) Start(ctx context.Context, key TaskKey) (LocalTransition, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
@@ -248,6 +288,8 @@ func (s *Service) Start(ctx context.Context, key TaskKey) (LocalTransition, erro
 }
 
 func (s *Service) Pause(ctx context.Context, key TaskKey) (LocalTransition, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {
@@ -270,6 +312,8 @@ func (s *Service) Pause(ctx context.Context, key TaskKey) (LocalTransition, erro
 }
 
 func (s *Service) Refresh(ctx context.Context, key TaskKey) (TaskRecord, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
 	_ = ctx
 	record, found, err := s.store.LoadTask(key)
 	if err != nil {

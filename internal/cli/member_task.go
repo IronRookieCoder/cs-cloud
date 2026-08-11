@@ -213,6 +213,7 @@ func validateRequestTaskKey(request memberTaskRequest) (memberTaskRequest, error
 func parseMemberTaskFlags(args []string) (map[string]string, error) {
 	flags := make(map[string]string)
 	valueFlags := map[string]bool{"confirm": true, "decision": true, "reason": true, "workdir": true}
+	booleanFlags := map[string]bool{"force-discard": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "--") || arg == "--" {
@@ -231,6 +232,9 @@ func parseMemberTaskFlags(args []string) (map[string]string, error) {
 		}
 		if _, exists := flags[name]; exists || name == "" || value == "" {
 			return nil, invalidArguments("invalid or duplicate flag: --" + name)
+		}
+		if booleanFlags[name] && value != "true" && value != "false" {
+			return nil, invalidArguments("--" + name + " must be true or false")
 		}
 		flags[name] = value
 	}
