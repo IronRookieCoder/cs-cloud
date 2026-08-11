@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/agent/csc"
+	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflow"
 )
@@ -253,6 +254,13 @@ func (f *fakeCSCServer) handler() http.Handler {
 
 func startAdoptDriver(t *testing.T, backendURL string) *Driver {
 	t.Helper()
+	// Isolate the app dir so Driver.Start (which creates the durable outbox and
+	// starts its delivery loop) does not touch the real ~/.multica, and each
+	// test's facts live in their own temp outbox.
+	prev := platform.DataDir()
+	platform.SetDataDir(t.TempDir())
+	t.Cleanup(func() { platform.SetDataDir(prev) })
+
 	cfg := workflow.Config{
 		WorkspacesRoot: t.TempDir(),
 		CacheDir:       t.TempDir(),
