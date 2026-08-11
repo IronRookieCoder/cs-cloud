@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"cs-cloud/internal/membertask"
@@ -427,6 +428,9 @@ func TestTaskEnvelopeForceDiscardRequiredSuggestsOnlyForcePreview(t *testing.T) 
 	want := []string{"cs-cloud", "task", "delete", key, "--force-discard"}
 	if envelope.Data == nil || len(envelope.Data.NextCommands) != 1 || envelope.Data.NextCommands[0].Safety != "preview_only" || !reflect.DeepEqual(envelope.Data.NextCommands[0].Argv, want) {
 		t.Fatalf("next commands = %+v, want one force-discard preview", envelope.Data)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(strings.Join(want, " "))) || bytes.Contains(stderr.Bytes(), []byte("next: none")) {
+		t.Fatalf("stderr = %q, want envelope next command", stderr.String())
 	}
 }
 

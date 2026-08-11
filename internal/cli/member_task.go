@@ -253,10 +253,7 @@ func reportTaskCommandError(stdout, stderr io.Writer, args []string, taskKey *st
 	if asJSON {
 		_ = writeTaskEnvelope(stdout, envelope)
 	}
-	fmt.Fprintf(stderr, "error[%s]: %s\n", taskErr.Code, taskErr.Message)
-	fmt.Fprintln(stderr, "cause: command was not completed")
-	fmt.Fprintln(stderr, "next: none")
-	fmt.Fprintln(stderr, "manual: inspect the task state with cs-cloud task get when safe")
+	_ = writeTaskErrorText(stderr, envelope)
 	return &commandExitError{code: code}
 }
 
