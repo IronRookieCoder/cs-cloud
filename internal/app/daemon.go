@@ -130,6 +130,11 @@ func (a *App) DaemonStatus() (bool, int, string) {
 	return true, pid, ""
 }
 
+func (a *App) MemberTaskDaemonReady() bool {
+	pid, err := a.ReadPID()
+	return err == nil && pid > 0 && a.IsProcessRunning(pid) && a.healthCheck()
+}
+
 func (a *App) healthCheck() bool {
 	serverURL, err := a.ServerURL()
 	if err != nil || serverURL == "" {

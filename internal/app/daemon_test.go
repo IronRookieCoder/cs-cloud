@@ -187,3 +187,28 @@ func TestDaemonStatus_Healthy(t *testing.T) {
 		t.Errorf("DaemonStatus() reason = %q, want empty", reason)
 	}
 }
+
+func TestMemberTaskDaemonReadyRequiresLiveProcessAndHealth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	app := &App{rootDir: t.TempDir()}
+	if err := app.SaveServerURL(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if app.MemberTaskDaemonReady() {
+		t.Fatal("ready without a daemon pid")
+	}
+	if err := app.WritePID(os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if !app.MemberTaskDaemonReady() {
+		t.Fatal("not ready with a live pid and healthy private server")
+	}
+}

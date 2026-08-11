@@ -155,12 +155,12 @@ func runDaemon(a *app.App) error {
 		logger.Warn("member task startup reconciliation deferred: %v", err)
 	}
 	logger.Info("[debug] HTTP server started, saving state...")
-	if err := a.SaveServerURL(srv.URL()); err != nil {
-		logger.Error("failed to save server url: %v", err)
-		return err
-	}
 	if err := a.SaveState("running"); err != nil {
 		logger.Error("failed to save state: %v", err)
+		return err
+	}
+	if err := a.SaveServerURL(srv.URL()); err != nil {
+		logger.Error("failed to save server url: %v", err)
 		return err
 	}
 	readyPublished = true

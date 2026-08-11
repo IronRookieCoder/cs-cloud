@@ -275,7 +275,7 @@ func ensureMemberTaskDaemon(ctx context.Context, a *app.App) error {
 		case <-deadline.C:
 			return errors.New("daemon readiness timeout")
 		case <-ticker.C:
-			if running, _, _ := a.DaemonStatus(); running {
+			if a.MemberTaskDaemonReady() {
 				return nil
 			}
 		}
