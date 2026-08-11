@@ -3,6 +3,7 @@ package workflowrunner
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
@@ -138,6 +139,8 @@ func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal)
 		cs.forwarded = true
 		sessionID, workDir := cs.sessionID, cs.workDir
 		d.mu.Unlock()
+		// Durability first: persist the fact before any in-process delivery.
+		d.writeCompleteFactToOutbox(taskID, sessionID, workDir, sig)
 		go d.forwardLateCompletion(taskID, sessionID, workDir, sig)
 		return nil
 	}
@@ -145,9 +148,40 @@ func (d *Driver) SignalTaskCompletion(taskID string, sig agent.CompletionSignal)
 		d.mu.Unlock()
 		return nil
 	}
+	// Durability first: persist the fact before closing notify and letting
+	// execute report completion in-process.
+	d.writeCompleteFactToOutbox(taskID, cs.sessionID, cs.workDir, sig)
 	cs.payload = sig
 	cs.set = true
 	close(cs.notify)
 	d.mu.Unlock()
 	return nil
+}
+
+// writeCompleteFactToOutbox persists a "complete" task fact durably. Failures
+// are logged loudly but do not block the in-process completion path, which is
+// the best-effort fallback when the outbox cannot be written.
+func (d *Driver) writeCompleteFactToOutbox(taskID, sessionID, workDir string, sig agent.CompletionSignal) {
+	if d.outbox == nil {
+		return
+	}
+	factID, err := newFactID()
+	if err != nil {
+		logger.Error("workflow: task %s failed to generate complete fact id: %v", taskID, err)
+		return
+	}
+	fact := OutboxFact{
+		FactID:     factID,
+		TaskID:     taskID,
+		Kind:       "complete",
+		OccurredAt: time.Now().UTC(),
+		Output:     truncateOutput(sig.Summary),
+		SessionID:  sessionID,
+		WorkDir:    workDir,
+		Decision:   sig.Decision,
+		Reason:     sig.Reason,
+	}
+	if err := d.outbox.Add(fact); err != nil {
+		logger.Error("workflow: task %s complete fact write-through failed: %v", taskID, err)
+	}
 }

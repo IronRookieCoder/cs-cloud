@@ -13,6 +13,7 @@ import (
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/version"
 	"cs-cloud/internal/workflow"
@@ -88,6 +89,10 @@ type Driver struct {
 	// outbox is the durable task-fact outbox. Populated by Task 2.3; delivery
 	// loop methods tolerate a nil outbox and simply do nothing.
 	outbox *Outbox
+	// runCtx/runCancel bound the driver's background goroutines (outbox
+	// delivery). Created on Start and cancelled on Stop.
+	runCtx    context.Context
+	runCancel context.CancelFunc
 	// localBaseURL is this device's localserver URL, applied to the task
 	// runner on Start so in-task CLIs can call back into the driver. Set by
 	// the localserver (which knows its URL only after binding its listener).
@@ -175,6 +180,9 @@ func (d *Driver) Start() error {
 	d.running = make(map[string]*taskRecord)
 	d.abortedIDs = make(map[string]time.Time)
 	d.registrations = make(map[string]string)
+	// The outbox lives under the app dir so it survives daemon restarts and
+	// rebinds to the same directory after upgrade.
+	d.outbox = NewOutbox(platform.AppDir())
 
 	if err := d.runtime.Start(); err != nil {
 		d.cleanupOnError()
@@ -191,6 +199,8 @@ func (d *Driver) Start() error {
 	}()
 
 	d.state = driverStateRunning
+	d.runCtx, d.runCancel = context.WithCancel(context.Background())
+	go d.startOutboxDelivery(d.runCtx)
 	return nil
 }
 
@@ -244,6 +254,12 @@ func (d *Driver) Stop() error {
 		}
 	}
 	d.running = make(map[string]*taskRecord)
+	// Cancel the driver's run context so background goroutines such as the
+	// outbox delivery loop return promptly.
+	if d.runCancel != nil {
+		d.runCancel()
+		d.runCancel = nil
+	}
 	d.state = driverStateIdle
 	return nil
 }
@@ -675,6 +691,9 @@ func (d *Driver) postTaskMessages(taskID, output string) {
 
 func (d *Driver) failTask(taskID string, taskErr error, failureReason string) error {
 	logger.Warn("workflow: task %s failed: reason=%s err=%v", taskID, failureReason, taskErr)
+	// Durability first: persist the failure fact before any in-process failure
+	// handling so a crash between here and the server callback can be retried.
+	d.writeFailFactToOutbox(taskID, taskErr, failureReason)
 	// The failure path never pops the completion registry, and the failure can
 	// be a misjudgment (the agent may still be alive and finish its work):
 	// forward any completion signal from here on instead of latching it
@@ -691,6 +710,30 @@ func (d *Driver) failTask(taskID string, taskErr error, failureReason string) er
 		return errors.Join(taskErr, fmt.Errorf("fail task callback: %w", callbackErr))
 	}
 	return taskErr
+}
+
+// writeFailFactToOutbox persists a "fail" task fact durably. Failures are
+// logged loudly but do not block the in-process failure path.
+func (d *Driver) writeFailFactToOutbox(taskID string, taskErr error, failureReason string) {
+	if d.outbox == nil {
+		return
+	}
+	factID, err := newFactID()
+	if err != nil {
+		logger.Error("workflow: task %s failed to generate fail fact id: %v", taskID, err)
+		return
+	}
+	fact := OutboxFact{
+		FactID:        factID,
+		TaskID:        taskID,
+		Kind:          "fail",
+		OccurredAt:    time.Now().UTC(),
+		Error:         taskErr.Error(),
+		FailureReason: failureReason,
+	}
+	if err := d.outbox.Add(fact); err != nil {
+		logger.Error("workflow: task %s fail fact write-through failed: %v", taskID, err)
+	}
 }
 
 // bindSession creates a chat session for the task and binds it to both the
