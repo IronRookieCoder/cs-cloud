@@ -48,6 +48,15 @@ type statusJSONSchema struct {
 	// csc_serve_running must NOT use omitempty — clients rely on the
 	// explicit false to distinguish "probed and not running" from "unknown".
 	CSCServeRunning  bool   `json:"csc_serve_running"`
+	// TunnelConnected must NOT use omitempty — same reason as CSCServeRunning.
+	TunnelConnected  bool                  `json:"tunnel_connected"`
+	TunnelConnectedAt *time.Time           `json:"tunnel_connected_at,omitempty"`
+}
+
+// tunnelProbeResult is the subset of /api/v1/runtime/health that we care about.
+type tunnelProbeResult struct {
+	Connected   bool       `json:"connected"`
+	ConnectedAt *time.Time `json:"connected_at"`
 }
 
 // statusJSON emits machine-readable status for csc TUI's cloudNotify
@@ -87,6 +96,9 @@ func statusJSON(a *app.App) error {
 	// csc_serve_running is best-effort: probe the local daemon health endpoint.
 	if running && out.LocalURL != "" {
 		out.CSCServeRunning = probeCSCServeRunning(out.LocalURL)
+		tunnel := probeTunnelStatus(out.LocalURL)
+		out.TunnelConnected = tunnel.Connected
+		out.TunnelConnectedAt = tunnel.ConnectedAt
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -110,6 +122,39 @@ func probeCSCServeRunning(localURL string) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// probeTunnelStatus reads the daemon's /runtime/health endpoint for the
+// current tunnel connectivity. Best-effort: returns Connected=false on any
+// error (endpoint missing, daemon down, parse failure, etc.). Reuses the
+// health endpoint rather than introducing a new one.
+func probeTunnelStatus(localURL string) tunnelProbeResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, localURL+"/api/v1/runtime/health", nil)
+	if err != nil {
+		return tunnelProbeResult{}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return tunnelProbeResult{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return tunnelProbeResult{}
+	}
+	var envelope struct {
+		Data struct {
+			Tunnel *tunnelProbeResult `json:"tunnel"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return tunnelProbeResult{}
+	}
+	if envelope.Data.Tunnel == nil {
+		return tunnelProbeResult{}
+	}
+	return *envelope.Data.Tunnel
 }
 
 func status(a *app.App) error {
@@ -167,6 +212,15 @@ func status(a *app.App) error {
 		printKV("device_id.username", u)
 		printKV("local_url", serverURL)
 		printKV("logs", filepath.Join(a.RootDir(), "app.log"))
+		tunnel := probeTunnelStatus(serverURL)
+		if tunnel.Connected {
+			printKV("tunnel", "connected")
+			if tunnel.ConnectedAt != nil {
+				printKV("tunnel_since", tunnel.ConnectedAt.Format(time.RFC3339))
+			}
+		} else {
+			printKV("tunnel", "disconnected")
+		}
 		printAgentRuntimes(serverURL)
 
 		if mode == "cloud" {
