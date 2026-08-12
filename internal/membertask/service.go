@@ -281,54 +281,6 @@ func isCloudUnavailable(err error) bool {
 	return errors.As(err, &taskErr) && taskErr.Code == "cloud_unavailable"
 }
 
-func (s *Service) Start(ctx context.Context, key TaskKey) (LocalTransition, error) {
-	unlock := s.lockTask(key)
-	defer unlock()
-	_ = ctx
-	record, found, err := s.store.LoadTask(key)
-	if err != nil {
-		return LocalTransition{}, err
-	}
-	if !found {
-		return LocalTransition{}, newTaskError("task_not_found", "local task is not prepared", nil)
-	}
-	if !record.Prepared || (record.Activity != ActivityPrepared && record.Activity != ActivityPaused && record.Activity != ActivityActive) {
-		return LocalTransition{}, newTaskError("invalid_task_state", "task cannot be started from its current state", nil)
-	}
-	if record.Activity == ActivityActive {
-		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
-	}
-	record.Activity = ActivityActive
-	if err := s.store.SaveTask(record); err != nil {
-		return LocalTransition{}, err
-	}
-	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
-}
-
-func (s *Service) Pause(ctx context.Context, key TaskKey) (LocalTransition, error) {
-	unlock := s.lockTask(key)
-	defer unlock()
-	_ = ctx
-	record, found, err := s.store.LoadTask(key)
-	if err != nil {
-		return LocalTransition{}, err
-	}
-	if !found {
-		return LocalTransition{}, newTaskError("task_not_found", "local task is not prepared", nil)
-	}
-	if record.Activity == ActivityPaused {
-		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
-	}
-	if record.Activity != ActivityActive {
-		return LocalTransition{}, newTaskError("invalid_task_state", "only an active task can be paused", nil)
-	}
-	record.Activity = ActivityPaused
-	if err := s.store.SaveTask(record); err != nil {
-		return LocalTransition{}, err
-	}
-	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
-}
-
 func (s *Service) Refresh(ctx context.Context, key TaskKey) (TaskRecord, error) {
 	unlock := s.lockTask(key)
 	defer unlock()
@@ -396,7 +348,7 @@ func projectRecord(record TaskRecord, remoteState string) Projection {
 	return ProjectStatus(Facts{
 		Ended: record.Ended, ReadOnly: record.ReadOnly,
 		ReprepareRequired: record.ReprepareRequired, ReconfirmationRequired: record.ReconfirmationRequired,
-		SyncPending: record.SyncPending, Prepared: record.Prepared, Activity: record.Activity, Role: record.Key.Role,
+		SyncPending: record.SyncPending, Prepared: record.Prepared, Role: record.Key.Role,
 		RemoteState: remoteState, WriteAuthorityLost: record.WriteAuthorityLost,
 		Flags: Flags{Offline: record.Offline, Dirty: record.Dirty, CloudStateUnverified: record.CloudStateUnverified,
 			WonByOtherOperation: record.WonByOtherOperation, CleanupPending: record.CleanupPending},

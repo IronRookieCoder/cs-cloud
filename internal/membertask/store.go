@@ -35,7 +35,6 @@ type TaskRecord struct {
 	Directory              string            `json:"directory,omitempty"`
 	PreparationRoot        string            `json:"preparation_root,omitempty"`
 	Prepared               bool              `json:"prepared"`
-	Activity               Activity          `json:"activity,omitempty"`
 	Dirty                  bool              `json:"dirty"`
 	DirtyPaths             []string          `json:"dirty_paths,omitempty"`
 	LastVerifiedAt         *time.Time        `json:"last_verified_at,omitempty"`
@@ -138,14 +137,20 @@ func (s *Store) Load() (Index, error) {
 func (s *Store) loadUnlocked() (Index, error) {
 	b, err := os.ReadFile(s.indexPath())
 	if errors.Is(err, os.ErrNotExist) {
-		return Index{SchemaVersion: SchemaVersion, Tasks: map[string]TaskRecord{}}, nil
+		return Index{SchemaVersion: StoreSchemaVersion, Tasks: map[string]TaskRecord{}}, nil
 	}
 	if err != nil {
 		return Index{}, newTaskError("local_task_store_unavailable", "cannot read task store", err)
 	}
 	var index Index
-	if err := json.Unmarshal(b, &index); err != nil || index.SchemaVersion != SchemaVersion || index.Tasks == nil {
+	if err := json.Unmarshal(b, &index); err != nil {
 		return Index{}, newTaskError("local_task_store_corrupt", "task store index is invalid", err)
+	}
+	if index.SchemaVersion != StoreSchemaVersion {
+		return Index{}, newTaskError("unsupported_task_store_schema", "local task cache uses an unsupported schema; handle the task again", nil)
+	}
+	if index.Tasks == nil {
+		return Index{}, newTaskError("local_task_store_corrupt", "task store index is invalid", nil)
 	}
 	for raw, record := range index.Tasks {
 		key, err := ParseTaskKey(raw)
@@ -164,9 +169,9 @@ func (s *Store) Save(index Index) error {
 
 func (s *Store) saveUnlocked(index Index) error {
 	if index.SchemaVersion == "" {
-		index.SchemaVersion = SchemaVersion
+		index.SchemaVersion = StoreSchemaVersion
 	}
-	if index.SchemaVersion != SchemaVersion {
+	if index.SchemaVersion != StoreSchemaVersion {
 		return newTaskError("local_task_store_corrupt", "unsupported task store schema", nil)
 	}
 	if index.Tasks == nil {

@@ -354,7 +354,7 @@ func seedOperationTask(t *testing.T) (*Store, TaskKey, string) {
 	if err := os.WriteFile(output, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	record := TaskRecord{Key: key, RemoteVersion: "1:1:1", Attempt: 1, Directory: dir, Prepared: true, Activity: ActivityActive, Manifest: &manifest}
+	record := TaskRecord{Key: key, RemoteVersion: "1:1:1", Attempt: 1, Directory: dir, Prepared: true, Manifest: &manifest}
 	if err := store.SaveTask(record); err != nil {
 		t.Fatal(err)
 	}

@@ -49,7 +49,7 @@ var (
 
 const maxGitDiagnosticBytes = 4 << 10
 
-func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey, option PrepareOptions) (LocalTransition, error) {
+func (s *Service) Handle(ctx context.Context, key TaskKey, option PrepareOptions) (LocalTransition, error) {
 	unlock := s.lockTask(key)
 	defer unlock()
 
@@ -65,12 +65,6 @@ func (s *Service) PrepareWithFacts(ctx context.Context, key TaskKey, option Prep
 		return LocalTransition{TaskRecord: record, Outcome: OutcomeAlreadyCompleted}, nil
 	}
 	return LocalTransition{TaskRecord: record, Outcome: OutcomeCompleted, Performed: true}, nil
-}
-
-func (s *Service) Prepare(ctx context.Context, key TaskKey) (TaskRecord, error) {
-	unlock := s.lockTask(key)
-	defer unlock()
-	return s.prepare(ctx, key, PrepareOptions{})
 }
 
 func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptions) (TaskRecord, error) {
@@ -225,7 +219,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		_ = s.removePrepareJournal(journal.ID)
 		return TaskRecord{}, err
 	}
-	metadata := preparedMetadata{SchemaVersion: SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot, IssueID: remote.IssueID, IssueNumber: remote.IssueNumber, IssueIdentifier: remote.IssueIdentifier, IssueTitle: remote.IssueTitle, IssueDescription: remote.IssueDescription, WorkspaceSlug: remote.WorkspaceSlug, TaskKind: remote.TaskKind}
+	metadata := preparedMetadata{SchemaVersion: StoreSchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot, IssueID: remote.IssueID, IssueNumber: remote.IssueNumber, IssueIdentifier: remote.IssueIdentifier, IssueTitle: remote.IssueTitle, IssueDescription: remote.IssueDescription, WorkspaceSlug: remote.WorkspaceSlug, TaskKind: remote.TaskKind}
 	if err := writePreparedFiles(s.store, staging, metadata, manifest); err != nil {
 		_ = os.RemoveAll(staging)
 		_ = s.removePrepareJournal(journal.ID)
@@ -249,7 +243,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	if err := os.Rename(staging, final); err != nil {
 		return TaskRecord{}, newTaskError("prepare_failed", "cannot publish prepared task directory", err)
 	}
-	record := TaskRecord{Key: key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	record := TaskRecord{Key: key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, PreparationRoot: preparationRoot, Prepared: true, Manifest: &manifest}
 	if err := s.store.SaveTask(record); err != nil {
 		return TaskRecord{}, err
 	}
@@ -453,7 +447,7 @@ func updatePreparedMetadata(store *Store, record TaskRecord, remote RemoteTaskCo
 	path := filepath.Join(record.Directory, "task.json")
 	var metadata preparedMetadata
 	b, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(b, &metadata) != nil {
+	if err != nil || json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion != StoreSchemaVersion {
 		return newTaskError("local_task_store_corrupt", "prepared task metadata is invalid", err)
 	}
 	metadata.RemoteVersion = versionString(remote.RemoteTask)
@@ -584,14 +578,14 @@ func readPreparedRecord(root string) (TaskRecord, error) {
 	}
 	var manifest Manifest
 	b, err = os.ReadFile(filepath.Join(root, "manifest.json"))
-	if err != nil || json.Unmarshal(b, &manifest) != nil || manifest.SchemaVersion != SchemaVersion {
+	if err != nil || json.Unmarshal(b, &manifest) != nil || manifest.SchemaVersion != StoreSchemaVersion {
 		return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task manifest is invalid", err)
 	}
 	preparationRoot := metadata.PreparationRoot
 	if preparationRoot == "" {
 		preparationRoot = filepath.Dir(filepath.Dir(filepath.Dir(root)))
 	}
-	record := TaskRecord{Key: metadata.Key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	record := TaskRecord{Key: metadata.Key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, PreparationRoot: preparationRoot, Prepared: true, Manifest: &manifest}
 	return record, nil
 }
 

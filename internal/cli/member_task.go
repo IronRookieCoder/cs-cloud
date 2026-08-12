@@ -126,15 +126,15 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 			return request, invalidArguments("list accepts no arguments")
 		}
 		return request, nil
-	case "get", "start", "pause":
+	case "get", "recover":
 		if len(args) != 2 {
 			return request, invalidArguments(command + " requires exactly one task key")
 		}
 		request.TaskKey = args[1]
 		return validateRequestTaskKey(request)
-	case "prepare":
+	case "handle":
 		if len(args) < 2 {
-			return request, invalidArguments("prepare requires a task key")
+			return request, invalidArguments("handle requires a task key")
 		}
 		request.TaskKey = args[1]
 		if _, err := membertask.ParseTaskKey(request.TaskKey); err != nil {
@@ -157,10 +157,10 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 	}
 	request.PreviewID = flags["confirm"]
 	switch command {
-	case "prepare":
+	case "handle":
 		request.WorkDir = flags["workdir"]
 		if len(flags) > boolMapLen(flags, "workdir") {
-			return request, invalidArguments("prepare accepts only --workdir")
+			return request, invalidArguments("handle accepts only --workdir")
 		}
 	case "submit":
 		if len(flags) > boolMapLen(flags, "confirm") {
@@ -294,6 +294,8 @@ func classifyTaskError(err error) int {
 		return 2
 	case "local_task_store_corrupt", "invalid_cloud_response", "internal_error":
 		return 1
+	case "unsupported_task_store_schema":
+		return 4
 	case "material_content_unavailable", "repository_access_unavailable":
 		return 4
 	default:

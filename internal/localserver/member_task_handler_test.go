@@ -65,7 +65,7 @@ func TestMemberTaskRouteStrictlyDecodesTaskKey(t *testing.T) {
 func TestMemberTaskActionAcceptsEmptyBody(t *testing.T) {
 	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
 	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/start", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/recover", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer private-secret")
 	recorder := httptest.NewRecorder()
@@ -75,12 +75,12 @@ func TestMemberTaskActionAcceptsEmptyBody(t *testing.T) {
 	}
 }
 
-func TestMemberTaskPrepareUsesRequestedWorkDir(t *testing.T) {
+func TestMemberTaskHandleUsesRequestedWorkDir(t *testing.T) {
 	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
 	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
 	workDir := t.TempDir()
 	body, _ := json.Marshal(map[string]string{"workdir": workDir})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/prepare", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/handle", strings.NewReader(string(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer private-secret")
 	recorder := httptest.NewRecorder()
@@ -97,6 +97,21 @@ func TestMemberTaskPrepareUsesRequestedWorkDir(t *testing.T) {
 	want := filepath.Join(workDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
 	if response.Data.Directory != want {
 		t.Fatalf("directory = %q, want %q", response.Data.Directory, want)
+	}
+}
+
+func TestMemberTaskRemovedActionsReturnNotFound(t *testing.T) {
+	srv := New(WithMemberTask(memberTaskTestService(t), "private-secret"))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte("cloud/ws/node/worker"))
+	for _, action := range []string{"prepare", "start", "pause"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/member-tasks/"+encoded+"/"+action, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer private-secret")
+		recorder := httptest.NewRecorder()
+		srv.http.Handler.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, body = %s", action, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 

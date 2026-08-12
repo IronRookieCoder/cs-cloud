@@ -61,7 +61,7 @@ type Verification struct {
 }
 
 func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
-	manifest := Manifest{SchemaVersion: SchemaVersion}
+	manifest := Manifest{SchemaVersion: StoreSchemaVersion}
 	for _, source := range sources {
 		rel, err := cleanRelativePath(source.RelativePath)
 		if err != nil {

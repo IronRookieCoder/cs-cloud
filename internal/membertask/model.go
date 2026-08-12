@@ -7,6 +7,7 @@ import (
 )
 
 const SchemaVersion = "1.0"
+const StoreSchemaVersion = "2.0"
 
 type Role string
 
@@ -55,17 +56,8 @@ const (
 	StatusReconfirmationRequired DisplayStatus = "reconfirmation_required"
 	StatusSyncPending            DisplayStatus = "sync_pending"
 	StatusConfirmationWaiting    DisplayStatus = "confirmation_waiting"
-	StatusInProgress             DisplayStatus = "in_progress"
-	StatusPrepared               DisplayStatus = "prepared"
+	StatusReady                  DisplayStatus = "ready"
 	StatusNotPrepared            DisplayStatus = "not_prepared"
-)
-
-type Activity string
-
-const (
-	ActivityPrepared Activity = "prepared"
-	ActivityActive   Activity = "active"
-	ActivityPaused   Activity = "paused"
 )
 
 type Flags struct {
@@ -87,7 +79,6 @@ type Facts struct {
 	SyncPending            bool
 	ConfirmationWaiting    bool
 	Prepared               bool
-	Activity               Activity
 	Role                   Role
 	RemoteState            string
 	Flags                  Flags
@@ -122,10 +113,8 @@ func ProjectStatus(f Facts) Projection {
 		status = StatusSyncPending
 	case f.ConfirmationWaiting:
 		status = StatusConfirmationWaiting
-	case f.Activity == ActivityActive || f.Activity == ActivityPaused:
-		status = StatusInProgress
 	case f.Prepared:
-		status = StatusPrepared
+		status = StatusReady
 	}
 
 	return Projection{DisplayStatus: status, Flags: f.Flags, AvailableActions: availableActions(status, f.Role, f.Flags)}
@@ -150,15 +139,13 @@ func availableActions(status DisplayStatus, role Role, flags Flags) []string {
 	case StatusReadOnly:
 		return []string{"get"}
 	case StatusReprepareRequired:
-		return []string{"get", "prepare", "delete"}
+		return []string{"get", "handle", "delete"}
 	case StatusReconfirmationRequired, StatusConfirmationWaiting:
 		return []string{"get", terminalAction(role), "delete"}
-	case StatusInProgress:
-		return []string{"get", "pause", terminalAction(role), "delete"}
-	case StatusPrepared:
-		return []string{"get", "start", "delete"}
+	case StatusReady:
+		return []string{"get", terminalAction(role), "delete"}
 	default:
-		return []string{"get", "prepare"}
+		return []string{"get", "handle"}
 	}
 }
 

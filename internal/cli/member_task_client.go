@@ -135,7 +135,7 @@ func memberTaskHTTPRequest(request memberTaskRequest) (string, string, []byte, e
 	if request.Command == "delete" && request.PreviewID == "" {
 		body["mode"] = request.DeleteMode
 	}
-	if request.Command == "prepare" && request.WorkDir != "" {
+	if request.Command == "handle" && request.WorkDir != "" {
 		body["workdir"] = request.WorkDir
 	}
 	payload, err := json.Marshal(body)
@@ -146,7 +146,7 @@ func memberTaskHTTPRequest(request memberTaskRequest) (string, string, []byte, e
 }
 
 func retryableMemberTaskRequest(request memberTaskRequest) bool {
-	if request.Command == "list" || request.Command == "get" || request.Command == "prepare" || request.Command == "start" || request.Command == "pause" {
+	if request.Command == "list" || request.Command == "get" || request.Command == "handle" || request.Command == "recover" {
 		return true
 	}
 	return request.PreviewID != ""
@@ -177,9 +177,7 @@ func decodeMemberTaskResponse(response *http.Response, request memberTaskRequest
 		target = &[]membertask.Task{}
 	case "get":
 		target = &membertask.Task{}
-	case "prepare":
-		target = &membertask.LocalTransition{}
-	case "start", "pause":
+	case "handle":
 		target = &membertask.LocalTransition{}
 	case "submit", "review":
 		if request.PreviewID == "" {
@@ -194,6 +192,8 @@ func decodeMemberTaskResponse(response *http.Response, request memberTaskRequest
 			var deleted map[string]bool
 			target = &deleted
 		}
+	case "recover":
+		target = &membertask.Operation{}
 	default:
 		return nil, &membertask.TaskError{Code: "invalid_arguments", Message: "unknown task command"}
 	}

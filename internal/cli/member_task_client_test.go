@@ -125,7 +125,7 @@ func TestMemberTaskClientDecodesPrepareTransitionFacts(t *testing.T) {
 			return taskHTTPResponse(http.StatusOK, `{"ok":true,"data":{"prepared":true,"outcome":"already_completed","performed":false}}`), nil
 		},
 	}
-	result, err := client.Execute(context.Background(), memberTaskRequest{Command: "prepare", TaskKey: "cloud/ws/node/worker"})
+	result, err := client.Execute(context.Background(), memberTaskRequest{Command: "handle", TaskKey: "cloud/ws/node/worker"})
 	transition, ok := result.(membertask.LocalTransition)
 	if err != nil || !ok || transition.Outcome != membertask.OutcomeAlreadyCompleted || transition.Performed {
 		t.Fatalf("result=%+v (%T), err=%v", result, result, err)

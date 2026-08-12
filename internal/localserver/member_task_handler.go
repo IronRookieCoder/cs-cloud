@@ -106,12 +106,8 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 	var result any
 	var err error
 	switch action {
-	case "prepare":
-		result, err = s.memberTasks.PrepareWithFacts(ctx, key, membertask.PrepareOptions{WorkDir: request.WorkDir})
-	case "start":
-		result, err = s.memberTasks.Start(ctx, key)
-	case "pause":
-		result, err = s.memberTasks.Pause(ctx, key)
+	case "handle":
+		result, err = s.memberTasks.Handle(ctx, key, membertask.PrepareOptions{WorkDir: request.WorkDir})
 	case "submit":
 		if request.PreviewID == "" {
 			result, err = s.memberTasks.PreviewSubmit(ctx, key)
@@ -162,7 +158,7 @@ func writeMemberTaskError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case "preview_stale", "remote_ref_changed", "operation_ref_conflict", "delete_recovery_required", "force_discard_required", "prepare_location_conflict":
 		status = http.StatusConflict
-	case "provider_not_supported", "input_material_modified", "local_changes_present", "material_content_unavailable", "repository_access_unavailable":
+	case "provider_not_supported", "input_material_modified", "local_changes_present", "material_content_unavailable", "repository_access_unavailable", "unsupported_task_store_schema":
 		status = http.StatusUnprocessableEntity
 	case "cloud_unavailable", "operation_result_unknown":
 		status = http.StatusServiceUnavailable

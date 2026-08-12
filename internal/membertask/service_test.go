@@ -40,37 +40,6 @@ func TestServiceGetAuthorityErrorsAreNotOfflineSuccess(t *testing.T) {
 	}
 }
 
-func TestServiceStartWaitsForTaskLock(t *testing.T) {
-	store, _ := OpenStore(t.TempDir())
-	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	if err := store.SaveTask(TaskRecord{Key: key, Prepared: true, Activity: ActivityPrepared}); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(store, nil)
-	unlock := svc.lockTask(key)
-	result := make(chan error, 1)
-	go func() {
-		_, err := svc.Start(context.Background(), key)
-		result <- err
-	}()
-
-	select {
-	case err := <-result:
-		unlock()
-		t.Fatalf("Start completed while task lock was held: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	unlock()
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not resume after task lock was released")
-	}
-}
-
 func TestServiceListReloadsTaskAfterAcquiringLock(t *testing.T) {
 	requestStarted := make(chan struct{})
 	allowResponse := make(chan struct{})
@@ -82,7 +51,7 @@ func TestServiceListReloadsTaskAfterAcquiringLock(t *testing.T) {
 	defer srv.Close()
 	store, _ := OpenStore(t.TempDir())
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	initial := TaskRecord{Key: key, Prepared: true, Activity: ActivityPrepared}
+	initial := TaskRecord{Key: key, Prepared: true}
 	if err := store.SaveTask(initial); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +64,7 @@ func TestServiceListReloadsTaskAfterAcquiringLock(t *testing.T) {
 	}()
 	<-requestStarted
 	updated := initial
-	updated.Activity = ActivityActive
+	updated.Dirty = true
 	if err := store.SaveTask(updated); err != nil {
 		unlock()
 		t.Fatal(err)
@@ -113,7 +82,7 @@ func TestServiceListReloadsTaskAfterAcquiringLock(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	record, _, err := store.LoadTask(key)
-	if err != nil || record.Activity != ActivityActive {
+	if err != nil || !record.Dirty {
 		t.Fatalf("record = %+v, err = %v", record, err)
 	}
 }

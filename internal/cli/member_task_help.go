@@ -45,9 +45,7 @@ func memberTaskHelpCatalog() taskHelpCatalog {
 		{Name: "help", Summary: "Describe the task command contract", Capability: "observe", TimeoutSeconds: 5, Arguments: []ArgumentSpec{}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeObserved}},
 		{Name: "list", Summary: "List assigned and local task history", Capability: "observe", TimeoutSeconds: 20, Arguments: []ArgumentSpec{}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeObserved}},
 		{Name: "get", Summary: "Get task context and local state", Capability: "observe", TimeoutSeconds: 20, Arguments: []ArgumentSpec{key}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeObserved}},
-		{Name: "prepare", Summary: "Prepare exact task materials locally", Capability: "local_write", TimeoutSeconds: 300, Arguments: []ArgumentSpec{key, workDir}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeCompleted, membertask.OutcomeAlreadyCompleted, membertask.OutcomeRecovered}},
-		{Name: "start", Summary: "Mark a prepared task active", Capability: "local_write", TimeoutSeconds: 15, Arguments: []ArgumentSpec{key}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeCompleted, membertask.OutcomeAlreadyCompleted}},
-		{Name: "pause", Summary: "Pause an active local task", Capability: "local_write", TimeoutSeconds: 15, Arguments: []ArgumentSpec{key}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeCompleted, membertask.OutcomeAlreadyCompleted}},
+		{Name: "handle", Summary: "Accept a task and prepare its workspace", Capability: "local_write", TimeoutSeconds: 300, Arguments: []ArgumentSpec{key, workDir}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeCompleted, membertask.OutcomeAlreadyCompleted, membertask.OutcomeRecovered}},
 		{Name: "submit", Summary: "Preview or confirm a worker submission", Capability: "remote_write", TimeoutSeconds: 300, Arguments: []ArgumentSpec{key, confirm}, ConfirmationMode: "preview_then_confirm", Outcomes: []membertask.Outcome{membertask.OutcomePreviewed, membertask.OutcomeCompleted, membertask.OutcomeAlreadyCompleted, membertask.OutcomeRecovered}},
 		{Name: "review", Summary: "Preview or confirm a critic decision", Capability: "remote_write", TimeoutSeconds: 180, Arguments: []ArgumentSpec{key,
 			{Name: "decision", Kind: "flag", Flag: "--decision", Type: "enum", ValueStyle: "equals_or_unprefixed_separate", Enum: []string{"approve", "reject"}, RequiredUnless: "confirm", Summary: "Critic decision"},
@@ -58,6 +56,7 @@ func memberTaskHelpCatalog() taskHelpCatalog {
 			{Name: "force_discard", Kind: "flag", Flag: "--force-discard", Type: "boolean", Summary: "Preview explicit risky discard"},
 			confirm,
 		}, MutuallyExclusive: [][]string{{"confirm", "force_discard"}}, ConfirmationMode: "preview_then_confirm", Outcomes: []membertask.Outcome{membertask.OutcomePreviewed, membertask.OutcomeCompleted, membertask.OutcomeRecovered}},
+		{Name: "recover", Summary: "Recover an interrupted accepted operation", Capability: "remote_write", TimeoutSeconds: 300, Arguments: []ArgumentSpec{key}, ConfirmationMode: "none", Outcomes: []membertask.Outcome{membertask.OutcomeCompleted, membertask.OutcomeRecovered, membertask.OutcomeAlreadyCompleted}},
 	}}
 	for index := range catalog.Commands {
 		catalog.Commands[index].Outcomes = append(catalog.Commands[index].Outcomes, membertask.OutcomeNotCompleted)

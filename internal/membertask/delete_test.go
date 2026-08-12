@@ -36,7 +36,7 @@ func TestDeleteTaskPreparedInCustomWorkDir(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	transition, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
+	transition, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

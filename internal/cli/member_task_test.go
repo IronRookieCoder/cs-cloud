@@ -26,7 +26,7 @@ func (f *fakeMemberTaskAPI) Execute(ctx context.Context, request memberTaskReque
 
 func TestTaskHelpCatalogDescribesEveryPublicCommand(t *testing.T) {
 	catalog := decodeTaskHelpCatalog(t)
-	want := []string{"help", "list", "get", "prepare", "start", "pause", "submit", "review", "delete"}
+	want := []string{"help", "list", "get", "handle", "submit", "review", "delete", "recover"}
 	if len(catalog.Commands) != len(want) {
 		t.Fatalf("commands = %+v", catalog.Commands)
 	}
@@ -56,8 +56,8 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Name: "workdir", Kind: "flag", Flag: "--workdir", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		Summary: "Existing working directory that will contain .cs-cloud-tasks",
 	}
-	if got := commands["prepare"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantWorkDir}) {
-		t.Fatalf("prepare arguments = %+v", got)
+	if got := commands["handle"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantWorkDir}) {
+		t.Fatalf("handle arguments = %+v", got)
 	}
 	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm}) {
 		t.Fatalf("submit arguments = %+v", got)
@@ -94,8 +94,8 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 	}
 }
 
-func TestPrepareRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {
-	request, err := parseMemberTaskRequest([]string{"prepare", "cloud/ws/node/worker", "--workdir=./project"})
+func TestHandleRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {
+	request, err := parseMemberTaskRequest([]string{"handle", "cloud/ws/node/worker", "--workdir=./project"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +109,25 @@ func TestPrepareRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil || payload["workdir"] != "./project" {
 		t.Fatalf("payload=%s err=%v", body, err)
+	}
+}
+
+func TestRemovedTaskCommandsAreRejected(t *testing.T) {
+	for _, command := range []string{"prepare", "start", "pause"} {
+		if _, err := parseMemberTaskRequest([]string{command, "cloud/ws/node/worker"}); err == nil {
+			t.Fatalf("%s was accepted", command)
+		}
+	}
+}
+
+func TestRecoverRequestUsesTaskOperationEndpoint(t *testing.T) {
+	request, err := parseMemberTaskRequest([]string{"recover", "cloud/ws/node/worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	method, endpoint, body, err := memberTaskHTTPRequest(request)
+	if err != nil || method != "POST" || !strings.HasSuffix(endpoint, "/recover") || string(body) != "{}" {
+		t.Fatalf("method=%q endpoint=%q body=%s err=%v", method, endpoint, body, err)
 	}
 }
 
@@ -130,7 +149,7 @@ func TestWriteTaskTextRejectsMissingCommand(t *testing.T) {
 func TestWriteTaskTextIncludesLocalTransitionTaskDetails(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
 	var out bytes.Buffer
-	data := &taskCommandData{Command: []string{"cs-cloud", "task", "start"}, Result: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key, DisplayName: "示例任务", Directory: `C:\tasks\node`}}}
+	data := &taskCommandData{Command: []string{"cs-cloud", "task", "handle"}, Result: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key, DisplayName: "示例任务", Directory: `C:\tasks\node`}}}
 	if err := writeTaskText(&out, data); err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +167,11 @@ func TestDisplayStatusTextIncludesSubmittingAndSyncPending(t *testing.T) {
 	}
 }
 
-func TestPrepareCommandResolvesWorkDirBeforeTransport(t *testing.T) {
+func TestHandleCommandResolvesWorkDirBeforeTransport(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
 	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key}}}
 	var stdout, stderr bytes.Buffer
-	if err := runMemberTaskCommand(context.Background(), []string{"prepare", key.String(), "--workdir=."}, api, &stdout, &stderr); err != nil {
+	if err := runMemberTaskCommand(context.Background(), []string{"handle", key.String(), "--workdir=."}, api, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.calls) != 1 || !filepath.IsAbs(api.calls[0].WorkDir) {
@@ -175,9 +194,9 @@ func TestTaskHelpCatalogIncludesFailureOutcome(t *testing.T) {
 	}
 }
 
-func TestTaskHelpCatalogDeclaresRepeatedPrepareOutcome(t *testing.T) {
+func TestTaskHelpCatalogDeclaresRepeatedHandleOutcome(t *testing.T) {
 	for _, command := range decodeTaskHelpCatalog(t).Commands {
-		if command.Name != "prepare" {
+		if command.Name != "handle" {
 			continue
 		}
 		for _, outcome := range command.Outcomes {
@@ -185,9 +204,9 @@ func TestTaskHelpCatalogDeclaresRepeatedPrepareOutcome(t *testing.T) {
 				return
 			}
 		}
-		t.Fatalf("prepare outcomes = %+v", command.Outcomes)
+		t.Fatalf("handle outcomes = %+v", command.Outcomes)
 	}
-	t.Fatal("prepare command is missing")
+	t.Fatal("handle command is missing")
 }
 
 func decodeTaskHelpCatalog(t *testing.T) taskHelpCatalog {
@@ -268,7 +287,7 @@ func TestMemberTaskListWritesVersionedEnvelope(t *testing.T) {
 func TestTaskEnvelopeMapsBusinessRejectionToExitFour(t *testing.T) {
 	api := &fakeMemberTaskAPI{err: &membertask.TaskError{Code: "provider_not_supported", Message: "unsupported"}}
 	var stdout, stderr bytes.Buffer
-	err := runMemberTaskCommand(context.Background(), []string{"prepare", "cloud/ws/node/worker"}, api, &stdout, &stderr)
+	err := runMemberTaskCommand(context.Background(), []string{"handle", "cloud/ws/node/worker"}, api, &stdout, &stderr)
 	if exitCode(err) != 4 {
 		t.Fatalf("exit code = %d, err=%v", exitCode(err), err)
 	}
@@ -285,7 +304,7 @@ func TestTaskEnvelopeMapsPreparationCapabilityErrorsToExitFour(t *testing.T) {
 		t.Run(code, func(t *testing.T) {
 			api := &fakeMemberTaskAPI{err: &membertask.TaskError{Code: code, Message: "capability unavailable"}}
 			var stdout, stderr bytes.Buffer
-			err := runMemberTaskCommand(context.Background(), []string{"prepare", "cloud/ws/node/worker"}, api, &stdout, &stderr)
+			err := runMemberTaskCommand(context.Background(), []string{"handle", "cloud/ws/node/worker"}, api, &stdout, &stderr)
 			if exitCode(err) != 4 {
 				t.Fatalf("exit code = %d, err=%v", exitCode(err), err)
 			}
@@ -295,14 +314,14 @@ func TestTaskEnvelopeMapsPreparationCapabilityErrorsToExitFour(t *testing.T) {
 
 func TestTaskEnvelopeIncludesStateAfterForLocalTransition(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
-	api := &fakeMemberTaskAPI{response: membertask.TaskRecord{Key: key, Prepared: true, Activity: membertask.ActivityActive}}
+	api := &fakeMemberTaskAPI{response: membertask.TaskRecord{Key: key, Prepared: true}}
 	var stdout, stderr bytes.Buffer
-	if err := runMemberTaskCommand(context.Background(), []string{"start", key.String()}, api, &stdout, &stderr); err != nil {
+	if err := runMemberTaskCommand(context.Background(), []string{"handle", key.String()}, api, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	var envelope taskCommandEnvelope
 	_ = json.Unmarshal(stdout.Bytes(), &envelope)
-	if envelope.StateAfter == nil || envelope.StateAfter.DisplayStatus != membertask.StatusInProgress {
+	if envelope.StateAfter == nil || envelope.StateAfter.DisplayStatus != membertask.StatusReady {
 		t.Fatalf("envelope = %+v", envelope)
 	}
 }
@@ -340,12 +359,12 @@ func TestTaskEnvelopeDoesNotReportIncompleteOperationAsPerformed(t *testing.T) {
 func TestTaskEnvelopeUsesIdempotentLocalTransitionFacts(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
 	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{
-		TaskRecord: membertask.TaskRecord{Key: key, Prepared: true, Activity: membertask.ActivityActive},
+		TaskRecord: membertask.TaskRecord{Key: key, Prepared: true},
 		Outcome:    membertask.OutcomeAlreadyCompleted,
 		Performed:  false,
 	}}
 	var stdout, stderr bytes.Buffer
-	if err := runMemberTaskCommand(context.Background(), []string{"start", key.String()}, api, &stdout, &stderr); err != nil {
+	if err := runMemberTaskCommand(context.Background(), []string{"handle", key.String()}, api, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	var envelope taskCommandEnvelope

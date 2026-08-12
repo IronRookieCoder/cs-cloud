@@ -169,10 +169,8 @@ func displayStatusText(status membertask.DisplayStatus) string {
 		return "已结束"
 	case membertask.StatusSubmitting:
 		return "提交中"
-	case membertask.StatusInProgress:
-		return "处理中"
-	case membertask.StatusPrepared:
-		return "已准备"
+	case membertask.StatusReady:
+		return "可处理"
 	case membertask.StatusNotPrepared:
 		return "待准备"
 	case membertask.StatusReadOnly:

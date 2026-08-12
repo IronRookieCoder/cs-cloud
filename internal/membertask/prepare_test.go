@@ -28,7 +28,8 @@ func TestReworkReusesDirectoryAndKeepsLocalOutput(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	first, err := svc.Prepare(context.Background(), key)
+	workDir := t.TempDir()
+	first, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +38,7 @@ func TestReworkReusesDirectoryAndKeepsLocalOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempt.Store(2)
-	second, err := svc.Prepare(context.Background(), key)
+	second, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("rework Prepare: %v", err)
 	}
@@ -61,7 +62,8 @@ func TestReworkDoesNotDiscardPendingOperation(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	if _, err := svc.Prepare(context.Background(), key); err != nil {
+	workDir := t.TempDir()
+	if _, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
 	record, _, _ := store.LoadTask(key)
@@ -72,7 +74,7 @@ func TestReworkDoesNotDiscardPendingOperation(t *testing.T) {
 	}
 	attempt.Store(2)
 
-	_, err := svc.Prepare(context.Background(), key)
+	_, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	te, ok := err.(*TaskError)
 	if !ok || te.Code != "operation_recovery_required" {
 		t.Fatalf("Prepare error = %#v", err)
@@ -94,11 +96,12 @@ func TestReworkRejectsDecreasingAttempt(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	if _, err := svc.Prepare(context.Background(), key); err != nil {
+	workDir := t.TempDir()
+	if _, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
 	attempt.Store(1)
-	_, err := svc.Prepare(context.Background(), key)
+	_, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	te, ok := err.(*TaskError)
 	if !ok || te.Code != "invalid_cloud_response" {
 		t.Fatalf("Prepare error = %#v", err)
@@ -135,18 +138,19 @@ func TestRemovePrepareJournalRejectsInvalidID(t *testing.T) {
 	}
 }
 
-func TestPrepareWithFactsReportsRepeatedPreparationAsAlreadyCompleted(t *testing.T) {
+func TestHandleReportsRepeatedPreparationAsAlreadyCompleted(t *testing.T) {
 	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"result","kind":"file","source_version":"v1","relative_path":"output/result.md","role":"output_writable","content":"draft"}]}`)
 	defer srv.Close()
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 
-	first, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{})
+	workDir := t.TempDir()
+	first, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil || !first.Performed || first.Outcome != OutcomeCompleted {
 		t.Fatalf("first = %+v, err=%v", first, err)
 	}
-	second, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{})
+	second, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil || second.Performed || second.Outcome != OutcomeAlreadyCompleted || !second.Prepared {
 		t.Fatalf("second = %+v, err=%v", second, err)
 	}
@@ -168,7 +172,7 @@ func TestConcurrentPrepareAndDeleteAreSerializedByTaskKey(t *testing.T) {
 
 	prepareResult := make(chan error, 1)
 	go func() {
-		_, err := svc.Prepare(context.Background(), key)
+		_, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 		prepareResult <- err
 	}()
 	<-prepareStarted
@@ -182,13 +186,13 @@ func TestConcurrentPrepareAndDeleteAreSerializedByTaskKey(t *testing.T) {
 	case err := <-deleteResult:
 		close(releasePrepare)
 		<-prepareResult
-		t.Fatalf("PreviewDelete completed while Prepare was in progress: %v", err)
+		t.Fatalf("PreviewDelete completed while Handle was in progress: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	close(releasePrepare)
 	if err := <-prepareResult; err != nil {
-		t.Fatalf("Prepare: %v", err)
+		t.Fatalf("Handle: %v", err)
 	}
 	if err := <-deleteResult; err != nil {
 		t.Fatalf("PreviewDelete: %v", err)
@@ -206,12 +210,13 @@ func TestReprepareArchivesCleanDirectoryWhenContextChanges(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	first, err := svc.Prepare(context.Background(), key)
+	workDir := t.TempDir()
+	first, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	contextVersion.Store(2)
-	second, err := svc.Prepare(context.Background(), key)
+	second, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("reprepare: %v", err)
 	}
@@ -222,7 +227,7 @@ func TestReprepareArchivesCleanDirectoryWhenContextChanges(t *testing.T) {
 	if string(data) != "version 2" {
 		t.Fatalf("new material = %q", data)
 	}
-	archives, err := filepath.Glob(filepath.Join(store.Layout().HistoryRoot(), "cloud", "ws", "node-worker", "*"))
+	archives, err := filepath.Glob(filepath.Join(first.PreparationRoot, ".history", "cloud", "ws", "node-worker", "*"))
 	if err != nil || len(archives) != 1 {
 		t.Fatalf("archives = %v, err=%v", archives, err)
 	}
@@ -244,7 +249,7 @@ func TestReprepareKeepsCustomDirectoryAndArchivesWithinManagedRoot(t *testing.T)
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 	workDir := t.TempDir()
-	first, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	first, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +257,7 @@ func TestReprepareKeepsCustomDirectoryAndArchivesWithinManagedRoot(t *testing.T)
 		t.Fatal(err)
 	}
 	contextVersion.Store(2)
-	second, err := svc.Prepare(context.Background(), key)
+	second, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("reprepare: %v", err)
 	}
@@ -279,9 +284,9 @@ func TestPrepareWithWorkDirRepairsRecordWithEmptyDirectory(t *testing.T) {
 	if err := store.SaveTask(TaskRecord{Key: key, Prepared: true}); err != nil {
 		t.Fatal(err)
 	}
-	transition, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
+	transition, err := NewService(store, NewCloudClient(srv.URL, testCredentials)).Handle(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("PrepareWithFacts: %v", err)
+		t.Fatalf("Handle: %v", err)
 	}
 	if transition.Directory == "" || !transition.Prepared {
 		t.Fatalf("transition = %+v", transition)
@@ -314,11 +319,12 @@ func TestPrepareMetadataRefreshPersistsDisplayName(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	if _, err := svc.Prepare(context.Background(), key); err != nil {
+	workDir := t.TempDir()
+	if _, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
 	version.Store(2)
-	if _, err := svc.Prepare(context.Background(), key); err != nil {
+	if _, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
 	record, found, err := store.LoadTask(key)
@@ -342,11 +348,12 @@ func TestReprepareKeepsCachedDisplayNameWhenCloudOmitsIt(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	if _, err := svc.Prepare(context.Background(), key); err != nil {
+	workDir := t.TempDir()
+	if _, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
 	contextVersion.Store(2)
-	record, err := svc.Prepare(context.Background(), key)
+	record, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +369,7 @@ func TestPrepareRejectsUnsupportedProviderBeforeCreatingTaskDirectories(t *testi
 	store, _ := OpenStore(root)
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	_, err := svc.Prepare(context.Background(), key)
+	_, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	te, ok := err.(*TaskError)
 	if !ok || te.Code != "provider_not_supported" {
 		t.Fatalf("Prepare error = %#v", err)
@@ -476,11 +483,11 @@ func TestPrepareMaterializesFilesAndPublishesAtomically(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	record, err := svc.Prepare(context.Background(), key)
+	record, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if !record.Prepared || record.Activity != ActivityPrepared {
+	if !record.Prepared {
 		t.Fatalf("record = %+v", record)
 	}
 	data, err := os.ReadFile(filepath.Join(record.Directory, "input", "requirements.md"))
@@ -504,9 +511,9 @@ func TestPrepareWithWorkDirCreatesManagedTaskDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	transition, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	transition, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: workDir})
 	if err != nil {
-		t.Fatalf("PrepareWithFacts: %v", err)
+		t.Fatalf("Handle: %v", err)
 	}
 	want := filepath.Join(resolvedWorkDir, ".cs-cloud-tasks", "cloud", "ws", "node-worker")
 	if transition.Directory != want || transition.PreparationRoot != filepath.Join(resolvedWorkDir, ".cs-cloud-tasks") {
@@ -524,7 +531,7 @@ func TestPrepareRejectsRelativeWorkDir(t *testing.T) {
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 
-	_, err := svc.PrepareWithFacts(context.Background(), key, PrepareOptions{WorkDir: "."})
+	_, err := svc.Handle(context.Background(), key, PrepareOptions{WorkDir: "."})
 	te, ok := err.(*TaskError)
 	if !ok || te.Code != "invalid_workdir" {
 		t.Fatalf("error = %#v", err)
@@ -593,7 +600,7 @@ func TestPreparePersistsSanitizedDeliverableOrigin(t *testing.T) {
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/critic")
 
-	record, err := svc.Prepare(context.Background(), key)
+	record, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +632,7 @@ func TestPrepareServerFileContextPreservesCloudMaterialDigestForPreview(t *testi
 	store, _ := OpenStore(t.TempDir())
 	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
-	record, err := svc.Prepare(context.Background(), key)
+	record, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -674,12 +681,12 @@ func TestRecoverPrepareJournalPublishesReadyStaging(t *testing.T) {
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta := preparedMetadata{Key: key, RemoteVersion: "1:1:1", Attempt: 1}
+	meta := preparedMetadata{SchemaVersion: StoreSchemaVersion, Key: key, RemoteVersion: "1:1:1", Attempt: 1}
 	b, _ := json.Marshal(meta)
 	if err := os.WriteFile(filepath.Join(staging, "task.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manifest := Manifest{SchemaVersion: SchemaVersion, MaterialDigest: "digest"}
+	manifest := Manifest{SchemaVersion: StoreSchemaVersion, MaterialDigest: "digest"}
 	b, _ = json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(staging, "manifest.json"), b, 0o600); err != nil {
 		t.Fatal(err)

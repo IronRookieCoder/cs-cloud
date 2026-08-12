@@ -53,9 +53,8 @@ func TestProjectStatusUsesFixedPriority(t *testing.T) {
 		{"reprepare", Facts{ReprepareRequired: true, ReconfirmationRequired: true}, StatusReprepareRequired},
 		{"reconfirmation", Facts{ReconfirmationRequired: true, SyncPending: true}, StatusReconfirmationRequired},
 		{"sync pending", Facts{SyncPending: true, ConfirmationWaiting: true}, StatusSyncPending},
-		{"confirmation", Facts{ConfirmationWaiting: true, Activity: ActivityActive}, StatusConfirmationWaiting},
-		{"active", Facts{Activity: ActivityActive, Prepared: true}, StatusInProgress},
-		{"prepared", Facts{Prepared: true}, StatusPrepared},
+		{"confirmation", Facts{ConfirmationWaiting: true, Prepared: true}, StatusConfirmationWaiting},
+		{"ready", Facts{Prepared: true}, StatusReady},
 		{"not prepared", Facts{}, StatusNotPrepared},
 	}
 	for _, tt := range tests {
@@ -85,9 +84,28 @@ func TestProjectStatusRecognizesWorkflowRemoteStates(t *testing.T) {
 			if projection.DisplayStatus != StatusNotPrepared {
 				t.Fatalf("status = %s, want %s", projection.DisplayStatus, StatusNotPrepared)
 			}
-			if len(projection.AvailableActions) != 2 || projection.AvailableActions[0] != "get" || projection.AvailableActions[1] != "prepare" {
-				t.Fatalf("actions = %#v, want [get prepare]", projection.AvailableActions)
+			if len(projection.AvailableActions) != 2 || projection.AvailableActions[0] != "get" || projection.AvailableActions[1] != "handle" {
+				t.Fatalf("actions = %#v, want [get handle]", projection.AvailableActions)
 			}
 		})
+	}
+}
+
+func TestReadyTaskOffersRoleTerminalActionWithoutStart(t *testing.T) {
+	tests := []struct {
+		role Role
+		want string
+	}{
+		{role: RoleWorker, want: "submit"},
+		{role: RoleCritic, want: "review"},
+	}
+	for _, tt := range tests {
+		projection := ProjectStatus(Facts{Prepared: true, Role: tt.role})
+		if projection.DisplayStatus != StatusReady {
+			t.Fatalf("role %s status = %s", tt.role, projection.DisplayStatus)
+		}
+		if len(projection.AvailableActions) != 3 || projection.AvailableActions[1] != tt.want {
+			t.Fatalf("role %s actions = %#v", tt.role, projection.AvailableActions)
+		}
 	}
 }
