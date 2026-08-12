@@ -131,14 +131,22 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 	if task, ok := data.Result.(membertask.Task); ok {
 		if task.Remote != nil {
 			if task.Remote.IssueIdentifier != "" {
-				_, _ = fmt.Fprintf(out, "issue: %s", task.Remote.IssueIdentifier)
-				if task.Remote.IssueTitle != "" {
-					_, _ = fmt.Fprintf(out, " %s", task.Remote.IssueTitle)
+				if _, err := fmt.Fprintf(out, "issue: %s", task.Remote.IssueIdentifier); err != nil {
+					return err
 				}
-				_, _ = fmt.Fprintln(out)
+				if task.Remote.IssueTitle != "" {
+					if _, err := fmt.Fprintf(out, " %s", task.Remote.IssueTitle); err != nil {
+						return err
+					}
+				}
+				if _, err := fmt.Fprintln(out); err != nil {
+					return err
+				}
 			}
 		} else if task.Local != nil && task.Local.IssueIdentifier != "" {
-			_, _ = fmt.Fprintf(out, "issue: %s %s\n", task.Local.IssueIdentifier, task.Local.IssueTitle)
+			if _, err := fmt.Fprintf(out, "issue: %s %s\n", task.Local.IssueIdentifier, task.Local.IssueTitle); err != nil {
+				return err
+			}
 		}
 	}
 	if displayName != "" {

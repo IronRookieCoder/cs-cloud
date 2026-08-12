@@ -213,6 +213,31 @@ func TestServiceListUsesCloudDisplayNameAndMarksIdentityFallback(t *testing.T) {
 	}
 }
 
+func TestServiceListPersistsIssueMetadataForOfflineHistory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tasks":[{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"issue-task","role":"worker","title":"实现","issue_id":"issue-1","issue_number":42,"issue_identifier":"ENG-42","issue_title":"修复登录","issue_description":"补充登录校验","workspace_slug":"engineering","task_kind":"initial","attempt":1,"task_version":1,"context_version":1,"cloud_status":"assigned"}]}`))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/issue-task/worker")
+	if err := store.SaveTask(TaskRecord{Key: key, Prepared: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.LoadTask(key)
+	if err != nil || !found || record.IssueIdentifier != "ENG-42" || record.IssueDescription != "补充登录校验" {
+		t.Fatalf("record = %+v, found=%v, err=%v", record, found, err)
+	}
+	offline := NewService(store, NewCloudClient("http://127.0.0.1:1", testCredentials))
+	tasks, err := offline.List(context.Background())
+	if err != nil || len(tasks) != 1 || tasks[0].Local == nil || tasks[0].Local.IssueIdentifier != "ENG-42" {
+		t.Fatalf("offline tasks = %+v, err=%v", tasks, err)
+	}
+}
+
 func TestServiceListFallsBackToLocalHistoryOffline(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	key, _ := ParseTaskKey("cloud/ws/local/worker")

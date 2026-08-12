@@ -112,8 +112,10 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 			return TaskRecord{}, newTaskError("prepare_location_conflict", fmt.Sprintf("task is already prepared at %s", existing.Directory), nil)
 		}
 		displayChanged := syncRecordDisplay(&existing, remote.RemoteTask)
+		issueChanged := existing.IssueID != remote.IssueID || existing.IssueNumber != remote.IssueNumber || existing.IssueIdentifier != remote.IssueIdentifier || existing.IssueTitle != remote.IssueTitle || existing.IssueDescription != remote.IssueDescription || existing.WorkspaceSlug != remote.WorkspaceSlug || existing.TaskKind != remote.TaskKind
+		syncRecordIssue(&existing, remote.RemoteTask)
 		if existing.RemoteVersion == versionString(remote.RemoteTask) && existing.Prepared {
-			if displayChanged {
+			if displayChanged || issueChanged {
 				if err := updatePreparedMetadata(s.store, existing, remote); err != nil {
 					return TaskRecord{}, err
 				}
@@ -247,7 +249,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	if err := os.Rename(staging, final); err != nil {
 		return TaskRecord{}, newTaskError("prepare_failed", "cannot publish prepared task directory", err)
 	}
-	record := TaskRecord{Key: key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	record := TaskRecord{Key: key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: remote.Attempt, Directory: final, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
 	if err := s.store.SaveTask(record); err != nil {
 		return TaskRecord{}, err
 	}
