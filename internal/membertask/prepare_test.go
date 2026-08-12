@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -538,6 +539,50 @@ func TestPrepareTargetRejectsWhitespaceWorkDir(t *testing.T) {
 	te, ok := err.(*TaskError)
 	if !ok || te.Code != "invalid_workdir" {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestPrepareTargetRejectsCurrentDirectoryInsideStore(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, nil)
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(store.Layout().StoreRoot()); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(original)
+	_, _, err = svc.prepareTarget(key, "")
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "invalid_workdir" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestCopyTaskDirectoryPreservesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("当前 Windows 测试环境未授予创建符号链接的权限")
+	}
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	dst := filepath.Join(root, "dst")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "target"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTaskDirectory(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(filepath.Join(dst, "link"))
+	if err != nil || got != "target" {
+		t.Fatalf("link = %q, err=%v", got, err)
 	}
 }
 

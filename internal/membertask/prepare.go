@@ -194,7 +194,11 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		Version string
 	}{key.String(), versionString(remote.RemoteTask)})[:24]
 	staging := filepath.Join(parent, "."+filepath.Base(final)+".staging-"+prepareID)
-	journal := PrepareJournal{ID: prepareID, Key: key, Phase: PreparePhasePreparing, Staging: staging, Final: final, Root: preparationRoot, Archive: archive, ArchiveRoot: archiveRoot, CreatedAt: s.now().UTC()}
+	archiveTemp := ""
+	if archive != "" {
+		archiveTemp = archive + ".tmp-" + prepareID
+	}
+	journal := PrepareJournal{ID: prepareID, Key: key, Phase: PreparePhasePreparing, Staging: staging, Final: final, Root: preparationRoot, Archive: archive, ArchiveTemp: archiveTemp, ArchiveRoot: archiveRoot, CreatedAt: s.now().UTC()}
 	if err := s.savePrepareJournal(journal); err != nil {
 		return TaskRecord{}, err
 	}
@@ -229,13 +233,8 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		if err := os.MkdirAll(filepath.Dir(archive), 0o700); err != nil {
 			return TaskRecord{}, err
 		}
-		if err := os.Rename(final, archive); err != nil {
-			if copyErr := copyTaskDirectory(final, archive); copyErr != nil {
-				return TaskRecord{}, newTaskError("prepare_failed", "cannot archive previous task directory", err)
-			}
-			if removeErr := os.RemoveAll(final); removeErr != nil {
-				return TaskRecord{}, newTaskError("prepare_failed", "cannot remove archived task directory", removeErr)
-			}
+		if err := archiveTaskDirectory(final, archive, archiveTemp); err != nil {
+			return TaskRecord{}, newTaskError("prepare_failed", "cannot archive previous task directory", err)
 		}
 	}
 	if err := os.Rename(staging, final); err != nil {
@@ -266,12 +265,38 @@ func copyTaskDirectory(src, dst string) error {
 		if info.IsDir() {
 			return os.MkdirAll(target, 0o700)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		return os.WriteFile(target, data, info.Mode().Perm())
 	})
+}
+
+func archiveTaskDirectory(src, dst, temp string) error {
+	if temp == "" {
+		temp = dst + ".tmp"
+	}
+	_ = os.RemoveAll(temp)
+	if err := copyTaskDirectory(src, temp); err != nil {
+		_ = os.RemoveAll(temp)
+		return err
+	}
+	if err := os.Rename(temp, dst); err != nil {
+		_ = os.RemoveAll(temp)
+		return err
+	}
+	return os.RemoveAll(src)
 }
 
 func (s *Service) RecoverPrepareJournals(ctx context.Context) error {
@@ -335,6 +360,7 @@ func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
 	stagingExists := pathExists(journal.Staging)
 	finalExists := pathExists(journal.Final)
 	archiveExists := journal.Archive != "" && pathExists(journal.Archive)
+	tempExists := journal.ArchiveTemp != "" && pathExists(journal.ArchiveTemp)
 	if stagingExists && finalExists && journal.Archive == "" {
 		return newTaskError("local_task_store_corrupt", "prepare journal has both staging and final directories", nil)
 	}
@@ -352,11 +378,23 @@ func (s *Service) recoverPrepareJournal(journal PrepareJournal) error {
 				if err := os.MkdirAll(filepath.Dir(journal.Archive), 0o700); err != nil {
 					return err
 				}
-				if err := os.Rename(journal.Final, journal.Archive); err != nil {
-					return newTaskError("prepare_recovery_required", "cannot archive previous task directory", err)
+				if !tempExists {
+					if err := copyTaskDirectory(journal.Final, journal.ArchiveTemp); err != nil {
+						return newTaskError("prepare_recovery_required", "cannot copy previous task directory", err)
+					}
+				}
+				if err := os.Rename(journal.ArchiveTemp, journal.Archive); err != nil {
+					return newTaskError("prepare_recovery_required", "cannot promote archived task directory", err)
 				}
 				finalExists = false
 				archiveExists = true
+				tempExists = false
+			}
+			if finalExists && archiveExists {
+				if err := os.RemoveAll(journal.Final); err != nil {
+					return newTaskError("prepare_recovery_required", "cannot remove archived task directory", err)
+				}
+				finalExists = false
 			}
 			if stagingExists && !finalExists && archiveExists {
 				if err := os.Rename(journal.Staging, journal.Final); err != nil {
@@ -552,6 +590,14 @@ func (s *Service) prepareTarget(key TaskKey, workDir string) (string, string, er
 		if err != nil {
 			return "", "", newTaskError("invalid_workdir", "cannot resolve current working directory", err)
 		}
+		resolved, err := filepath.EvalSymlinks(cwd)
+		if err != nil {
+			return "", "", newTaskError("invalid_workdir", "cannot resolve current working directory links", err)
+		}
+		if err := ValidateContainedPath(s.store.Layout().StoreRoot(), resolved); err == nil {
+			return "", "", newTaskError("invalid_workdir", "prepare working directory cannot be inside the profile store", nil)
+		}
+		cwd = resolved
 		// Keep default preparations in the active workspace while isolating stores
 		// that are commonly used by parallel CLI/tests.
 		root := filepath.Join(cwd, ".cs-cloud-tasks", digestJSON(s.store.Layout().StoreRoot())[:16])

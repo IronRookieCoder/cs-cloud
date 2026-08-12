@@ -118,16 +118,24 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 			}
 		}
 	}
-	if task, ok := data.Result.(membertask.Task); ok {
-		if task.DisplayName != "" {
-			if _, err := fmt.Fprintf(out, "task: %s\n", task.DisplayName); err != nil {
-				return err
-			}
+	var displayName, directory string
+	switch task := data.Result.(type) {
+	case membertask.Task:
+		displayName = task.DisplayName
+		if task.Local != nil {
+			directory = task.Local.Directory
 		}
-		if task.Local != nil && task.Local.Directory != "" {
-			if _, err := fmt.Fprintf(out, "directory: %s\n", task.Local.Directory); err != nil {
-				return err
-			}
+	case membertask.LocalTransition:
+		displayName, directory = task.DisplayName, task.Directory
+	}
+	if displayName != "" {
+		if _, err := fmt.Fprintf(out, "task: %s\n", displayName); err != nil {
+			return err
+		}
+	}
+	if directory != "" {
+		if _, err := fmt.Fprintf(out, "directory: %s\n", directory); err != nil {
+			return err
 		}
 	}
 	_, err := fmt.Fprintln(out, "action: inspect the task details or follow the next command")
@@ -138,6 +146,8 @@ func displayStatusText(status membertask.DisplayStatus) string {
 	switch status {
 	case membertask.StatusEnded:
 		return "已结束"
+	case membertask.StatusSubmitting:
+		return "提交中"
 	case membertask.StatusInProgress:
 		return "处理中"
 	case membertask.StatusPrepared:
@@ -150,6 +160,8 @@ func displayStatusText(status membertask.DisplayStatus) string {
 		return "需要重新准备"
 	case membertask.StatusReconfirmationRequired:
 		return "需要重新确认"
+	case membertask.StatusSyncPending:
+		return "等待同步"
 	case membertask.StatusConfirmationWaiting:
 		return "等待确认"
 	default:

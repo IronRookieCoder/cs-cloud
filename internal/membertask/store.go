@@ -70,6 +70,7 @@ type PrepareJournal struct {
 	Final       string       `json:"final"`
 	Root        string       `json:"root,omitempty"`
 	Archive     string       `json:"archive,omitempty"`
+	ArchiveTemp string       `json:"archive_temp,omitempty"`
 	ArchiveRoot string       `json:"archive_root,omitempty"`
 	CreatedAt   time.Time    `json:"created_at"`
 }

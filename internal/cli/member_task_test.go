@@ -127,6 +127,27 @@ func TestWriteTaskTextRejectsMissingCommand(t *testing.T) {
 	}
 }
 
+func TestWriteTaskTextIncludesLocalTransitionTaskDetails(t *testing.T) {
+	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
+	var out bytes.Buffer
+	data := &taskCommandData{Command: []string{"cs-cloud", "task", "start"}, Result: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key, DisplayName: "示例任务", Directory: `C:\tasks\node`}}}
+	if err := writeTaskText(&out, data); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "task: 示例任务\n") || !strings.Contains(out.String(), "directory: C:\\tasks\\node\n") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestDisplayStatusTextIncludesSubmittingAndSyncPending(t *testing.T) {
+	if got := displayStatusText(membertask.StatusSubmitting); got != "提交中" {
+		t.Fatalf("submitting = %q", got)
+	}
+	if got := displayStatusText(membertask.StatusSyncPending); got != "等待同步" {
+		t.Fatalf("sync pending = %q", got)
+	}
+}
+
 func TestPrepareCommandResolvesWorkDirBeforeTransport(t *testing.T) {
 	key, _ := membertask.ParseTaskKey("cloud/ws/node/worker")
 	api := &fakeMemberTaskAPI{response: membertask.LocalTransition{TaskRecord: membertask.TaskRecord{Key: key}}}
