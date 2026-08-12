@@ -6,10 +6,11 @@ import (
 
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/membertask"
+	"cs-cloud/internal/workflow"
 )
 
 func TestMemberTaskRuntimeCreatesStableSecuredSecret(t *testing.T) {
-	a := &App{rootDir: t.TempDir(), cfg: &config.Config{CloudBaseURL: "https://cloud.invalid"}}
+	a := &App{rootDir: t.TempDir(), cfg: &config.Config{CloudBaseURL: "https://cloud.invalid", Workflow: workflow.Config{BackendBaseURL: "https://workflow.invalid/"}}}
 	service, first, err := a.NewMemberTaskRuntime()
 	if err != nil {
 		t.Fatalf("NewMemberTaskRuntime: %v", err)
@@ -26,6 +27,17 @@ func TestMemberTaskRuntimeCreatesStableSecuredSecret(t *testing.T) {
 	}
 	if err := membertask.ValidateProfilePermissions(a.RootDir(), a.memberTaskSecretPath()); err != nil {
 		t.Fatalf("profile permissions: %v", err)
+	}
+}
+
+func TestMemberTaskRuntimeUsesWorkflowBackendURL(t *testing.T) {
+	a := &App{rootDir: t.TempDir(), cfg: &config.Config{
+		CloudBaseURL: "https://cloud.invalid/cloud-api",
+		Workflow:     workflow.Config{BackendBaseURL: "https://workflow.invalid/workflow-backend/"},
+	}}
+	service, _, err := a.NewMemberTaskRuntime()
+	if err != nil || service == nil {
+		t.Fatalf("NewMemberTaskRuntime: service=%v err=%v", service, err)
 	}
 }
 

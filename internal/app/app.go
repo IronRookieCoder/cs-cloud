@@ -66,7 +66,15 @@ func (a *App) NewMemberTaskRuntime() (*membertask.Service, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	cloud := membertask.NewCloudClient(a.CloudBaseURL(), a.Credentials)
+	// Member tasks are served by the Multica workflow backend, while
+	// CloudBaseURL points at the CoStrict cloud-api gateway. Reuse the same
+	// workflow base URL as the workflow runner so task requests reach
+	// /workflow-backend/api/member/tasks.
+	baseURL := strings.TrimRight(a.cfg.Workflow.BackendBaseURL, "/")
+	if baseURL == "" {
+		baseURL = a.CloudBaseURL()
+	}
+	cloud := membertask.NewCloudClient(baseURL, a.Credentials)
 	return membertask.NewService(store, cloud), secret, nil
 }
 

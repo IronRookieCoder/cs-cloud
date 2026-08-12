@@ -296,7 +296,10 @@ func loadTaskEnvFileFrom(startDir string) {
 			continue
 		}
 		k = strings.TrimSpace(k)
-		if _, ok := os.LookupEnv(k); ok {
+		// An empty inherited value is equivalent to an unset value here. Agent
+		// launchers may propagate CS_CLOUD_* keys with empty values when task
+		// context was not available, and the task env file should fill those in.
+		if value, ok := os.LookupEnv(k); ok && value != "" {
 			continue
 		}
 		os.Setenv(k, stripEnvQuotes(strings.TrimSpace(v)))
