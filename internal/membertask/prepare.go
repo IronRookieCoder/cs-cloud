@@ -25,6 +25,13 @@ type preparedMetadata struct {
 	ReworkReason        string            `json:"rework_reason,omitempty"`
 	DisplayName         string            `json:"display_name,omitempty"`
 	DisplayNameSource   DisplayNameSource `json:"display_name_source,omitempty"`
+	IssueID             string            `json:"issue_id,omitempty"`
+	IssueNumber         int32             `json:"issue_number,omitempty"`
+	IssueIdentifier     string            `json:"issue_identifier,omitempty"`
+	IssueTitle          string            `json:"issue_title,omitempty"`
+	IssueDescription    string            `json:"issue_description,omitempty"`
+	WorkspaceSlug       string            `json:"workspace_slug,omitempty"`
+	TaskKind            string            `json:"task_kind,omitempty"`
 	PreparationRoot     string            `json:"preparation_root,omitempty"`
 }
 
@@ -216,7 +223,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		_ = s.removePrepareJournal(journal.ID)
 		return TaskRecord{}, err
 	}
-	metadata := preparedMetadata{SchemaVersion: SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot}
+	metadata := preparedMetadata{SchemaVersion: SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot, IssueID: remote.IssueID, IssueNumber: remote.IssueNumber, IssueIdentifier: remote.IssueIdentifier, IssueTitle: remote.IssueTitle, IssueDescription: remote.IssueDescription, WorkspaceSlug: remote.WorkspaceSlug, TaskKind: remote.TaskKind}
 	if err := writePreparedFiles(s.store, staging, metadata, manifest); err != nil {
 		_ = os.RemoveAll(staging)
 		_ = s.removePrepareJournal(journal.ID)
@@ -453,6 +460,8 @@ func updatePreparedMetadata(store *Store, record TaskRecord, remote RemoteTaskCo
 	metadata.Goal = remote.Goal
 	metadata.Acceptance = remote.AcceptanceCriteria
 	metadata.ReworkReason = remote.ReworkReason
+	metadata.IssueID, metadata.IssueNumber, metadata.IssueIdentifier = remote.IssueID, remote.IssueNumber, remote.IssueIdentifier
+	metadata.IssueTitle, metadata.IssueDescription, metadata.WorkspaceSlug, metadata.TaskKind = remote.IssueTitle, remote.IssueDescription, remote.WorkspaceSlug, remote.TaskKind
 	if name, source := displayNameFromRemote(remote.RemoteTask); name != "" {
 		metadata.DisplayName, metadata.DisplayNameSource = name, source
 	}
@@ -580,7 +589,7 @@ func readPreparedRecord(root string) (TaskRecord, error) {
 	if preparationRoot == "" {
 		preparationRoot = filepath.Dir(filepath.Dir(filepath.Dir(root)))
 	}
-	record := TaskRecord{Key: metadata.Key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
+	record := TaskRecord{Key: metadata.Key, DisplayName: metadata.DisplayName, DisplayNameSource: metadata.DisplayNameSource, IssueID: metadata.IssueID, IssueNumber: metadata.IssueNumber, IssueIdentifier: metadata.IssueIdentifier, IssueTitle: metadata.IssueTitle, IssueDescription: metadata.IssueDescription, WorkspaceSlug: metadata.WorkspaceSlug, TaskKind: metadata.TaskKind, RemoteVersion: metadata.RemoteVersion, CloudMaterialDigest: metadata.CloudMaterialDigest, Attempt: metadata.Attempt, Directory: root, PreparationRoot: preparationRoot, Prepared: true, Activity: ActivityPrepared, Manifest: &manifest}
 	return record, nil
 }
 

@@ -110,6 +110,7 @@ func (s *Service) List(ctx context.Context) ([]Task, error) {
 				record.LastVerifiedAt = &now
 				record.RemoteVersion = versionString(remoteTask)
 				record.Attempt = remoteTask.Attempt
+				syncRecordIssue(record, remoteTask)
 			})
 			if err != nil {
 				return nil, err
@@ -203,6 +204,7 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 		record.LastVerifiedAt = &now
 		record.RemoteVersion = versionString(remote)
 		record.Attempt = remote.Attempt
+		syncRecordIssue(&record, remote)
 		if name, source := displayNameFromRemote(remote); name != "" {
 			record.DisplayName, record.DisplayNameSource = name, source
 		}
@@ -232,6 +234,19 @@ func displayNameFromRemote(remote RemoteTask) (string, DisplayNameSource) {
 		return name, DisplayNameSourceNode
 	}
 	return "", ""
+}
+
+func syncRecordIssue(record *TaskRecord, remote RemoteTask) {
+	if record == nil {
+		return
+	}
+	record.IssueID = remote.IssueID
+	record.IssueNumber = remote.IssueNumber
+	record.IssueIdentifier = remote.IssueIdentifier
+	record.IssueTitle = remote.IssueTitle
+	record.IssueDescription = remote.IssueDescription
+	record.WorkspaceSlug = remote.WorkspaceSlug
+	record.TaskKind = remote.TaskKind
 }
 
 func normalizeDisplayName(value string) string {

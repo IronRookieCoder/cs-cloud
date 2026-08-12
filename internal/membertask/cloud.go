@@ -25,19 +25,25 @@ const (
 )
 
 type RemoteTask struct {
-	Ref             TaskKey `json:"ref,omitempty"`
-	Title           string  `json:"title,omitempty"`
-	DisplayName     string  `json:"display_name,omitempty"`
-	IssueTitle      string  `json:"issue_title,omitempty"`
-	NodeName        string  `json:"node_name,omitempty"`
-	CloudInstanceID string  `json:"cloud_instance_id"`
-	WorkspaceID     string  `json:"workspace_id"`
-	NodeRunID       string  `json:"node_run_id"`
-	Role            Role    `json:"role"`
-	Attempt         int     `json:"attempt"`
-	TaskVersion     int64   `json:"task_version"`
-	ContextVersion  int64   `json:"context_version"`
-	CloudStatus     string  `json:"cloud_status"`
+	Ref              TaskKey `json:"ref,omitempty"`
+	Title            string  `json:"title,omitempty"`
+	DisplayName      string  `json:"display_name,omitempty"`
+	IssueTitle       string  `json:"issue_title,omitempty"`
+	IssueID          string  `json:"issue_id,omitempty"`
+	IssueNumber      int32   `json:"issue_number,omitempty"`
+	IssueIdentifier  string  `json:"issue_identifier,omitempty"`
+	IssueDescription string  `json:"issue_description,omitempty"`
+	WorkspaceSlug    string  `json:"workspace_slug,omitempty"`
+	TaskKind         string  `json:"task_kind,omitempty"`
+	NodeName         string  `json:"node_name,omitempty"`
+	CloudInstanceID  string  `json:"cloud_instance_id"`
+	WorkspaceID      string  `json:"workspace_id"`
+	NodeRunID        string  `json:"node_run_id"`
+	Role             Role    `json:"role"`
+	Attempt          int     `json:"attempt"`
+	TaskVersion      int64   `json:"task_version"`
+	ContextVersion   int64   `json:"context_version"`
+	CloudStatus      string  `json:"cloud_status"`
 }
 
 func (t RemoteTask) Key() TaskKey {

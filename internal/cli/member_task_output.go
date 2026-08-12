@@ -128,6 +128,19 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 	case membertask.LocalTransition:
 		displayName, directory = task.DisplayName, task.Directory
 	}
+	if task, ok := data.Result.(membertask.Task); ok {
+		if task.Remote != nil {
+			if task.Remote.IssueIdentifier != "" {
+				_, _ = fmt.Fprintf(out, "issue: %s", task.Remote.IssueIdentifier)
+				if task.Remote.IssueTitle != "" {
+					_, _ = fmt.Fprintf(out, " %s", task.Remote.IssueTitle)
+				}
+				_, _ = fmt.Fprintln(out)
+			}
+		} else if task.Local != nil && task.Local.IssueIdentifier != "" {
+			_, _ = fmt.Fprintf(out, "issue: %s %s\n", task.Local.IssueIdentifier, task.Local.IssueTitle)
+		}
+	}
 	if displayName != "" {
 		if _, err := fmt.Fprintf(out, "task: %s\n", displayName); err != nil {
 			return err

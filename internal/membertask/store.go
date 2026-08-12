@@ -22,6 +22,13 @@ type TaskRecord struct {
 	Key                    TaskKey           `json:"key"`
 	DisplayName            string            `json:"display_name,omitempty"`
 	DisplayNameSource      DisplayNameSource `json:"display_name_source,omitempty"`
+	IssueID                string            `json:"issue_id,omitempty"`
+	IssueNumber            int32             `json:"issue_number,omitempty"`
+	IssueIdentifier        string            `json:"issue_identifier,omitempty"`
+	IssueTitle             string            `json:"issue_title,omitempty"`
+	IssueDescription       string            `json:"issue_description,omitempty"`
+	WorkspaceSlug          string            `json:"workspace_slug,omitempty"`
+	TaskKind               string            `json:"task_kind,omitempty"`
 	RemoteVersion          string            `json:"remote_version,omitempty"`
 	CloudMaterialDigest    string            `json:"cloud_material_digest,omitempty"`
 	Attempt                int               `json:"attempt,omitempty"`
