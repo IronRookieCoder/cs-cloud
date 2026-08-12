@@ -26,6 +26,7 @@ const (
 
 type RemoteTask struct {
 	Ref             TaskKey `json:"ref,omitempty"`
+	Title           string  `json:"title,omitempty"`
 	DisplayName     string  `json:"display_name,omitempty"`
 	IssueTitle      string  `json:"issue_title,omitempty"`
 	NodeName        string  `json:"node_name,omitempty"`

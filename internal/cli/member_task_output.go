@@ -105,8 +105,56 @@ func writeTaskText(out io.Writer, data *taskCommandData) error {
 		return errors.New("task command is missing")
 	}
 	command := strings.Join(data.Command[1:], " ")
-	_, err := fmt.Fprintf(out, "%s\noutcome: %s\nperformed: %t\n", command, data.Outcome, data.Performed)
+	if _, err := fmt.Fprintf(out, "%s\noutcome: %s\nperformed: %t\n", command, data.Outcome, data.Performed); err != nil {
+		return err
+	}
+	if data.StateAfter != nil {
+		if _, err := fmt.Fprintf(out, "status: %s\n", displayStatusText(data.StateAfter.DisplayStatus)); err != nil {
+			return err
+		}
+		if len(data.StateAfter.AvailableActions) > 0 {
+			if _, err := fmt.Fprintf(out, "next: %s\n", strings.Join(data.StateAfter.AvailableActions, ", ")); err != nil {
+				return err
+			}
+		}
+	}
+	if task, ok := data.Result.(membertask.Task); ok {
+		if task.DisplayName != "" {
+			if _, err := fmt.Fprintf(out, "task: %s\n", task.DisplayName); err != nil {
+				return err
+			}
+		}
+		if task.Local != nil && task.Local.Directory != "" {
+			if _, err := fmt.Fprintf(out, "directory: %s\n", task.Local.Directory); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintln(out, "action: inspect the task details or follow the next command")
 	return err
+}
+
+func displayStatusText(status membertask.DisplayStatus) string {
+	switch status {
+	case membertask.StatusEnded:
+		return "已结束"
+	case membertask.StatusInProgress:
+		return "处理中"
+	case membertask.StatusPrepared:
+		return "已准备"
+	case membertask.StatusNotPrepared:
+		return "待准备"
+	case membertask.StatusReadOnly:
+		return "只可查看"
+	case membertask.StatusReprepareRequired:
+		return "需要重新准备"
+	case membertask.StatusReconfirmationRequired:
+		return "需要重新确认"
+	case membertask.StatusConfirmationWaiting:
+		return "等待确认"
+	default:
+		return string(status)
+	}
 }
 
 func writeTaskErrorText(out io.Writer, envelope taskCommandEnvelope) error {

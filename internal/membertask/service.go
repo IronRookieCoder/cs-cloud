@@ -222,6 +222,9 @@ func displayNameFromRemote(remote RemoteTask) (string, DisplayNameSource) {
 	if name := normalizeDisplayName(remote.DisplayName); name != "" {
 		return name, DisplayNameSourceCloud
 	}
+	if name := normalizeDisplayName(remote.Title); name != "" {
+		return name, DisplayNameSourceCloud
+	}
 	if name := normalizeDisplayName(remote.IssueTitle); name != "" {
 		return name, DisplayNameSourceIssue
 	}

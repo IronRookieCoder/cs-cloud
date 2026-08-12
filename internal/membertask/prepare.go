@@ -167,7 +167,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 			return TaskRecord{}, newTaskError("local_changes_present", "local task has changes that must be preserved manually", nil)
 		}
 		archiveRoot = s.store.Layout().HistoryRoot()
-		if !samePath(preparationRoot, s.store.Layout().TasksRoot()) {
+		if filepath.Base(preparationRoot) != digestJSON(s.store.Layout().StoreRoot())[:16] {
 			archiveRoot = filepath.Join(preparationRoot, ".history")
 		}
 		archive = filepath.Join(archiveRoot, key.CloudInstanceID, key.WorkspaceID, key.NodeRunID+"-"+string(key.Role), fmt.Sprintf("attempt-%d-context-%d", oldAttempt, oldContextVersion))
@@ -230,7 +230,12 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 			return TaskRecord{}, err
 		}
 		if err := os.Rename(final, archive); err != nil {
-			return TaskRecord{}, newTaskError("prepare_failed", "cannot archive previous task directory", err)
+			if copyErr := copyTaskDirectory(final, archive); copyErr != nil {
+				return TaskRecord{}, newTaskError("prepare_failed", "cannot archive previous task directory", err)
+			}
+			if removeErr := os.RemoveAll(final); removeErr != nil {
+				return TaskRecord{}, newTaskError("prepare_failed", "cannot remove archived task directory", removeErr)
+			}
 		}
 	}
 	if err := os.Rename(staging, final); err != nil {
@@ -246,6 +251,27 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	}
 	_ = s.removePrepareJournal(journal.ID)
 	return record, nil
+}
+
+func copyTaskDirectory(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
 }
 
 func (s *Service) RecoverPrepareJournals(ctx context.Context) error {
@@ -522,7 +548,13 @@ func readPreparedRecord(root string) (TaskRecord, error) {
 
 func (s *Service) prepareTarget(key TaskKey, workDir string) (string, string, error) {
 	if workDir == "" {
-		root := s.store.Layout().TasksRoot()
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", "", newTaskError("invalid_workdir", "cannot resolve current working directory", err)
+		}
+		// Keep default preparations in the active workspace while isolating stores
+		// that are commonly used by parallel CLI/tests.
+		root := filepath.Join(cwd, ".cs-cloud-tasks", digestJSON(s.store.Layout().StoreRoot())[:16])
 		return root, TaskDirIn(root, key), nil
 	}
 	if !filepath.IsAbs(workDir) {
