@@ -573,7 +573,7 @@ func writePreparedFiles(store *Store, root string, metadata preparedMetadata, ma
 func readPreparedRecord(root string) (TaskRecord, error) {
 	var metadata preparedMetadata
 	b, err := os.ReadFile(filepath.Join(root, "task.json"))
-	if err != nil || json.Unmarshal(b, &metadata) != nil {
+	if err != nil || json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion != StoreSchemaVersion {
 		return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task metadata is invalid", err)
 	}
 	var manifest Manifest

@@ -3,6 +3,7 @@ package membertask
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -699,6 +700,36 @@ func TestRecoverPrepareJournalPublishesReadyStaging(t *testing.T) {
 	record, found, err := store.LoadTask(key)
 	if err != nil || !found || record.Directory != final {
 		t.Fatalf("record = %+v, found=%v, err=%v", record, found, err)
+	}
+}
+
+func TestRecoverPrepareJournalRejectsMetadataSchemaMismatch(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, nil)
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	final := store.Layout().TaskDir(key)
+	staging := filepath.Join(filepath.Dir(final), ".node-worker.staging-schema")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := preparedMetadata{SchemaVersion: "1.0", Key: key, RemoteVersion: "1:1:1", Attempt: 1}
+	b, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(staging, "task.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{SchemaVersion: StoreSchemaVersion, MaterialDigest: "digest"}
+	b, _ = json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(staging, "manifest.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writePrepareJournal(t, store, PrepareJournal{ID: "prepare-schema", Key: key, Phase: PreparePhasePublishReady, Staging: staging, Final: final, CreatedAt: time.Now()})
+	err := svc.RecoverPrepareJournals(context.Background())
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != "local_task_store_corrupt" {
+		t.Fatalf("RecoverPrepareJournals error = %#v", err)
+	}
+	if _, found, loadErr := store.LoadTask(key); loadErr != nil || found {
+		t.Fatalf("task record after rejected recovery = found=%v err=%v", found, loadErr)
 	}
 }
 
