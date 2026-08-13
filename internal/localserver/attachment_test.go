@@ -306,6 +306,11 @@ func TestAttachmentListReportsEntries(t *testing.T) {
 
 func TestAttachmentGCRemovesExpired(t *testing.T) {
 	s, root := newTestServer(t)
+	// Keep the upload-triggered asynchronous sweep from racing the explicit
+	// DELETE endpoint under test.
+	s.gcSweepMu.Lock()
+	s.lastGcSweep = time.Now()
+	s.gcSweepMu.Unlock()
 	body, ct := writeMultipart(t, "file", "x.png", "image/png", []byte{0x89, 'P', 'N', 'G'})
 	upReq := httptest.NewRequest("POST", "/api/v1/attachments", body)
 	upReq.Header.Set("Content-Type", ct)
