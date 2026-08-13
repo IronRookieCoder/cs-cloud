@@ -67,18 +67,46 @@ type MaterialSource struct {
 	Role          MaterialRole       `json:"role"`
 	SHA256        string             `json:"sha256,omitempty"`
 	Content       string             `json:"content,omitempty"`
+	Source        *DeliverableSource `json:"source,omitempty"`
 	Repository    *RepositoryContext `json:"repository,omitempty"`
 }
 
 type RemoteDeliverable struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Required    bool   `json:"required"`
-	Purpose     string `json:"purpose,omitempty"`
-	Missing     bool   `json:"missing"`
-	Content     string `json:"content,omitempty"`
-	URL         string `json:"url,omitempty"`
+	ID               string             `json:"id"`
+	Title            string             `json:"title"`
+	Description      string             `json:"description,omitempty"`
+	Required         bool               `json:"required"`
+	Purpose          string             `json:"purpose,omitempty"`
+	Missing          bool               `json:"missing"`
+	Content          string             `json:"content,omitempty"`
+	ContentAvailable bool               `json:"-"`
+	URL              string             `json:"url,omitempty"`
+	Version          string             `json:"version,omitempty"`
+	SHA256           string             `json:"sha256,omitempty"`
+	Source           *DeliverableSource `json:"source,omitempty"`
+}
+
+type DeliverableSource struct {
+	Provider   string `json:"provider,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	Ref        string `json:"ref,omitempty"`
+	Commit     string `json:"commit,omitempty"`
+	Path       string `json:"path,omitempty"`
+}
+
+func (d *RemoteDeliverable) UnmarshalJSON(data []byte) error {
+	type deliverableAlias RemoteDeliverable
+	var value deliverableAlias
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*d = RemoteDeliverable(value)
+	_, d.ContentAvailable = fields["content"]
+	return nil
 }
 
 type RepositoryContext struct {

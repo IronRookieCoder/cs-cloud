@@ -2,6 +2,7 @@ package membertask
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -221,7 +222,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		_ = s.removePrepareJournal(journal.ID)
 		return TaskRecord{}, err
 	}
-	metadata := preparedMetadata{SchemaVersion: StoreSchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot, IssueID: remote.IssueID, IssueNumber: remote.IssueNumber, IssueIdentifier: remote.IssueIdentifier, IssueTitle: remote.IssueTitle, IssueDescription: remote.IssueDescription, WorkspaceSlug: remote.WorkspaceSlug, TaskKind: remote.TaskKind}
+	metadata := preparedMetadata{SchemaVersion: manifest.SchemaVersion, Key: key, RemoteVersion: versionString(remote.RemoteTask), CloudMaterialDigest: remote.MaterialDigest, Attempt: remote.Attempt, Goal: remote.Goal, Acceptance: remote.AcceptanceCriteria, ReworkReason: remote.ReworkReason, DisplayName: displayName, DisplayNameSource: displaySource, PreparationRoot: preparationRoot, IssueID: remote.IssueID, IssueNumber: remote.IssueNumber, IssueIdentifier: remote.IssueIdentifier, IssueTitle: remote.IssueTitle, IssueDescription: remote.IssueDescription, WorkspaceSlug: remote.WorkspaceSlug, TaskKind: remote.TaskKind}
 	if err := writePreparedFiles(s.store, staging, metadata, manifest); err != nil {
 		_ = os.RemoveAll(staging)
 		_ = s.removePrepareJournal(journal.ID)
@@ -449,7 +450,7 @@ func updatePreparedMetadata(store *Store, record TaskRecord, remote RemoteTaskCo
 	path := filepath.Join(record.Directory, "task.json")
 	var metadata preparedMetadata
 	b, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion != StoreSchemaVersion {
+	if err != nil || json.Unmarshal(b, &metadata) != nil || !supportedTaskSchemaVersion(metadata.SchemaVersion) {
 		return newTaskError("local_task_store_corrupt", "prepared task metadata is invalid", err)
 	}
 	metadata.RemoteVersion = versionString(remote.RemoteTask)
@@ -490,6 +491,12 @@ func materializeSources(ctx context.Context, root string, sources []MaterialSour
 		}
 		switch source.Kind {
 		case "", "file":
+			if source.SHA256 != "" {
+				digest := fmt.Sprintf("%x", sha256.Sum256([]byte(source.Content)))
+				if !strings.EqualFold(source.SHA256, digest) {
+					return newTaskError("material_content_unavailable", "cloud material content does not match its SHA-256", nil)
+				}
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
@@ -578,12 +585,12 @@ func writePreparedFiles(store *Store, root string, metadata preparedMetadata, ma
 func readPreparedRecord(root string) (TaskRecord, error) {
 	var metadata preparedMetadata
 	b, err := os.ReadFile(filepath.Join(root, "task.json"))
-	if err != nil || json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion != StoreSchemaVersion {
+	if err != nil || json.Unmarshal(b, &metadata) != nil || !supportedTaskSchemaVersion(metadata.SchemaVersion) {
 		return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task metadata is invalid", err)
 	}
 	var manifest Manifest
 	b, err = os.ReadFile(filepath.Join(root, "manifest.json"))
-	if err != nil || json.Unmarshal(b, &manifest) != nil || manifest.SchemaVersion != StoreSchemaVersion {
+	if err != nil || json.Unmarshal(b, &manifest) != nil || !supportedTaskSchemaVersion(manifest.SchemaVersion) {
 		return TaskRecord{}, newTaskError("local_task_store_corrupt", "prepared task manifest is invalid", err)
 	}
 	preparationRoot := metadata.PreparationRoot
@@ -720,9 +727,15 @@ func prepareSources(remote RemoteTaskContext, key TaskKey) ([]MaterialSource, er
 		}
 	}
 	for _, deliverable := range remote.PredecessorResults {
+		if deliverable.Content == "" && !deliverable.ContentAvailable {
+			return nil, newTaskError("material_content_unavailable", "cloud predecessor material has no authoritative content", nil)
+		}
 		sources = append(sources, deliverableSource(deliverable, "input/predecessors", MaterialReferenceOnly))
 	}
 	for _, deliverable := range remote.PreviousResults {
+		if deliverable.Content == "" && !deliverable.ContentAvailable {
+			return nil, newTaskError("material_content_unavailable", "cloud previous material has no authoritative content", nil)
+		}
 		sources = append(sources, deliverableSource(deliverable, "input/previous-results", MaterialReferenceOnly))
 	}
 	for _, repository := range remote.Repositories {
@@ -748,7 +761,15 @@ func prepareSources(remote RemoteTaskContext, key TaskKey) ([]MaterialSource, er
 }
 
 func deliverableSource(deliverable RemoteDeliverable, root string, role MaterialRole) MaterialSource {
-	return MaterialSource{Identity: deliverable.ID, Title: deliverable.Title, SourceURL: deliverable.URL, Kind: "file", SourceVersion: "1", RelativePath: root + "/" + safeMaterialName(deliverable.ID) + ".md", Role: role, Content: deliverable.Content}
+	version := deliverable.Version
+	if version == "" {
+		version = "1"
+	}
+	return MaterialSource{
+		Identity: deliverable.ID, Title: deliverable.Title, SourceURL: deliverable.URL, Kind: "file",
+		SourceVersion: version, RelativePath: root + "/" + safeMaterialName(deliverable.ID) + ".md",
+		Role: role, SHA256: deliverable.SHA256, Content: deliverable.Content, Source: deliverable.Source,
+	}
 }
 
 func safeMaterialName(raw string) string {

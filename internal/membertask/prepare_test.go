@@ -2,6 +2,7 @@ package membertask
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -517,6 +518,89 @@ func TestMaterializeSourcesKeepsEmptyFileMaterialAndDoesNotFail(t *testing.T) {
 	}
 	if info.Size() != 0 {
 		t.Fatalf("empty material size = %d, want 0", info.Size())
+	}
+}
+
+func TestPrepareSourcesPreservesDeliverableSnapshot(t *testing.T) {
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	remote := RemoteTaskContext{PredecessorResults: []RemoteDeliverable{{
+		ID: "result", Content: "done", ContentAvailable: true, Version: "commit-123",
+		SHA256: "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211",
+		Source: &DeliverableSource{Provider: "gitea", Repository: "team/repo", Ref: "refs/heads/task/result", Commit: "commit-123", Path: "docs/result.md"},
+	}}}
+	sources, err := prepareSources(remote, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].SourceVersion != "commit-123" || sources[0].SHA256 != remote.PredecessorResults[0].SHA256 || sources[0].Source == nil {
+		t.Fatalf("sources = %#v", sources)
+	}
+}
+
+func TestPrepareSourcesAllowsExplicitEmptyAndRejectsMissingPredecessorContent(t *testing.T) {
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	for _, test := range []struct {
+		name        string
+		deliverable RemoteDeliverable
+		wantCode    string
+	}{
+		{name: "explicit empty", deliverable: RemoteDeliverable{ID: "empty", ContentAvailable: true, SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
+		{name: "missing", deliverable: RemoteDeliverable{ID: "missing"}, wantCode: "material_content_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources, err := prepareSources(RemoteTaskContext{PredecessorResults: []RemoteDeliverable{test.deliverable}}, key)
+			if test.wantCode == "" {
+				if err != nil || len(sources) != 1 || sources[0].Content != "" {
+					t.Fatalf("sources=%#v err=%v", sources, err)
+				}
+				return
+			}
+			te, ok := err.(*TaskError)
+			if !ok || te.Code != test.wantCode {
+				t.Fatalf("error = %#v", err)
+			}
+		})
+	}
+}
+
+func TestMaterializeSourcesRejectsCloudDigestMismatch(t *testing.T) {
+	err := materializeSources(context.Background(), t.TempDir(), []MaterialSource{{
+		Identity: "result", Kind: "file", RelativePath: "input/predecessors/result.md", Content: "tampered",
+		SHA256: "a4c3ed04a95a3da14a9218e295a11a47a4b743b4c4a7d473c105b136d7c57627",
+	}})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "material_content_unavailable" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestReprepareRejectsModifiedPredecessorSnapshot(t *testing.T) {
+	var contextVersion atomic.Int32
+	contextVersion.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		version := contextVersion.Load()
+		content := fmt.Sprintf("version %d", version)
+		digest := sha256.Sum256([]byte(content))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":1,"context_version":%d,"cloud_status":"assigned","prepare_allowed":true,"material_digest":"material-%d","predecessor_results":[{"id":"result","content":%q,"version":"commit-%d","sha256":"%x","source":{"provider":"gitea","repository":"team/repo","ref":"refs/heads/task/result","commit":"commit-%d","path":"result.md"}}]}`, version, version, content, version, digest, version)))
+	}))
+	defer srv.Close()
+	store, _ := OpenStore(t.TempDir())
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	workDir := t.TempDir()
+	first, err := svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(first.Directory, "input", "predecessors", "result.md")
+	if err := os.WriteFile(path, []byte("local edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextVersion.Store(2)
+	_, err = svc.prepare(context.Background(), key, PrepareOptions{WorkDir: workDir})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "input_material_modified" {
+		t.Fatalf("error = %#v", err)
 	}
 }
 

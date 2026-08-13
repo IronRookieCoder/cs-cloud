@@ -30,6 +30,8 @@ type MaterialOrigin struct {
 	Provider           string `json:"provider,omitempty"`
 	RepositoryIdentity string `json:"repository_identity,omitempty"`
 	CommitSHA          string `json:"commit_sha,omitempty"`
+	SourceRef          string `json:"source_ref,omitempty"`
+	SourcePath         string `json:"source_path,omitempty"`
 	RelativePath       string `json:"relative_path"`
 }
 
@@ -61,7 +63,7 @@ type Verification struct {
 }
 
 func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
-	manifest := Manifest{SchemaVersion: StoreSchemaVersion}
+	manifest := Manifest{SchemaVersion: manifestSchemaVersion(sources)}
 	for _, source := range sources {
 		rel, err := cleanRelativePath(source.RelativePath)
 		if err != nil {
@@ -113,6 +115,15 @@ func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
 	}{digestFiles, digestRepositories}
 	manifest.MaterialDigest = digestJSON(digestInput)
 	return manifest, nil
+}
+
+func manifestSchemaVersion(sources []MaterialSource) string {
+	for _, source := range sources {
+		if source.Source != nil || source.SHA256 != "" {
+			return SnapshotSchemaVersion
+		}
+	}
+	return StoreSchemaVersion
 }
 
 func VerifyManifest(root string, manifest Manifest) (Verification, error) {
@@ -199,6 +210,13 @@ func materialOrigin(source MaterialSource, relativePath string) *MaterialOrigin 
 		title = strings.TrimSpace(source.Name)
 	}
 	origin := &MaterialOrigin{Title: title, SourceURL: sanitizeSourceURL(source.SourceURL), RelativePath: relativePath}
+	if source.Source != nil {
+		origin.Provider = source.Source.Provider
+		origin.RepositoryIdentity = source.Source.Repository
+		origin.CommitSHA = source.Source.Commit
+		origin.SourceRef = source.Source.Ref
+		origin.SourcePath = source.Source.Path
+	}
 	if source.Repository != nil {
 		origin.Provider = source.Repository.Provider
 		origin.RepositoryIdentity = source.Repository.Identity
@@ -207,7 +225,7 @@ func materialOrigin(source MaterialSource, relativePath string) *MaterialOrigin 
 			origin.SourceURL = sanitizeSourceURL(source.Repository.SourceURL)
 		}
 	}
-	if origin.Title == "" && origin.SourceURL == "" && origin.Provider == "" && origin.RepositoryIdentity == "" && origin.CommitSHA == "" {
+	if origin.Title == "" && origin.SourceURL == "" && origin.Provider == "" && origin.RepositoryIdentity == "" && origin.CommitSHA == "" && origin.SourceRef == "" && origin.SourcePath == "" {
 		return nil
 	}
 	return origin

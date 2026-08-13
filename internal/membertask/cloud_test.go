@@ -40,6 +40,46 @@ func TestCloudClientDecodesLargeSuccessfulTaskContext(t *testing.T) {
 	}
 }
 
+func TestCloudClientDistinguishesEmptyAndMissingDeliverableContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		deliverable   string
+		wantAvailable bool
+	}{
+		{name: "explicit empty", deliverable: `{"id":"result","content":""}`, wantAvailable: true},
+		{name: "missing", deliverable: `{"id":"result"}`, wantAvailable: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"ref":{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"},"prepare_allowed":true,"predecessor_results":[` + test.deliverable + `]}`
+			srv := taskContextServer(t, body)
+			defer srv.Close()
+			key, _ := ParseTaskKey("cloud/ws/node/worker")
+			got, err := NewCloudClient(srv.URL, testCredentials).GetContext(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.PredecessorResults) != 1 || got.PredecessorResults[0].ContentAvailable != test.wantAvailable {
+				t.Fatalf("predecessor = %#v", got.PredecessorResults)
+			}
+		})
+	}
+}
+
+func TestCloudClientDecodesDeliverableSnapshotMetadata(t *testing.T) {
+	srv := taskContextServer(t, `{"ref":{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"},"prepare_allowed":true,"material_digest":"server-material","predecessor_results":[{"id":"result","content":"done","version":"commit-123","sha256":"a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211","source":{"provider":"gitea","repository":"team/repo","ref":"refs/heads/task/result","commit":"commit-123","path":"docs/result.md"}}]}`)
+	defer srv.Close()
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	got, err := NewCloudClient(srv.URL, testCredentials).GetContext(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := got.PredecessorResults[0]
+	if result.Version != "commit-123" || result.SHA256 == "" || result.Source == nil || result.Source.Repository != "team/repo" || result.Source.Path != "docs/result.md" {
+		t.Fatalf("snapshot = %#v", result)
+	}
+}
+
 func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
 	key, _ := ParseTaskKey("cloud/ws/node/worker")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

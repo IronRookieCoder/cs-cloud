@@ -8,6 +8,11 @@ import (
 
 const SchemaVersion = "1.0"
 const StoreSchemaVersion = "2.0"
+const SnapshotSchemaVersion = "2.1"
+
+func supportedTaskSchemaVersion(version string) bool {
+	return version == StoreSchemaVersion || version == SnapshotSchemaVersion
+}
 
 type Role string
 

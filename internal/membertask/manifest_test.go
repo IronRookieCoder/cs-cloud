@@ -41,6 +41,46 @@ func TestMaterialOriginOmitsRelativePathOnlyMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildManifestPersistsDeliverableSnapshotOrigin(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input", "predecessors", "result.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("done"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := BuildManifest(root, []MaterialSource{{
+		Identity: "result", Kind: "file", SourceVersion: "commit-123", RelativePath: "input/predecessors/result.md", Role: MaterialReferenceOnly,
+		SHA256: "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211",
+		Source: &DeliverableSource{Provider: "gitea", Repository: "team/repo", Ref: "refs/heads/task/result", Commit: "commit-123", Path: "docs/result.md"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := manifest.Files[0].Origin
+	if origin == nil || origin.Provider != "gitea" || origin.RepositoryIdentity != "team/repo" || origin.CommitSHA != "commit-123" || origin.SourcePath != "docs/result.md" || origin.SourceRef != "refs/heads/task/result" {
+		t.Fatalf("origin = %#v", origin)
+	}
+	if manifest.SchemaVersion != SnapshotSchemaVersion {
+		t.Fatalf("schema version = %q, want %q", manifest.SchemaVersion, SnapshotSchemaVersion)
+	}
+}
+
+func TestBuildManifestKeepsLegacySchemaWithoutSnapshotFields(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "legacy.md"), []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := BuildManifest(root, []MaterialSource{{Identity: "legacy", RelativePath: "legacy.md", Role: MaterialReferenceOnly}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != StoreSchemaVersion {
+		t.Fatalf("schema version = %q, want %q", manifest.SchemaVersion, StoreSchemaVersion)
+	}
+}
+
 func TestVerifyManifestAllowsOutputFileModificationAndReportsDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "output", "result.md")
