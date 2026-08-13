@@ -147,7 +147,7 @@ func TestBuildSubmitManifestUsesOnlyExplicitDeliverableBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || files[0].Identity != "a" || files[1].Identity != "z" || files[0].SourceVersion != "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb" || files[1].SourceVersion != "sha256:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06" {
+	if len(files) != 2 || files[0].Identity != "a" || files[1].Identity != "z" || files[0].Name != "a.html" || files[1].Name != "z.html" || files[0].SourceVersion != "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb" || files[1].SourceVersion != "sha256:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06" {
 		t.Fatalf("files = %#v", files)
 	}
 	if _, files, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, verification, []DeliverableFileBinding{}); err != nil || len(files) != 0 {

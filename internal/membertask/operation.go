@@ -80,6 +80,7 @@ type SubmitRepository struct {
 type SubmitFile struct {
 	Identity      string `json:"deliverable_id"`
 	SourceVersion string `json:"version"`
+	Name          string `json:"name,omitempty"`
 	RelativePath  string `json:"relative_path"`
 	SHA256        string `json:"sha256"`
 	Content       string `json:"content"`
@@ -504,7 +505,7 @@ func buildSubmitManifest(record TaskRecord, verification Verification, bindingSe
 				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
 			}
 			digest := sha256.Sum256(content)
-			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
+			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), Name: filepath.Base(cleaned), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
 		}
 		sort.Slice(files, func(i, j int) bool { return files[i].Identity < files[j].Identity })
 		return repositories, files, nil
