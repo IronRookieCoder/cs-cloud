@@ -38,18 +38,26 @@ func TestMemberTaskMaterializeAndSubmitIntegration(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/member/tasks/node/worker/context":
 			_ = json.NewEncoder(w).Encode(contextValue)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/member/tasks/node/worker/submit/preview":
-			if err := json.NewDecoder(r.Body).Decode(&previewRequest); err != nil {
+			var decoded SubmitPreviewRequest
+			if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
 			mu.Lock()
+			previewRequest = decoded
 			previewCalls++
+			requestSnapshot := previewRequest
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(Preview{ID: "preview-1", Kind: "submit", Status: "previewed", Attempt: 1, TaskVersion: 2, ContextVersion: 3, MaterialDigest: previewRequest.MaterialDigest, ContentDigest: previewRequest.ContentDigest, PublishPlan: json.RawMessage(`{"files":["chinese_chess.html"]}`), ExpiresAt: time.Now().Add(time.Hour)})
+			_ = json.NewEncoder(w).Encode(Preview{ID: "preview-1", Kind: "submit", Status: "previewed", Attempt: 1, TaskVersion: 2, ContextVersion: 3, MaterialDigest: requestSnapshot.MaterialDigest, ContentDigest: requestSnapshot.ContentDigest, PublishPlan: json.RawMessage(`{"files":["chinese_chess.html"]}`), ExpiresAt: time.Now().Add(time.Hour)})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/member/task-operations/preview-1/confirm":
 			mu.Lock()
 			confirmCalls++
+			requestSnapshot := previewRequest
 			mu.Unlock()
+			if len(requestSnapshot.Files) != 1 || requestSnapshot.Files[0].Identity != "chinese_chess.html" {
+				http.Error(w, "required deliverable missing", http.StatusUnprocessableEntity)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", PreviewID: "preview-1", Kind: "submit", Status: OperationCompleted, PublishPlan: json.RawMessage(`{"files":["chinese_chess.html"]}`)})
 		default:
 			http.NotFound(w, r)
@@ -100,14 +108,17 @@ func TestMemberTaskMaterializeAndSubmitIntegration(t *testing.T) {
 	if preview.PublishPlan == nil || len(preview.PublishPlan) == 0 {
 		t.Fatal("publish plan is empty")
 	}
-	if len(previewRequest.Files) != 1 || previewRequest.Files[0].Identity != "chinese_chess.html" {
+	mu.Lock()
+	requestSnapshot := previewRequest
+	mu.Unlock()
+	if len(requestSnapshot.Files) != 1 || requestSnapshot.Files[0].Identity != "chinese_chess.html" {
 		t.Fatalf("preview files = %#v", previewRequest.Files)
 	}
-	if previewRequest.Files[0].Name != filepath.Base(output) {
-		t.Fatalf("file name = %q, want %q", previewRequest.Files[0].Name, filepath.Base(output))
+	if requestSnapshot.Files[0].Name != filepath.Base(output) {
+		t.Fatalf("file name = %q, want %q", requestSnapshot.Files[0].Name, filepath.Base(output))
 	}
-	if previewRequest.Files[0].RelativePath != output {
-		t.Fatalf("relative path = %q, want %q", previewRequest.Files[0].RelativePath, output)
+	if requestSnapshot.Files[0].RelativePath != output {
+		t.Fatalf("relative path = %q, want %q", requestSnapshot.Files[0].RelativePath, output)
 	}
 	operation, err := svc.ConfirmOperation(context.Background(), key, preview.ID)
 	if err != nil {

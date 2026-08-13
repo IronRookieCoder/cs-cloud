@@ -111,7 +111,11 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 		result, err = s.memberTasks.Handle(ctx, key, membertask.PrepareOptions{WorkDir: request.WorkDir})
 	case "submit":
 		if request.PreviewID == "" {
-			result, err = s.memberTasks.PreviewSubmit(ctx, key, request.DeliverableFiles)
+			if request.DeliverableFiles == nil {
+				result, err = s.memberTasks.PreviewSubmit(ctx, key)
+			} else {
+				result, err = s.memberTasks.PreviewSubmit(ctx, key, request.DeliverableFiles)
+			}
 		} else {
 			result, err = s.memberTasks.ConfirmOperation(ctx, key, request.PreviewID)
 		}

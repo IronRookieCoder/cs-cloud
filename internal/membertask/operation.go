@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -86,6 +87,8 @@ type SubmitFile struct {
 	Content       string `json:"content"`
 }
 
+const maxSubmissionFileSize int64 = 10 << 20
+
 type SubmitPreviewRequest struct {
 	Attempt        int                `json:"attempt"`
 	TaskVersion    int64              `json:"task_version"`
@@ -139,14 +142,20 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey, bindingSets ..
 	if len(bindingSets) == 1 {
 		bindings = bindingSets[0]
 	}
-	repositories, files, err := buildSubmitManifest(record, verification, bindings)
+	var repositories []SubmitRepository
+	var files []SubmitFile
+	if len(bindingSets) == 0 {
+		repositories, files, err = buildSubmitManifest(record, verification)
+	} else {
+		repositories, files, err = buildSubmitManifest(record, verification, bindings)
+	}
 	if err != nil {
 		return Preview{}, err
 	}
 	if len(repositories) == 0 && len(files) == 0 {
 		candidates := untrackedTaskFiles(record)
 		if len(candidates) > 0 {
-			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; untracked candidate files=%s; submit explicitly with `cs-cloud workflow deliverable submit --file <path>`", key.String(), strings.Join(candidates, ","))
+			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; untracked candidate files=%s; submit explicitly with `cs-cloud task submit %s --deliverable <id> --file <path>`", key.String(), strings.Join(candidates, ","), key.String())
 		} else {
 			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; cloud submission will contain no deliverables", key.String())
 		}
@@ -179,6 +188,10 @@ func (s *Service) validateDeliverableBindings(ctx context.Context, key TaskKey, 
 	}
 	remote, err := s.cloud.GetContext(ctx, key)
 	if err != nil {
+		var taskErr *TaskError
+		if errors.As(err, &taskErr) {
+			return err
+		}
 		return newTaskError("deliverable_binding_invalid", "cannot validate deliverable file bindings", err)
 	}
 	known := make(map[string]struct{}, len(remote.RequiredDeliverables)+len(remote.OptionalDeliverables))
@@ -500,9 +513,33 @@ func buildSubmitManifest(record TaskRecord, verification Verification, bindingSe
 			if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
 				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file path is not publishable", err)
 			}
-			content, err := os.ReadFile(filepath.Join(record.Directory, filepath.FromSlash(cleaned)))
+			fullPath := filepath.Join(record.Directory, filepath.FromSlash(cleaned))
+			validatedInfo, err := os.Lstat(fullPath)
 			if err != nil {
 				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
+			}
+			if !validatedInfo.Mode().IsRegular() {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is not a regular file", nil)
+			}
+			if validatedInfo.Size() > maxSubmissionFileSize {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+			}
+			fileHandle, err := os.Open(fullPath)
+			if err != nil {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
+			}
+			openedInfo, err := fileHandle.Stat()
+			if err != nil || !os.SameFile(validatedInfo, openedInfo) {
+				_ = fileHandle.Close()
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file changed during validation", err)
+			}
+			content, err := io.ReadAll(io.LimitReader(fileHandle, maxSubmissionFileSize+1))
+			_ = fileHandle.Close()
+			if err != nil {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file cannot be read", err)
+			}
+			if int64(len(content)) > maxSubmissionFileSize {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
 			}
 			digest := sha256.Sum256(content)
 			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), Name: filepath.Base(cleaned), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})

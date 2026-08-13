@@ -155,6 +155,43 @@ func TestBuildSubmitManifestUsesOnlyExplicitDeliverableBindings(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitManifestRejectsOversizedExplicitBinding(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	if err := os.MkdirAll(filepath.Join(dir, "output"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "output", "large.bin")
+	if err := os.WriteFile(path, make([]byte, maxSubmissionFileSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{SchemaVersion: SnapshotSchemaVersion, Files: []FileManifest{{Identity: "delivery-1", RelativePath: "output/large.bin", Role: MaterialOutputWritable}}}
+	_, _, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, Verification{}, []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/large.bin"}})
+	te, ok := err.(*TaskError)
+	if !ok || te.Code != "deliverable_binding_invalid" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestBuildSubmitManifestAcceptsFileAtSubmissionLimit(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	if err := os.MkdirAll(filepath.Join(dir, "output"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "output", "limit.bin")
+	if err := os.WriteFile(path, make([]byte, maxSubmissionFileSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{SchemaVersion: SnapshotSchemaVersion, Files: []FileManifest{{Identity: "delivery-1", RelativePath: "output/limit.bin", Role: MaterialOutputWritable}}}
+	_, files, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, Verification{}, []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/limit.bin"}})
+	if err != nil || len(files) != 1 || int64(len(files[0].Content)) != maxSubmissionFileSize {
+		t.Fatalf("files=%d err=%v", len(files), err)
+	}
+}
+
 func TestUntrackedTaskFilesFindsRootDeliverableCandidates(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "chinese_chess.html"), []byte("<html>"), 0o600); err != nil {
