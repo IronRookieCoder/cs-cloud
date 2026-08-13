@@ -74,7 +74,7 @@ func printTaskUsage() {
 	fmt.Println(dimStyle.Render("  cs-cloud workflow task <action> [flags]"))
 	printSection("Actions")
 	cmds := [][2]string{
-		{"complete", "Worker finished. [--summary <text>]"},
+		{"complete", "Worker finished. [--summary <text>] [--pr-url <url>]"},
 		{"approve", "Critic approves. [--reason <text>]"},
 		{"reject", "Critic requests rework. [--reason <text>]"},
 	}
@@ -100,9 +100,11 @@ func completionMessage(subject string, err error) string {
 // open (idle is not completion).
 func runTaskComplete(args []string) error {
 	summary, _ := parseStringFlag(args, "--summary")
+	prURL, _ := parseStringFlag(args, "--pr-url")
 	err := postTaskCompletion(map[string]string{
 		"action":  "complete",
 		"summary": summary,
+		"pr_url":  prURL,
 	})
 	fmt.Println(completionMessage("Task completion", err))
 	return nil

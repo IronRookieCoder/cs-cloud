@@ -158,6 +158,7 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Action   string `json:"action"`
 		Summary  string `json:"summary"`
+		PRURL    string `json:"pr_url"`
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
 	}
@@ -180,7 +181,7 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "unsupported action: "+req.Action)
 		return
 	}
-	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, Decision: req.Decision, Reason: req.Reason}
+	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, PRURL: req.PRURL, Decision: req.Decision, Reason: req.Reason}
 	if err := s.workflow.SignalTaskCompletion(taskID, sig); err != nil {
 		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
 		return

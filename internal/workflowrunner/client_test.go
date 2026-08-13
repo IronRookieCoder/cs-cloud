@@ -134,6 +134,25 @@ func TestClientCompleteTaskForwardsReviewSignal(t *testing.T) {
 	}
 }
 
+func TestClientCompleteTaskForwardsPRURL(t *testing.T) {
+	var gotBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.URL, "", tokenProvider("token-123"))
+	sig := agent.CompletionSignal{PRURL: "https://git.example/team/repo/pulls/2"}
+	if err := c.CompleteTask(context.Background(), "task-1", "done", "", "", sig); err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(gotBody, `"pr_url":"https://git.example/team/repo/pulls/2"`) {
+		t.Errorf("body missing pr_url: %s", gotBody)
+	}
+}
+
 func TestClientCompleteTaskIncludesSessionAndWorkDir(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

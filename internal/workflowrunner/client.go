@@ -197,6 +197,9 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, sessionID, wo
 	if workDir != "" {
 		body["work_dir"] = workDir
 	}
+	if sig.PRURL != "" {
+		body["pr_url"] = sig.PRURL
+	}
 	// Forward the agent's explicit completion payload so multica can use the
 	// critic's decision directly (review) instead of parsing session text.
 	if sig.Decision != "" {
