@@ -125,6 +125,36 @@ func TestBuildSubmitManifestBindsFileContentToHash(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitManifestUsesOnlyExplicitDeliverableBindings(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	if err := os.MkdirAll(filepath.Join(dir, "output"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "output", "z.html"), []byte("z"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "output", "a.html"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{SchemaVersion: SnapshotSchemaVersion, Files: []FileManifest{
+		{Identity: "z", RelativePath: "output/z.html", Role: MaterialOutputWritable, SHA256: digestJSON("z")},
+		{Identity: "a", RelativePath: "output/a.html", Role: MaterialOutputWritable, SHA256: digestJSON("a")},
+	}}
+	verification := Verification{}
+	_, files, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, verification, []DeliverableFileBinding{{DeliverableID: "z", File: "output/z.html"}, {DeliverableID: "a", File: "output/a.html"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files[0].Identity != "a" || files[1].Identity != "z" || files[0].SourceVersion != "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb" || files[1].SourceVersion != "sha256:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06" {
+		t.Fatalf("files = %#v", files)
+	}
+	if _, files, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, verification, []DeliverableFileBinding{}); err != nil || len(files) != 0 {
+		t.Fatalf("empty explicit bindings files=%#v err=%v", files, err)
+	}
+}
+
 func TestUntrackedTaskFilesFindsRootDeliverableCandidates(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "chinese_chess.html"), []byte("<html>"), 0o600); err != nil {

@@ -134,7 +134,11 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey, bindingSets ..
 	if err != nil {
 		return Preview{}, err
 	}
-	repositories, files, err := buildSubmitManifest(record, verification)
+	var bindings []DeliverableFileBinding
+	if len(bindingSets) == 1 {
+		bindings = bindingSets[0]
+	}
+	repositories, files, err := buildSubmitManifest(record, verification, bindings)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -453,7 +457,7 @@ func (s *Service) loadVerifiedTask(key TaskKey) (TaskRecord, Verification, error
 	return record, verification, nil
 }
 
-func buildSubmitManifest(record TaskRecord, verification Verification) ([]SubmitRepository, []SubmitFile, error) {
+func buildSubmitManifest(record TaskRecord, verification Verification, bindingSets ...[]DeliverableFileBinding) ([]SubmitRepository, []SubmitFile, error) {
 	var repositories []SubmitRepository
 	for _, repo := range record.Manifest.Repositories {
 		repoDir := filepath.Join(record.Directory, filepath.FromSlash(repo.RelativePath))
@@ -471,6 +475,40 @@ func buildSubmitManifest(record TaskRecord, verification Verification) ([]Submit
 		repositories = append(repositories, SubmitRepository{RepositoryIdentity: repo.Identity, ExpectedRef: repo.TargetRef, BaseRef: repo.BaseRef, BaseSHA: repo.BaseSHA, BeforeSHA: repo.BeforeSHA, HeadSHA: head, ChangedPaths: changed, OperationMarker: digestJSON(struct{ Key, Repo, Head string }{record.Key.String(), repo.Identity, head})})
 	}
 	var files []SubmitFile
+	var bindings []DeliverableFileBinding
+	if len(bindingSets) > 1 {
+		return nil, nil, newTaskError("deliverable_binding_invalid", "deliverable file bindings were provided more than once", nil)
+	}
+	if len(bindingSets) == 1 {
+		bindings = bindingSets[0]
+	}
+	if bindingSets != nil {
+		byID := make(map[string]FileManifest, len(record.Manifest.Files))
+		for _, file := range record.Manifest.Files {
+			byID[file.Identity] = file
+		}
+		for _, binding := range bindings {
+			file, ok := byID[binding.DeliverableID]
+			if !ok {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "deliverable binding is not in the local manifest", nil)
+			}
+			if file.Role != MaterialOutputWritable {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is not writable output", nil)
+			}
+			cleaned, err := cleanRelativePath(binding.File)
+			if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file path is not publishable", err)
+			}
+			content, err := os.ReadFile(filepath.Join(record.Directory, filepath.FromSlash(cleaned)))
+			if err != nil {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
+			}
+			digest := sha256.Sum256(content)
+			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Identity < files[j].Identity })
+		return repositories, files, nil
+	}
 	for _, file := range record.Manifest.Files {
 		if file.Role != MaterialOutputWritable {
 			continue
