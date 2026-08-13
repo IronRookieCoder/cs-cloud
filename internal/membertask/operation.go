@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cs-cloud/internal/logger"
 )
 
 type RepoPublishPlan struct {
@@ -127,6 +129,14 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey) (Preview, erro
 	repositories, files, err := buildSubmitManifest(record, verification)
 	if err != nil {
 		return Preview{}, err
+	}
+	if len(repositories) == 0 && len(files) == 0 {
+		candidates := untrackedTaskFiles(record)
+		if len(candidates) > 0 {
+			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; untracked candidate files=%s; submit explicitly with `cs-cloud workflow deliverable submit --file <path>`", key.String(), strings.Join(candidates, ","))
+		} else {
+			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; cloud submission will contain no deliverables", key.String())
+		}
 	}
 	request := SubmitPreviewRequest{Attempt: attempt, TaskVersion: taskVersion, ContextVersion: contextVersion, MaterialDigest: effectiveMaterialDigest(record), ContentDigest: verification.ContentDigest, Repositories: repositories, Files: files}
 	preview, err := s.cloud.PreviewSubmit(ctx, key, request)
@@ -425,6 +435,47 @@ func buildSubmitManifest(record TaskRecord, verification Verification) ([]Submit
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	_ = verification
 	return repositories, files, nil
+}
+
+// untrackedTaskFiles finds likely deliverable files created outside the prepared
+// material manifest. It is diagnostic only: callers still preserve the legacy
+// empty-submit behavior and must explicitly bind a file to a deliverable.
+func untrackedTaskFiles(record TaskRecord) []string {
+	if record.Directory == "" {
+		return nil
+	}
+	managed := make(map[string]struct{})
+	if record.Manifest != nil {
+		for _, file := range record.Manifest.Files {
+			managed[filepath.Clean(file.RelativePath)] = struct{}{}
+		}
+		for _, repo := range record.Manifest.Repositories {
+			managed[filepath.Clean(repo.RelativePath)] = struct{}{}
+		}
+	}
+	var candidates []string
+	_ = filepath.Walk(record.Directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(record.Directory, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.Clean(rel)
+		if rel == "task.json" || rel == "manifest.json" || strings.HasPrefix(rel, ".") || strings.HasPrefix(rel, "input"+string(filepath.Separator)) {
+			return nil
+		}
+		if _, ok := managed[rel]; !ok {
+			candidates = append(candidates, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	sort.Strings(candidates)
+	return candidates
 }
 
 func validatePreview(preview Preview, attempt int, taskVersion, contextVersion int64, materialDigest, contentDigest string) error {

@@ -74,6 +74,23 @@ func TestBuildSubmitManifestBindsFileContentToHash(t *testing.T) {
 	}
 }
 
+func TestUntrackedTaskFilesFindsRootDeliverableCandidates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "chinese_chess.html"), []byte("<html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "input"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "input", "reference.md"), []byte("reference"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := untrackedTaskFiles(TaskRecord{Directory: dir})
+	if len(got) != 1 || got[0] != "chinese_chess.html" {
+		t.Fatalf("candidates = %#v", got)
+	}
+}
+
 func runGitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

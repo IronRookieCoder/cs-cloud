@@ -500,6 +500,26 @@ func TestPrepareMaterializesFilesAndPublishesAtomically(t *testing.T) {
 	}
 }
 
+func TestMaterializeSourcesKeepsEmptyFileMaterialAndDoesNotFail(t *testing.T) {
+	root := t.TempDir()
+	sources := []MaterialSource{{
+		Identity:     "upstream-result",
+		Kind:         "file",
+		RelativePath: "input/predecessors/result.md",
+		SourceURL:    "https://gitea.example/pulls/1",
+	}}
+	if err := materializeSources(context.Background(), root, sources); err != nil {
+		t.Fatalf("materializeSources: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(root, "input", "predecessors", "result.md"))
+	if err != nil {
+		t.Fatalf("empty material missing: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("empty material size = %d, want 0", info.Size())
+	}
+}
+
 func TestPrepareWithWorkDirCreatesManagedTaskDirectory(t *testing.T) {
 	srv := taskContextServer(t, `{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker","attempt":1,"task_version":2,"context_version":3,"cloud_status":"assigned","prepare_allowed":true,"providers":["gitea"],"materials":[{"identity":"requirements","kind":"file","source_version":"v1","relative_path":"input/requirements.md","role":"input_protected","content":"build it"}]}`)
 	defer srv.Close()

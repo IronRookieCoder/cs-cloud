@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"cs-cloud/internal/logger"
 )
 
 type preparedMetadata struct {
@@ -490,6 +492,9 @@ func materializeSources(ctx context.Context, root string, sources []MaterialSour
 		case "", "file":
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
+			}
+			if len(source.Content) == 0 {
+				logger.Warn("membertask: material content is empty: identity=%s path=%s source_url=%s", source.Identity, rel, source.SourceURL)
 			}
 			if err := os.WriteFile(target, []byte(source.Content), 0o600); err != nil {
 				return newTaskError("prepare_failed", "cannot write file material", err)
