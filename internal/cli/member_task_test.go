@@ -56,11 +56,16 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 		Name: "workdir", Kind: "flag", Flag: "--workdir", Type: "string", ValueStyle: "equals_or_unprefixed_separate",
 		Summary: "Existing working directory that will contain .cs-cloud-tasks",
 	}
+	wantDeliverable := ArgumentSpec{Name: "deliverable", Kind: "flag", Flag: "--deliverable", Type: "string", ValueStyle: "repeatable_pair", Summary: "Deliverable id paired with the following --file"}
+	wantFile := ArgumentSpec{Name: "file", Kind: "flag", Flag: "--file", Type: "string", ValueStyle: "repeatable_pair", Summary: "Prepared task file paired with the preceding --deliverable"}
 	if got := commands["handle"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantWorkDir}) {
 		t.Fatalf("handle arguments = %+v", got)
 	}
-	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantConfirm}) {
+	if got := commands["submit"].Arguments; !reflect.DeepEqual(got, []ArgumentSpec{wantTaskKey, wantDeliverable, wantFile, wantConfirm}) {
 		t.Fatalf("submit arguments = %+v", got)
+	}
+	if got := commands["submit"].MutuallyExclusive; !reflect.DeepEqual(got, [][]string{{"confirm", "deliverable"}, {"confirm", "file"}}) {
+		t.Fatalf("submit mutually_exclusive = %+v", got)
 	}
 
 	wantDecision := ArgumentSpec{
@@ -92,6 +97,59 @@ func TestTaskHelpCatalogDescribesHowToConstructCommandArguments(t *testing.T) {
 	if got := deleteCommand.MutuallyExclusive; len(got) != 1 || len(got[0]) != 2 || got[0][0] != "confirm" || got[0][1] != "force_discard" {
 		t.Fatalf("delete mutually_exclusive = %+v", got)
 	}
+}
+
+func TestMemberTaskSubmitParsesOrderedDeliverableFileBindings(t *testing.T) {
+	request, err := parseMemberTaskRequest([]string{
+		"submit", "cloud/ws/node/worker",
+		"--deliverable", "first", "--file", "output/first.md",
+		"--deliverable=second", "--file=output/second.md",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []membertask.DeliverableFileBinding{{DeliverableID: "first", File: "output/first.md"}, {DeliverableID: "second", File: "output/second.md"}}
+	if !reflect.DeepEqual(request.DeliverableFiles, want) {
+		t.Fatalf("bindings = %#v, want %#v", request.DeliverableFiles, want)
+	}
+}
+
+func TestMemberTaskSubmitRejectsInvalidBindingFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing file", args: []string{"submit", "cloud/ws/node/worker", "--deliverable", "first"}},
+		{name: "missing deliverable", args: []string{"submit", "cloud/ws/node/worker", "--file", "output.md"}},
+		{name: "repeated deliverable", args: []string{"submit", "cloud/ws/node/worker", "--deliverable", "first", "--deliverable", "second", "--file", "output.md"}},
+		{name: "repeated file", args: []string{"submit", "cloud/ws/node/worker", "--deliverable", "first", "--file", "a.md", "--file", "b.md"}},
+		{name: "confirm mixed", args: []string{"submit", "cloud/ws/node/worker", "--deliverable", "first", "--file", "output.md", "--confirm", "preview-1"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseMemberTaskRequest(test.args); err == nil {
+				t.Fatal("request accepted")
+			}
+		})
+	}
+}
+
+func TestTaskHelpCatalogDescribesDeliverableFileBindings(t *testing.T) {
+	catalog := decodeTaskHelpCatalog(t)
+	for _, command := range catalog.Commands {
+		if command.Name != "submit" {
+			continue
+		}
+		flags := map[string]ArgumentSpec{}
+		for _, argument := range command.Arguments {
+			flags[argument.Flag] = argument
+		}
+		if flags["--deliverable"].Summary == "" || flags["--file"].Summary == "" || flags["--deliverable"].ValueStyle != "repeatable_pair" || flags["--file"].ValueStyle != "repeatable_pair" {
+			t.Fatalf("submit arguments = %#v", command.Arguments)
+		}
+		return
+	}
+	t.Fatal("submit command missing")
 }
 
 func TestHandleRequestAcceptsWorkDirAndSendsItToLocalService(t *testing.T) {

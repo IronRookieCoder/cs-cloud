@@ -15,13 +15,14 @@ import (
 )
 
 type memberTaskRequest struct {
-	Command    string
-	TaskKey    string
-	PreviewID  string
-	Decision   string
-	Reason     string
-	DeleteMode membertask.DeleteMode
-	WorkDir    string
+	Command          string
+	TaskKey          string
+	PreviewID        string
+	Decision         string
+	Reason           string
+	DeleteMode       membertask.DeleteMode
+	WorkDir          string
+	DeliverableFiles []membertask.DeliverableFileBinding
 }
 
 type memberTaskAPI interface {
@@ -151,6 +152,9 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 	default:
 		return request, invalidArguments("unknown task command: " + command)
 	}
+	if command == "submit" {
+		return parseMemberTaskSubmitRequest(request, args[2:])
+	}
 	flags, err := parseMemberTaskFlags(args[2:])
 	if err != nil {
 		return request, err
@@ -163,9 +167,6 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 			return request, invalidArguments("handle accepts only --workdir")
 		}
 	case "submit":
-		if len(flags) > boolMapLen(flags, "confirm") {
-			return request, invalidArguments("submit accepts only --confirm")
-		}
 	case "review":
 		request.Decision = flags["decision"]
 		request.Reason = flags["reason"]
@@ -201,6 +202,67 @@ func parseMemberTaskRequest(args []string) (memberTaskRequest, error) {
 		}
 	}
 	return request, nil
+}
+
+func parseMemberTaskSubmitRequest(request memberTaskRequest, args []string) (memberTaskRequest, error) {
+	var pending *membertask.DeliverableFileBinding
+	for index := 0; index < len(args); index++ {
+		name, value, consumed, err := parseMemberTaskValueFlag(args, index)
+		if err != nil {
+			return request, err
+		}
+		index += consumed
+		switch name {
+		case "confirm":
+			if request.PreviewID != "" || pending != nil || len(request.DeliverableFiles) != 0 {
+				return request, invalidArguments("--confirm cannot be combined with deliverable file bindings")
+			}
+			request.PreviewID = value
+		case "deliverable":
+			if request.PreviewID != "" || pending != nil {
+				return request, invalidArguments("--deliverable must be followed by exactly one --file")
+			}
+			pending = &membertask.DeliverableFileBinding{DeliverableID: value}
+		case "file":
+			if request.PreviewID != "" || pending == nil || pending.File != "" {
+				return request, invalidArguments("--file must follow exactly one --deliverable")
+			}
+			pending.File = value
+			request.DeliverableFiles = append(request.DeliverableFiles, *pending)
+			pending = nil
+		default:
+			return request, invalidArguments("submit flag is not supported: --" + name)
+		}
+	}
+	if pending != nil {
+		return request, invalidArguments("--deliverable requires a matching --file")
+	}
+	return request, nil
+}
+
+func parseMemberTaskValueFlag(args []string, index int) (string, string, int, error) {
+	arg := args[index]
+	if !strings.HasPrefix(arg, "--") || arg == "--" {
+		return "", "", 0, invalidArguments("unexpected positional argument: " + arg)
+	}
+	name := strings.TrimPrefix(arg, "--")
+	value := ""
+	if before, after, ok := strings.Cut(name, "="); ok {
+		name, value = before, after
+	} else {
+		if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+			return "", "", 0, invalidArguments("--" + name + " requires a value")
+		}
+		value = args[index+1]
+	}
+	if name == "" || value == "" {
+		return "", "", 0, invalidArguments("invalid flag: --" + name)
+	}
+	consumed := 0
+	if !strings.Contains(arg, "=") {
+		consumed = 1
+	}
+	return name, value, consumed, nil
 }
 
 func validateRequestTaskKey(request memberTaskRequest) (memberTaskRequest, error) {

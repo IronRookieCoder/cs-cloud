@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +13,20 @@ import (
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/membertask"
 )
+
+func TestMemberTaskClientEncodesDeliverableFileBindings(t *testing.T) {
+	request := memberTaskRequest{Command: "submit", TaskKey: "cloud/ws/node/worker", DeliverableFiles: []membertask.DeliverableFileBinding{{DeliverableID: "first", File: "output/first.md"}, {DeliverableID: "second", File: "output/second.md"}}}
+	_, _, body, err := memberTaskHTTPRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		DeliverableFiles []membertask.DeliverableFileBinding `json:"deliverable_files"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || len(payload.DeliverableFiles) != 2 || payload.DeliverableFiles[1].DeliverableID != "second" {
+		t.Fatalf("payload=%s err=%v", body, err)
+	}
+}
 
 func TestMemberTaskClientEnsuresDaemonOnceAndUsesPrivateSecret(t *testing.T) {
 	var ensureCalls atomic.Int32

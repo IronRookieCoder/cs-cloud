@@ -112,7 +112,7 @@ type StepReport struct {
 	ErrorCode          string         `json:"error_code,omitempty"`
 }
 
-func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey) (Preview, error) {
+func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey, bindingSets ...[]DeliverableFileBinding) (Preview, error) {
 	if key.Role != RoleWorker {
 		return Preview{}, newTaskError("invalid_task_role", "only workers can preview a submission", nil)
 	}
@@ -121,6 +121,14 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey) (Preview, erro
 	record, verification, err := s.loadVerifiedTask(key)
 	if err != nil {
 		return Preview{}, err
+	}
+	if len(bindingSets) > 1 {
+		return Preview{}, newTaskError("deliverable_binding_invalid", "deliverable file bindings were provided more than once", nil)
+	}
+	if len(bindingSets) == 1 {
+		if err := s.validateDeliverableBindings(ctx, key, record, bindingSets[0]); err != nil {
+			return Preview{}, err
+		}
 	}
 	attempt, taskVersion, contextVersion, err := parseRemoteVersion(record.RemoteVersion)
 	if err != nil {
@@ -158,6 +166,50 @@ func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey) (Preview, erro
 		return Preview{}, err
 	}
 	return preview, nil
+}
+
+func (s *Service) validateDeliverableBindings(ctx context.Context, key TaskKey, record TaskRecord, bindings []DeliverableFileBinding) error {
+	if len(bindings) == 0 {
+		return nil
+	}
+	remote, err := s.cloud.GetContext(ctx, key)
+	if err != nil {
+		return newTaskError("deliverable_binding_invalid", "cannot validate deliverable file bindings", err)
+	}
+	known := make(map[string]struct{}, len(remote.RequiredDeliverables)+len(remote.OptionalDeliverables))
+	for _, deliverable := range append(append([]RemoteDeliverable{}, remote.RequiredDeliverables...), remote.OptionalDeliverables...) {
+		known[deliverable.ID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(bindings))
+	root, err := filepath.Abs(record.Directory)
+	if err != nil {
+		return newTaskError("deliverable_binding_invalid", "prepared task directory is invalid", err)
+	}
+	for _, binding := range bindings {
+		if binding.DeliverableID == "" || binding.File == "" {
+			return newTaskError("deliverable_binding_invalid", "deliverable and file must be provided together", nil)
+		}
+		if _, ok := known[binding.DeliverableID]; !ok {
+			return newTaskError("deliverable_binding_invalid", "deliverable is not part of the current task context", nil)
+		}
+		if _, ok := seen[binding.DeliverableID]; ok {
+			return newTaskError("deliverable_binding_invalid", "deliverable is bound more than once", nil)
+		}
+		seen[binding.DeliverableID] = struct{}{}
+		cleaned, err := cleanRelativePath(binding.File)
+		if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
+			return newTaskError("deliverable_binding_invalid", "file path is not publishable", err)
+		}
+		full := filepath.Join(root, filepath.FromSlash(cleaned))
+		if err := ValidateContainedPath(root, full); err != nil {
+			return newTaskError("deliverable_binding_invalid", "file path escapes the prepared task directory", err)
+		}
+		info, err := os.Lstat(full)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return newTaskError("deliverable_binding_invalid", "file must be an existing regular file", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) PreviewReview(ctx context.Context, key TaskKey, decision, reason string) (Preview, error) {

@@ -138,6 +138,9 @@ func memberTaskHTTPRequest(request memberTaskRequest) (string, string, []byte, e
 	if request.Command == "handle" && request.WorkDir != "" {
 		body["workdir"] = request.WorkDir
 	}
+	if len(request.DeliverableFiles) > 0 {
+		body["deliverable_files"] = request.DeliverableFiles
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", "", nil, &membertask.TaskError{Code: "invalid_arguments", Message: "cannot encode task request"}

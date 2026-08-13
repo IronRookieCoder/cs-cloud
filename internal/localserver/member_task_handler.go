@@ -87,11 +87,12 @@ func (s *Server) handleMemberTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 type memberTaskActionRequest struct {
-	PreviewID  string                `json:"preview_id"`
-	Decision   string                `json:"decision"`
-	Reason     string                `json:"reason"`
-	DeleteMode membertask.DeleteMode `json:"mode"`
-	WorkDir    string                `json:"workdir"`
+	PreviewID        string                              `json:"preview_id"`
+	Decision         string                              `json:"decision"`
+	Reason           string                              `json:"reason"`
+	DeleteMode       membertask.DeleteMode               `json:"mode"`
+	WorkDir          string                              `json:"workdir"`
+	DeliverableFiles []membertask.DeliverableFileBinding `json:"deliverable_files"`
 }
 
 func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWriter, r *http.Request, key membertask.TaskKey, action string) {
@@ -110,7 +111,7 @@ func (s *Server) handleMemberTaskAction(ctx context.Context, w http.ResponseWrit
 		result, err = s.memberTasks.Handle(ctx, key, membertask.PrepareOptions{WorkDir: request.WorkDir})
 	case "submit":
 		if request.PreviewID == "" {
-			result, err = s.memberTasks.PreviewSubmit(ctx, key)
+			result, err = s.memberTasks.PreviewSubmit(ctx, key, request.DeliverableFiles)
 		} else {
 			result, err = s.memberTasks.ConfirmOperation(ctx, key, request.PreviewID)
 		}
@@ -158,7 +159,7 @@ func writeMemberTaskError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case "preview_stale", "remote_ref_changed", "operation_ref_conflict", "delete_recovery_required", "force_discard_required", "prepare_location_conflict":
 		status = http.StatusConflict
-	case "provider_not_supported", "input_material_modified", "local_changes_present", "material_content_unavailable", "repository_access_unavailable", "unsupported_task_store_schema":
+	case "provider_not_supported", "input_material_modified", "local_changes_present", "material_content_unavailable", "repository_access_unavailable", "unsupported_task_store_schema", "deliverable_binding_invalid":
 		status = http.StatusUnprocessableEntity
 	case "cloud_unavailable", "operation_result_unknown":
 		status = http.StatusServiceUnavailable

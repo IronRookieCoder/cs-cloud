@@ -8,11 +8,62 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestValidateDeliverableBindingsRequiresSafeKnownRegularFiles(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	if err := os.MkdirAll(filepath.Join(dir, "output"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "output", "result.html")
+	if err := os.WriteFile(file, []byte("result"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveTask(TaskRecord{Key: key, Directory: dir, Prepared: true, RemoteVersion: "1:1:1"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := taskContextServer(t, `{"ref":{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"},"prepare_allowed":true,"required_deliverables":[{"id":"delivery-1","required":true}]}`)
+	defer srv.Close()
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	valid := []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/result.html"}}
+	if err := svc.validateDeliverableBindings(context.Background(), key, TaskRecord{Key: key, Directory: dir}, valid); err != nil {
+		t.Fatalf("valid binding: %v", err)
+	}
+	for _, test := range []struct {
+		name    string
+		binding []DeliverableFileBinding
+	}{
+		{name: "duplicate", binding: []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/result.html"}, {DeliverableID: "delivery-1", File: "output/result.html"}}},
+		{name: "unknown", binding: []DeliverableFileBinding{{DeliverableID: "missing", File: "output/result.html"}}},
+		{name: "manifest", binding: []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "manifest.json"}}},
+		{name: "escape", binding: []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "../outside.html"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := svc.validateDeliverableBindings(context.Background(), key, TaskRecord{Key: key, Directory: dir}, test.binding)
+			te, ok := err.(*TaskError)
+			if !ok || te.Code != "deliverable_binding_invalid" {
+				t.Fatalf("error = %#v", err)
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(file, filepath.Join(dir, "output", "link.html")); err != nil {
+			t.Fatal(err)
+		}
+		err := svc.validateDeliverableBindings(context.Background(), key, TaskRecord{Key: key, Directory: dir}, []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/link.html"}})
+		te, ok := err.(*TaskError)
+		if !ok || te.Code != "deliverable_binding_invalid" {
+			t.Fatalf("symlink error = %#v", err)
+		}
+	}
+}
 
 func TestBuildSubmitManifestRejectsUncommittedRepositoryOutput(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())

@@ -16,6 +16,11 @@ func supportedTaskSchemaVersion(version string) bool {
 
 type Role string
 
+type DeliverableFileBinding struct {
+	DeliverableID string `json:"deliverable_id"`
+	File          string `json:"file"`
+}
+
 const (
 	RoleWorker Role = "worker"
 	RoleCritic Role = "critic"
