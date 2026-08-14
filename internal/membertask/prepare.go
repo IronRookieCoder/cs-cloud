@@ -562,14 +562,14 @@ func cloneExactRepositoryWithCredential(ctx context.Context, target string, repo
 		return gitPreparationError("repository clone", output, err)
 	}
 	if credential != nil {
-		cmd = gitCommandContext(ctx, "git", "remote", "set-url", "origin", repo.CloneURL)
+		cmd = gitCommandContext(ctx, "git", gitRepositoryArgs("remote", "set-url", "origin", repo.CloneURL)...)
 		cmd.Dir = target
 		cmd.Env = nonInteractiveGitEnv()
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return gitPreparationError("repository remote sanitization", output, err)
 		}
 	}
-	cmd = gitCommandContext(ctx, "git", "checkout", "--detach", repo.BaseSHA)
+	cmd = gitCommandContext(ctx, "git", gitRepositoryArgs("checkout", "--detach", repo.BaseSHA)...)
 	cmd.Dir = target
 	cmd.Env = nonInteractiveGitEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -579,7 +579,11 @@ func cloneExactRepositoryWithCredential(ctx context.Context, target string, repo
 }
 
 func gitCloneArgs(cloneURL, target string) []string {
-	return []string{"-c", "core.longpaths=true", "clone", "--no-checkout", "--", cloneURL, target}
+	return gitRepositoryArgs("clone", "--no-checkout", "--", cloneURL, target)
+}
+
+func gitRepositoryArgs(args ...string) []string {
+	return append([]string{"-c", "core.longpaths=true"}, args...)
 }
 
 func repositoryAuthURL(raw string, credential RepositoryCredential) (string, error) {
@@ -813,6 +817,9 @@ func prepareSources(remote RemoteTaskContext, key TaskKey) ([]MaterialSource, er
 		role := MaterialOutputWritable
 		if key.Role == RoleCritic {
 			role = MaterialReferenceOnly
+			if repository.HeadSHA != "" {
+				repository.BaseSHA = repository.HeadSHA
+			}
 		}
 		sources = append(sources, MaterialSource{Identity: repository.Identity, SourceURL: repository.SourceURL, Kind: "git", SourceVersion: repository.BaseSHA, RelativePath: "repositories/" + safeMaterialName(repository.Identity), Role: role, Repository: &repository})
 	}

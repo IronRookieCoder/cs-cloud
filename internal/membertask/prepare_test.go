@@ -435,6 +435,34 @@ func TestGitCloneArgsEnableWindowsLongPaths(t *testing.T) {
 	}
 }
 
+func TestCloneExactRepositoryEnablesWindowsLongPathsForEveryGitCommand(t *testing.T) {
+	previous := gitCommandContext
+	t.Cleanup(func() { gitCommandContext = previous })
+	t.Setenv("GO_WANT_GIT_HELPER", "1")
+	var commands [][]string
+	gitCommandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string(nil), args...))
+		helperArgs := append([]string{"-test.run=TestGitHelperProcess", "--"}, args...)
+		return exec.CommandContext(ctx, os.Args[0], helperArgs...)
+	}
+
+	err := cloneExactRepositoryWithCredential(context.Background(), filepath.Join(t.TempDir(), "repo"), RepositoryContext{
+		CloneURL: "https://gitea.example/team/repo.git",
+		BaseSHA:  strings.Repeat("a", 40),
+	}, &RepositoryCredential{Provider: "gitea", BaseURL: "https://gitea.example", Token: "repo-token"})
+	if err != nil {
+		t.Fatalf("cloneExactRepository: %v", err)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("Git commands = %#v, want clone, remote sanitization, and checkout", commands)
+	}
+	for _, command := range commands {
+		if len(command) < 2 || command[0] != "-c" || command[1] != "core.longpaths=true" {
+			t.Fatalf("Git command does not enable long paths: %#v", command)
+		}
+	}
+}
+
 func TestRepositoryAuthURLRequiresMatchingHTTPSOrigin(t *testing.T) {
 	credential := RepositoryCredential{BaseURL: "https://gitea.example:8443", Token: "repo-token"}
 	got, err := repositoryAuthURL("https://gitea.example:8443/team/repo.git", credential)
@@ -462,6 +490,34 @@ func TestRepositoryCredentialRequiredForGitMaterialSource(t *testing.T) {
 	}
 	if !repositoryCredentialRequired(sources) {
 		t.Fatal("git material source did not require repository credentials")
+	}
+}
+
+func TestPrepareSourcesCriticUsesWorkerHeadAsRepositorySnapshot(t *testing.T) {
+	key, _ := ParseTaskKey("cloud/ws/node/critic")
+	sources, err := prepareSources(RemoteTaskContext{
+		RemoteTask: RemoteTask{Attempt: 1},
+		Repositories: []RepositoryContext{{
+			Provider:  "gitea",
+			Identity:  "team/repo",
+			CloneURL:  "https://gitea.example/team/repo.git",
+			BaseSHA:   strings.Repeat("a", 40),
+			BeforeSHA: strings.Repeat("a", 40),
+			HeadSHA:   strings.Repeat("b", 40),
+		}},
+	}, key)
+	if err != nil {
+		t.Fatalf("prepareSources: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Repository == nil {
+		t.Fatalf("sources = %#v", sources)
+	}
+	repository := sources[0].Repository
+	if repository.BaseSHA != strings.Repeat("b", 40) || sources[0].SourceVersion != strings.Repeat("b", 40) {
+		t.Fatalf("critic snapshot = %#v, source version = %q", repository, sources[0].SourceVersion)
+	}
+	if repository.BeforeSHA != strings.Repeat("a", 40) || sources[0].Role != MaterialReferenceOnly {
+		t.Fatalf("critic source = %#v", sources[0])
 	}
 }
 
