@@ -294,6 +294,49 @@ func TestServiceGetRefreshesUntrackedRepositoryOutput(t *testing.T) {
 	}
 }
 
+func TestServiceGetOfflineRefreshesUntrackedRepositoryOutput(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	repoDir := filepath.Join(dir, "repositories", "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "base"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	head := strings.TrimSpace(runGitTest(t, repoDir, "rev-parse", "HEAD"))
+	manifest := Manifest{SchemaVersion: SchemaVersion, Repositories: []RepositoryManifest{{Identity: "repo", RelativePath: "repositories/repo", Role: MaterialOutputWritable, BaseSHA: head, BaselineHead: head, OutputPaths: []string{"local-task-e2e.md"}}}}
+	if err := store.SaveTask(TaskRecord{Key: key, Directory: dir, Prepared: true, Manifest: &manifest}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "local-task-e2e.md"), []byte("done\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := NewService(store, NewCloudClient("http://127.0.0.1:1", testCredentials)).Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if task.Local == nil || !task.Local.Dirty || len(task.Local.DirtyPaths) != 1 || task.Local.DirtyPaths[0] != "repositories/repo/local-task-e2e.md" {
+		t.Fatalf("task = %+v", task)
+	}
+}
+
 func TestServiceGetOfflineUsesPersistedDisplayName(t *testing.T) {
 	store, _ := OpenStore(t.TempDir())
 	key, _ := ParseTaskKey("cloud/ws/node/worker")

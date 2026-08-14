@@ -212,7 +212,7 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 		return TaskRecord{}, newTaskError("prepare_failed", "cannot create task staging directory", err)
 	}
 	var repositoryCredential *RepositoryCredential
-	if len(remote.Repositories) > 0 {
+	if repositoryCredentialRequired(sources) {
 		credential, err := s.cloud.RepositoryCredential(ctx, key)
 		if err != nil {
 			_ = os.RemoveAll(staging)
@@ -754,6 +754,15 @@ func providersSupported(providers []string) bool {
 		}
 	}
 	return true
+}
+
+func repositoryCredentialRequired(sources []MaterialSource) bool {
+	for _, source := range sources {
+		if source.Kind == "git" {
+			return true
+		}
+	}
+	return false
 }
 
 func prepareSources(remote RemoteTaskContext, key TaskKey) ([]MaterialSource, error) {

@@ -186,6 +186,9 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 			s.handleAuthorityError(record, err)
 			return Task{}, err
 		}
+		if err := refreshTaskManifestState(&record); err != nil {
+			return Task{}, err
+		}
 		record.Offline = true
 		record.CloudStateUnverified = true
 		if err := s.store.SaveTask(record); err != nil {
@@ -198,13 +201,8 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 	remote := remoteContext.RemoteTask
 	task := Task{Key: key, Remote: &remote, Context: &remoteContext}
 	if found {
-		if record.Prepared && record.Manifest != nil && record.Directory != "" {
-			verification, verifyErr := VerifyManifest(record.Directory, *record.Manifest)
-			if verifyErr != nil {
-				return Task{}, verifyErr
-			}
-			record.Dirty = verification.Dirty
-			record.DirtyPaths = verification.ChangedPaths
+		if err := refreshTaskManifestState(&record); err != nil {
+			return Task{}, err
 		}
 		now := s.now().UTC()
 		record.Offline = false
@@ -226,6 +224,19 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 	}
 	setTaskDisplay(&task)
 	return task, nil
+}
+
+func refreshTaskManifestState(record *TaskRecord) error {
+	if !record.Prepared || record.Manifest == nil || record.Directory == "" {
+		return nil
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		return err
+	}
+	record.Dirty = verification.Dirty
+	record.DirtyPaths = verification.ChangedPaths
+	return nil
 }
 
 func displayNameFromRemote(remote RemoteTask) (string, DisplayNameSource) {

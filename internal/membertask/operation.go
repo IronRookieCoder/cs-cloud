@@ -533,33 +533,9 @@ func buildSubmitManifest(record TaskRecord, verification Verification, bindingSe
 			if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
 				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file path is not publishable", err)
 			}
-			fullPath := filepath.Join(record.Directory, filepath.FromSlash(cleaned))
-			validatedInfo, err := os.Lstat(fullPath)
+			content, err := readBoundSubmissionFile(record.Directory, cleaned)
 			if err != nil {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
-			}
-			if !validatedInfo.Mode().IsRegular() {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is not a regular file", nil)
-			}
-			if validatedInfo.Size() > maxSubmissionFileSize {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
-			}
-			fileHandle, err := os.Open(fullPath)
-			if err != nil {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is missing", err)
-			}
-			openedInfo, err := fileHandle.Stat()
-			if err != nil || !os.SameFile(validatedInfo, openedInfo) {
-				_ = fileHandle.Close()
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file changed during validation", err)
-			}
-			content, err := io.ReadAll(io.LimitReader(fileHandle, maxSubmissionFileSize+1))
-			_ = fileHandle.Close()
-			if err != nil {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file cannot be read", err)
-			}
-			if int64(len(content)) > maxSubmissionFileSize {
-				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+				return nil, nil, err
 			}
 			digest := sha256.Sum256(content)
 			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), Name: filepath.Base(cleaned), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
@@ -583,6 +559,44 @@ func buildSubmitManifest(record TaskRecord, verification Verification, bindingSe
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	_ = verification
 	return repositories, files, nil
+}
+
+func readBoundSubmissionFile(taskDirectory, relativePath string) ([]byte, error) {
+	root, err := os.OpenRoot(taskDirectory)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "prepared task directory cannot be opened", err)
+	}
+	defer root.Close()
+
+	name := filepath.FromSlash(relativePath)
+	validatedInfo, err := root.Lstat(name)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is missing or outside the prepared task directory", err)
+	}
+	if !validatedInfo.Mode().IsRegular() {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is not a regular file", nil)
+	}
+	if validatedInfo.Size() > maxSubmissionFileSize {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+	}
+
+	fileHandle, err := root.Open(name)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is missing or outside the prepared task directory", err)
+	}
+	defer fileHandle.Close()
+	openedInfo, err := fileHandle.Stat()
+	if err != nil || !os.SameFile(validatedInfo, openedInfo) {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file changed during validation", err)
+	}
+	content, err := io.ReadAll(io.LimitReader(fileHandle, maxSubmissionFileSize+1))
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file cannot be read", err)
+	}
+	if int64(len(content)) > maxSubmissionFileSize {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+	}
+	return content, nil
 }
 
 // untrackedTaskFiles finds likely deliverable files created outside the prepared

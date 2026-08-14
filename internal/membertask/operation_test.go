@@ -3,6 +3,7 @@ package membertask
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -152,6 +153,45 @@ func TestBuildSubmitManifestUsesOnlyExplicitDeliverableBindings(t *testing.T) {
 	}
 	if _, files, err := buildSubmitManifest(TaskRecord{Key: key, Directory: dir, Manifest: &manifest}, verification, []DeliverableFileBinding{}); err != nil || len(files) != 0 {
 		t.Fatalf("empty explicit bindings files=%#v err=%v", files, err)
+	}
+}
+
+func TestBuildSubmitManifestRejectsParentSymlinkSwapOutsideTaskRoot(t *testing.T) {
+	store, _ := OpenStore(t.TempDir())
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	dir := store.Layout().TaskDir(key)
+	outputDir := filepath.Join(dir, "output")
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "result.html"), []byte("validated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{SchemaVersion: SchemaVersion, Files: []FileManifest{{Identity: "delivery-1", RelativePath: "output/result.html", Role: MaterialOutputWritable}}}
+	record := TaskRecord{Key: key, Directory: dir, Manifest: &manifest}
+	binding := []DeliverableFileBinding{{DeliverableID: "delivery-1", File: "output/result.html"}}
+
+	srv := taskContextServer(t, `{"ref":{"cloud_instance_id":"cloud","workspace_id":"ws","node_run_id":"node","role":"worker"},"required_deliverables":[{"id":"delivery-1","required":true}]}`)
+	defer srv.Close()
+	if err := NewService(store, NewCloudClient(srv.URL, testCredentials)).validateDeliverableBindings(context.Background(), key, record, binding); err != nil {
+		t.Fatalf("validateDeliverableBindings: %v", err)
+	}
+
+	externalDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(externalDir, "result.html"), []byte("external"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(outputDir, filepath.Join(dir, "validated-output")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalDir, outputDir); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	_, _, err := buildSubmitManifest(record, Verification{}, binding)
+	var taskErr *TaskError
+	if !errors.As(err, &taskErr) || taskErr.Code != "deliverable_binding_invalid" {
+		t.Fatalf("buildSubmitManifest error = %#v", err)
 	}
 }
 

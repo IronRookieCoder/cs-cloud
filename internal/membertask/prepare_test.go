@@ -455,6 +455,16 @@ func TestRepositoryAuthURLRequiresMatchingHTTPSOrigin(t *testing.T) {
 	}
 }
 
+func TestRepositoryCredentialRequiredForGitMaterialSource(t *testing.T) {
+	sources := []MaterialSource{
+		{Identity: "requirements", Kind: "file", RelativePath: "input/requirements.md"},
+		{Identity: "reference-repo", Kind: "git", RelativePath: "repositories/reference"},
+	}
+	if !repositoryCredentialRequired(sources) {
+		t.Fatal("git material source did not require repository credentials")
+	}
+}
+
 func TestCloneExactRepositoryReturnsSanitizedBoundedGitDiagnostic(t *testing.T) {
 	previous := gitCommandContext
 	t.Cleanup(func() { gitCommandContext = previous })

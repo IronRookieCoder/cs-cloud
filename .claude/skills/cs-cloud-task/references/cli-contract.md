@@ -1,14 +1,33 @@
 # cs-cloud task CLI 契约
 
+## 调用入口
+
+本 reference 是规则来源，不是每次操作前必须重新读取的运行步骤。已加载 skill 且命令形态明确时直接执行：`list` 使用 `cs-cloud task list --json`，`get` 使用 `cs-cloud task get <task_key> --json`。仅在未知 schema、未知参数/动作或需要校验动态候选 argv 时获取一次 `cs-cloud task help --json`；禁止依次尝试根命令帮助、`task --help` 和文本 `task help`。
+
+优先直接从 `PATH` 调用 `cs-cloud`；仅在 command-not-found 后定位一次可执行文件。不得通过枚举 skill 目录、读取 UI metadata、搜索用户目录或源码来发现命令。例行调用不输出过程播报。
+
 ## Catalog 与 argv
 
 支持 `schema_version` 主版本 `1`。命令仅依赖 `name`、`capability`、`timeout_seconds`、`arguments`、`mutually_exclusive`、`confirmation_mode` 和 `outcomes`。
 
-按 `arguments` 顺序构造 argv：位置参数直接追加；字符串和枚举 flag 使用 catalog 给出的完整 `flag`，按 `flag=value` 传值；值为 true 的布尔 flag 只追加 flag。执行前校验 `required`、`required_when`、`required_unless`、枚举值和互斥组。未知 `kind`、`type`、`value_style`、条件形式或 schema 主版本时停止，不猜测语法。
+按 `arguments` 顺序构造 argv：位置参数直接追加；字符串和枚举 flag 使用 catalog 给出的完整 `flag`，并严格按 `value_style` 传值；`equals_or_unprefixed_separate` 可使用 `--flag=value` 或 `--flag value`，`repeatable_pair` 按 catalog 声明的成对顺序重复；值为 true 的布尔 flag 只追加 flag。执行前校验 `required`、`required_when`、`required_unless`、枚举值和互斥组。未知 `kind`、`type`、`value_style`、条件形式或 schema 主版本时停止，不猜测语法。
+
+`value_style` 的合法组合只有以下三类：位置参数不声明 `value_style`；字符串或枚举 flag 使用 `equals_or_unprefixed_separate`；成对重复的字符串 flag 使用 `repeatable_pair`。布尔 flag 不声明 `value_style`，值为 `true` 时只追加 flag。catalog、候选 argv 和文档示例必须符合该组合；出现其它值或类型组合时按契约失败停止。
 
 `task_key` 的 CLI 位置参数是字符串 `cloud_instance_id/workspace_id/node_run_id/role`，由列表返回对象的四个字段按此顺序拼接；不要传 JSON 对象、`--task-key` flag、截断值、冒号分隔值或本地目录路径。传参前先用同一字符串做四段校验，校验失败不启动 CLI。
 
 每次调用只传一个 `--json`，使用 catalog 的超时。以 argv 数组启动已解析的绝对二进制路径，不启用 shell。分别保留 stdout、stderr 和退出码，只解析 stdout；退出码 `2` 后不得换一种参数形式重试。禁止使用 `2>&1`、管道合并或把 stderr 重定向到 stdout；stderr 只用于诊断，不得参与 JSON、状态或成功判断。
+
+### stdout 单路径解析
+
+解析顺序固定为：
+
+1. 将 stdout 解析为一个 JSON 值，并校验顶层信封字段；
+2. 读取 `data.result`：`list` 必须是数组，`get/handle/submit/review/delete/recover` 按契约读取对象；
+3. 只投影当前阶段需要的字段：`list` 使用 `task_key`、`remote`、`projection`，详情和写操作再读取目标字段；
+4. 解析或类型校验失败立即报告契约失败并停止。
+
+禁止为同一 stdout 轮换解析器、猜测 `result` 所在层级、手工复制数组或通过第二次 CLI 调用“验证”输出。工具已将大输出持久化时，只允许对该文件执行一次等价的定向解析。
 
 ## 信封
 
