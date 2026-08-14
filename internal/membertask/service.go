@@ -198,6 +198,14 @@ func (s *Service) Get(ctx context.Context, key TaskKey) (Task, error) {
 	remote := remoteContext.RemoteTask
 	task := Task{Key: key, Remote: &remote, Context: &remoteContext}
 	if found {
+		if record.Prepared && record.Manifest != nil && record.Directory != "" {
+			verification, verifyErr := VerifyManifest(record.Directory, *record.Manifest)
+			if verifyErr != nil {
+				return Task{}, verifyErr
+			}
+			record.Dirty = verification.Dirty
+			record.DirtyPaths = verification.ChangedPaths
+		}
 		now := s.now().UTC()
 		record.Offline = false
 		record.CloudStateUnverified = false

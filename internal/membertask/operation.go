@@ -20,6 +20,7 @@ import (
 type RepoPublishPlan struct {
 	RepositoryIdentity string         `json:"repository_identity"`
 	ExpectedRef        string         `json:"expected_ref"`
+	BaseRef            string         `json:"base_ref,omitempty"`
 	BeforeSHA          string         `json:"before_sha"`
 	HeadSHA            string         `json:"head_sha"`
 	RemoteName         string         `json:"remote_name,omitempty"`
@@ -401,13 +402,32 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 			return *operation, newTaskError("invalid_publish_plan", "cloud publish plan does not match prepared repository", nil)
 		}
 		worktree := filepath.Join(record.Directory, filepath.FromSlash(repo.RelativePath))
+		plan.BaseRef = repo.BaseRef
 		operation.Status = OperationRunning
 		operation.LocalSteps[plan.RepositoryIdentity] = RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepRunning}
 		record.Operation = operation
 		if err := s.store.SaveTask(record); err != nil {
 			return *operation, err
 		}
-		result, err := publisher.PublishStep(ctx, worktree, plan)
+		remote := plan.RemoteName
+		if remote == "" {
+			remote = "origin"
+		}
+		var result RepoStepResult
+		var err error
+		if repo.CloneURL == "" {
+			result, err = publisher.PublishStep(ctx, worktree, plan)
+		} else {
+			credential, credentialErr := s.cloud.RepositoryCredential(ctx, record.Key)
+			if credentialErr != nil {
+				return *operation, credentialErr
+			}
+			authenticatedRemoteURL, authErr := repositoryAuthURL(repo.CloneURL, credential)
+			if authErr != nil {
+				return *operation, authErr
+			}
+			result, err = publisher.PublishStepWithRemote(ctx, worktree, plan, authenticatedRemoteURL)
+		}
 		operation.LocalSteps[plan.RepositoryIdentity] = result
 		record.Operation = operation
 		_ = s.store.SaveTask(record)

@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,6 +427,34 @@ func TestCloneExactRepositoryDisablesInteractiveAuthentication(t *testing.T) {
 	}
 }
 
+func TestGitCloneArgsEnableWindowsLongPaths(t *testing.T) {
+	args := gitCloneArgs("https://gitea.example/team/repo.git", "C:/work/repo")
+	want := []string{"-c", "core.longpaths=true", "clone", "--no-checkout", "--", "https://gitea.example/team/repo.git", "C:/work/repo"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestRepositoryAuthURLRequiresMatchingHTTPSOrigin(t *testing.T) {
+	credential := RepositoryCredential{BaseURL: "https://gitea.example:8443", Token: "repo-token"}
+	got, err := repositoryAuthURL("https://gitea.example:8443/team/repo.git", credential)
+	if err != nil {
+		t.Fatalf("repositoryAuthURL: %v", err)
+	}
+	if got != "https://oauth2:repo-token@gitea.example:8443/team/repo.git" {
+		t.Fatalf("authenticated URL = %q", got)
+	}
+	for _, raw := range []string{
+		"http://gitea.example:8443/team/repo.git",
+		"https://other.example:8443/team/repo.git",
+		"https://user:pass@gitea.example:8443/team/repo.git",
+	} {
+		if _, err := repositoryAuthURL(raw, credential); err == nil {
+			t.Fatalf("repositoryAuthURL(%q) succeeded", raw)
+		}
+	}
+}
+
 func TestCloneExactRepositoryReturnsSanitizedBoundedGitDiagnostic(t *testing.T) {
 	previous := gitCommandContext
 	t.Cleanup(func() { gitCommandContext = previous })
@@ -472,8 +502,12 @@ func TestGitHelperProcess(t *testing.T) {
 	if os.Getenv("GO_GIT_HELPER_FAIL") == "1" {
 		t.Fatalf("\x1b[31mauthentication rejected for https://user:secret@gitea.example\x1b[0m")
 	}
-	if args[0] == "clone" {
+	cloneIndex := slices.Index(args, "clone")
+	if cloneIndex >= 0 {
 		if err := os.MkdirAll(args[len(args)-1], 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(args[len(args)-1], ".git"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}

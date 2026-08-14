@@ -211,7 +211,17 @@ func (s *Service) prepare(ctx context.Context, key TaskKey, options PrepareOptio
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		return TaskRecord{}, newTaskError("prepare_failed", "cannot create task staging directory", err)
 	}
-	if err := materializeSources(ctx, staging, sources); err != nil {
+	var repositoryCredential *RepositoryCredential
+	if len(remote.Repositories) > 0 {
+		credential, err := s.cloud.RepositoryCredential(ctx, key)
+		if err != nil {
+			_ = os.RemoveAll(staging)
+			_ = s.removePrepareJournal(journal.ID)
+			return TaskRecord{}, err
+		}
+		repositoryCredential = &credential
+	}
+	if err := materializeSourcesWithCredential(ctx, staging, sources, repositoryCredential); err != nil {
 		_ = os.RemoveAll(staging)
 		_ = s.removePrepareJournal(journal.ID)
 		return TaskRecord{}, err
@@ -480,6 +490,10 @@ func syncRecordDisplay(record *TaskRecord, remote RemoteTask) bool {
 }
 
 func materializeSources(ctx context.Context, root string, sources []MaterialSource) error {
+	return materializeSourcesWithCredential(ctx, root, sources, nil)
+}
+
+func materializeSourcesWithCredential(ctx context.Context, root string, sources []MaterialSource, credential *RepositoryCredential) error {
 	for _, source := range sources {
 		rel, err := cleanRelativePath(source.RelativePath)
 		if err != nil {
@@ -510,7 +524,7 @@ func materializeSources(ctx context.Context, root string, sources []MaterialSour
 			if source.Repository == nil {
 				return newTaskError("invalid_cloud_response", "git material has no repository context", nil)
 			}
-			if err := cloneExactRepository(ctx, target, *source.Repository); err != nil {
+			if err := cloneExactRepositoryWithCredential(ctx, target, *source.Repository, credential); err != nil {
 				return err
 			}
 		default:
@@ -521,6 +535,10 @@ func materializeSources(ctx context.Context, root string, sources []MaterialSour
 }
 
 func cloneExactRepository(ctx context.Context, target string, repo RepositoryContext) error {
+	return cloneExactRepositoryWithCredential(ctx, target, repo, nil)
+}
+
+func cloneExactRepositoryWithCredential(ctx context.Context, target string, repo RepositoryContext, credential *RepositoryCredential) error {
 	parsed, err := url.Parse(repo.CloneURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return newTaskError("unsafe_repository_url", "repository URL is invalid or contains credentials", nil)
@@ -531,10 +549,25 @@ func cloneExactRepository(ctx context.Context, target string, repo RepositoryCon
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return newTaskError("prepare_failed", "cannot create repository material directory", err)
 	}
-	cmd := gitCommandContext(ctx, "git", "clone", "--no-checkout", "--", repo.CloneURL, target)
+	cloneURL := repo.CloneURL
+	if credential != nil {
+		cloneURL, err = repositoryAuthURL(repo.CloneURL, *credential)
+		if err != nil {
+			return err
+		}
+	}
+	cmd := gitCommandContext(ctx, "git", gitCloneArgs(cloneURL, target)...)
 	cmd.Env = nonInteractiveGitEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return gitPreparationError("repository clone", output, err)
+	}
+	if credential != nil {
+		cmd = gitCommandContext(ctx, "git", "remote", "set-url", "origin", repo.CloneURL)
+		cmd.Dir = target
+		cmd.Env = nonInteractiveGitEnv()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return gitPreparationError("repository remote sanitization", output, err)
+		}
 	}
 	cmd = gitCommandContext(ctx, "git", "checkout", "--detach", repo.BaseSHA)
 	cmd.Dir = target
@@ -543,6 +576,23 @@ func cloneExactRepository(ctx context.Context, target string, repo RepositoryCon
 		return gitPreparationError("repository checkout", output, err)
 	}
 	return nil
+}
+
+func gitCloneArgs(cloneURL, target string) []string {
+	return []string{"-c", "core.longpaths=true", "clone", "--no-checkout", "--", cloneURL, target}
+}
+
+func repositoryAuthURL(raw string, credential RepositoryCredential) (string, error) {
+	repositoryURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || repositoryURL.Scheme != "https" || repositoryURL.Host == "" || repositoryURL.User != nil || repositoryURL.RawQuery != "" || repositoryURL.Fragment != "" {
+		return "", newTaskError("unsafe_repository_url", "repository URL is invalid or contains credentials", nil)
+	}
+	baseURL, err := url.Parse(strings.TrimSpace(credential.BaseURL))
+	if err != nil || baseURL.Scheme != "https" || !strings.EqualFold(baseURL.Host, repositoryURL.Host) || strings.TrimSpace(credential.Token) == "" {
+		return "", newTaskError("repository_access_unavailable", "repository credential does not match the secure repository origin", nil)
+	}
+	repositoryURL.User = url.UserPassword("oauth2", credential.Token)
+	return repositoryURL.String(), nil
 }
 
 func nonInteractiveGitEnv() []string {

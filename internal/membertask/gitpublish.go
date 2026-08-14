@@ -47,6 +47,10 @@ func newGitPublisherWithRunner(run gitRunner) *GitPublisher {
 }
 
 func (p *GitPublisher) PublishStep(ctx context.Context, worktree string, plan RepoPublishPlan) (RepoStepResult, error) {
+	return p.PublishStepWithRemote(ctx, worktree, plan, "")
+}
+
+func (p *GitPublisher) PublishStepWithRemote(ctx context.Context, worktree string, plan RepoPublishPlan, remoteURL string) (RepoStepResult, error) {
 	if !strings.HasPrefix(plan.ExpectedRef, "refs/heads/") || plan.ExpectedRef == "refs/heads/main" || plan.ExpectedRef == "refs/heads/master" {
 		return RepoStepResult{}, newTaskError("invalid_publish_plan", "publish target must be a non-base branch ref", nil)
 	}
@@ -54,21 +58,34 @@ func (p *GitPublisher) PublishStep(ctx context.Context, worktree string, plan Re
 	if remote == "" {
 		remote = "origin"
 	}
-	observed, err := p.remoteRef(ctx, worktree, remote, plan.ExpectedRef)
+	observed, err := p.remoteRef(ctx, worktree, remote, remoteURL, plan.ExpectedRef)
 	if err != nil {
 		return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepUnknown}, newTaskError("operation_result_unknown", "cannot verify remote ref", err)
 	}
 	if observed == plan.HeadSHA {
 		return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepVerified, ObservedSHA: observed}, nil
 	}
-	if observed != plan.BeforeSHA {
+	leaseSHA := plan.BeforeSHA
+	if observed == "" {
+		if !strings.HasPrefix(plan.BaseRef, "refs/heads/") {
+			return RepoStepResult{}, newTaskError("invalid_publish_plan", "publish base must be a full branch ref", nil)
+		}
+		baseObserved, baseErr := p.remoteRef(ctx, worktree, remote, remoteURL, plan.BaseRef)
+		if baseErr != nil {
+			return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepUnknown}, newTaskError("operation_result_unknown", "cannot verify remote base ref", baseErr)
+		}
+		if baseObserved != plan.BeforeSHA {
+			return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepConflict, ObservedSHA: baseObserved}, newTaskError("remote_ref_changed", "remote base ref changed before publish", nil)
+		}
+		leaseSHA = ""
+	} else if observed != plan.BeforeSHA {
 		return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepConflict, ObservedSHA: observed}, newTaskError("remote_ref_changed", "remote ref changed before publish", nil)
 	}
-	args := []string{"push", remote, plan.HeadSHA + ":" + plan.ExpectedRef, "--force-with-lease=" + plan.ExpectedRef + ":" + plan.BeforeSHA}
+	args := gitRemoteOverride(remote, remoteURL, "push", remote, plan.HeadSHA+":"+plan.ExpectedRef, "--force-with-lease="+plan.ExpectedRef+":"+leaseSHA)
 	if _, err := p.run(ctx, worktree, args...); err != nil {
 		return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepUnknown}, newTaskError("operation_result_unknown", "git push result is unknown", err)
 	}
-	observed, err = p.remoteRef(ctx, worktree, remote, plan.ExpectedRef)
+	observed, err = p.remoteRef(ctx, worktree, remote, remoteURL, plan.ExpectedRef)
 	if err != nil {
 		return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepUnknown}, newTaskError("operation_result_unknown", "cannot verify published ref", err)
 	}
@@ -78,8 +95,8 @@ func (p *GitPublisher) PublishStep(ctx context.Context, worktree string, plan Re
 	return RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepVerified, ObservedSHA: observed}, nil
 }
 
-func (p *GitPublisher) remoteRef(ctx context.Context, worktree, remote, ref string) (string, error) {
-	output, err := p.run(ctx, worktree, "ls-remote", "--refs", remote, ref)
+func (p *GitPublisher) remoteRef(ctx context.Context, worktree, remote, remoteURL, ref string) (string, error) {
+	output, err := p.run(ctx, worktree, gitRemoteOverride(remote, remoteURL, "ls-remote", "--refs", remote, ref)...)
 	if err != nil {
 		return "", err
 	}
@@ -91,4 +108,11 @@ func (p *GitPublisher) remoteRef(ctx context.Context, worktree, remote, ref stri
 		return "", errors.New("unexpected ls-remote response")
 	}
 	return fields[0], nil
+}
+
+func gitRemoteOverride(remote, remoteURL string, args ...string) []string {
+	if remoteURL == "" {
+		return args
+	}
+	return append([]string{"-c", "remote." + remote + ".url=" + remoteURL}, args...)
 }

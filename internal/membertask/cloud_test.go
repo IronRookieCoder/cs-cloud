@@ -125,6 +125,36 @@ func TestCloudClientSendsWorkspaceHeaderForTaskRequests(t *testing.T) {
 	}
 }
 
+func TestCloudClientGetsRepositoryCredentialForWorkspace(t *testing.T) {
+	key, _ := ParseTaskKey("cloud/ws/node/worker")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/repositories/credential" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token-value" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Workspace-ID"); got != "ws" {
+			t.Fatalf("X-Workspace-ID = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"provider": "gitea", "base_url": "https://gitea.example", "token": "repo-token",
+		})
+	}))
+	defer srv.Close()
+	client := NewCloudClient(srv.URL, func() (*provider.Credentials, error) {
+		return &provider.Credentials{AccessToken: "token-value"}, nil
+	})
+
+	credential, err := client.RepositoryCredential(context.Background(), key)
+	if err != nil {
+		t.Fatalf("RepositoryCredential: %v", err)
+	}
+	if credential.Provider != "gitea" || credential.BaseURL != "https://gitea.example" || credential.Token != "repo-token" {
+		t.Fatalf("credential = %#v", credential)
+	}
+}
+
 func TestCloudClientListsTasksWithBearerAuthAndRetriesReadFailure(t *testing.T) {
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -37,6 +37,7 @@ type MaterialOrigin struct {
 
 type RepositoryManifest struct {
 	Identity       string            `json:"identity"`
+	CloneURL       string            `json:"clone_url,omitempty"`
 	RelativePath   string            `json:"relative_path"`
 	Role           MaterialRole      `json:"role"`
 	BaseSHA        string            `json:"base_sha"`
@@ -108,6 +109,7 @@ func BuildManifest(root string, sources []MaterialSource) (Manifest, error) {
 	digestRepositories := append([]RepositoryManifest(nil), manifest.Repositories...)
 	for i := range digestRepositories {
 		digestRepositories[i].Origin = nil
+		digestRepositories[i].CloneURL = ""
 	}
 	digestInput := struct {
 		Files        []FileManifest       `json:"files"`
@@ -201,7 +203,7 @@ func buildRepositoryManifest(repoDir, rel string, source MaterialSource) (Reposi
 	if beforeSHA == "" {
 		beforeSHA = repo.BaseSHA
 	}
-	return RepositoryManifest{Identity: repo.Identity, RelativePath: rel, Role: source.Role, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs, Origin: materialOrigin(source, rel)}, nil
+	return RepositoryManifest{Identity: repo.Identity, CloneURL: repo.CloneURL, RelativePath: rel, Role: source.Role, BaseSHA: head, BaseRef: repo.BaseRef, BeforeSHA: beforeSHA, BaselineHead: head, TargetRef: repo.TargetRef, ProtectedBlobs: protected, OutputPaths: outputs, Origin: materialOrigin(source, rel)}, nil
 }
 
 func materialOrigin(source MaterialSource, relativePath string) *MaterialOrigin {

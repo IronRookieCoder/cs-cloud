@@ -155,6 +155,12 @@ type CloudClient struct {
 	http    *http.Client
 }
 
+type RepositoryCredential struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url"`
+	Token    string `json:"token"`
+}
+
 func NewCloudClient(baseURL string, token func() (*provider.Credentials, error)) *CloudClient {
 	return &CloudClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -211,6 +217,17 @@ func (c *CloudClient) GetContext(ctx context.Context, key TaskKey) (RemoteTaskCo
 			}
 		}
 		sort.Strings(out.Providers)
+	}
+	return out, nil
+}
+
+func (c *CloudClient) RepositoryCredential(ctx context.Context, key TaskKey) (RepositoryCredential, error) {
+	var out RepositoryCredential
+	if err := c.doJSON(ctx, &key, http.MethodGet, "/api/repositories/credential", nil, &out); err != nil {
+		return RepositoryCredential{}, err
+	}
+	if !strings.EqualFold(out.Provider, "gitea") || strings.TrimSpace(out.BaseURL) == "" || strings.TrimSpace(out.Token) == "" {
+		return RepositoryCredential{}, newTaskError("repository_access_unavailable", "cloud returned an invalid repository credential", nil)
 	}
 	return out, nil
 }
