@@ -442,6 +442,9 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 				return *operation, newTaskError("operation_result_unknown", "operation failure report result is unknown", reportErr)
 			}
 			if updated.ID != "" {
+				if updated.PreviewID == "" {
+					updated.PreviewID = operation.PreviewID
+				}
 				updated.LocalSteps = operation.LocalSteps
 				operation = &updated
 				record.Operation = operation
@@ -458,6 +461,9 @@ func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Oper
 			return *operation, newTaskError("operation_result_unknown", "operation report result is unknown", err)
 		}
 		if updated.ID != "" {
+			if updated.PreviewID == "" {
+				updated.PreviewID = operation.PreviewID
+			}
 			operation = &updated
 			if operation.LocalSteps == nil {
 				operation.LocalSteps = record.Operation.LocalSteps

@@ -333,6 +333,110 @@ func TestConfirmOperationReturnsAlreadyCompletedWithoutCloudRequest(t *testing.T
 	}
 }
 
+func TestConfirmOperationPreservesPreviewIDAfterRepositoryPublishReport(t *testing.T) {
+	var confirmCalls atomic.Int32
+	var reportCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/member/task-operations/preview-1/confirm":
+			if confirmCalls.Add(1) > 1 {
+				http.Error(w, "duplicate confirm", http.StatusConflict)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(Operation{
+				ID:     "operation-1",
+				Kind:   "submit",
+				Status: OperationAccepted,
+				PublishSteps: []RepoPublishPlan{{
+					RepositoryIdentity: "repo",
+					ExpectedRef:        "refs/heads/tasks/result",
+					BeforeSHA:          "before",
+					HeadSHA:            "head",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/member/task-operations/operation-1/report":
+			reportCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(Operation{ID: "operation-1", Kind: "submit", Status: OperationCompleted})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	store, key, _ := seedOperationTask(t)
+	record, _, err := store.LoadTask(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoDir := filepath.Join(record.Directory, "repo")
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repoDir, "init")
+	runGitTest(t, repoDir, "config", "user.email", "test@example.com")
+	runGitTest(t, repoDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repoDir, "result.txt"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repoDir, "add", "result.txt")
+	runGitTest(t, repoDir, "commit", "-m", "base")
+	base := runGitTest(t, repoDir, "rev-parse", "HEAD")
+	record.Manifest.Repositories = []RepositoryManifest{{
+		Identity:     "repo",
+		RelativePath: "repo",
+		Role:         MaterialOutputWritable,
+		BaseSHA:      base,
+		BaseRef:      "refs/heads/main",
+		BeforeSHA:    "before",
+		BaselineHead: base,
+		TargetRef:    "refs/heads/tasks/result",
+		OutputPaths:  []string{"result.txt"},
+	}}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Preview = &Preview{
+		ID:             "preview-1",
+		MaterialDigest: effectiveMaterialDigest(record),
+		ContentDigest:  verification.ContentDigest,
+	}
+	if err := store.SaveTask(record); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(store, NewCloudClient(srv.URL, testCredentials))
+	var gitCalls atomic.Int32
+	svc.publisher = newGitPublisherWithRunner(func(context.Context, string, ...string) (string, error) {
+		switch gitCalls.Add(1) {
+		case 1:
+			return "before\trefs/heads/tasks/result", nil
+		case 2:
+			return "", nil
+		default:
+			return "head\trefs/heads/tasks/result", nil
+		}
+	})
+
+	first, err := svc.ConfirmOperation(context.Background(), key, "preview-1")
+	if err != nil {
+		t.Fatalf("first ConfirmOperation: %v", err)
+	}
+	if first.Status != OperationCompleted {
+		t.Fatalf("first operation = %+v", first)
+	}
+	second, err := svc.ConfirmOperation(context.Background(), key, "preview-1")
+	if err != nil {
+		t.Fatalf("repeat ConfirmOperation: %v", err)
+	}
+	if second.Outcome != OutcomeAlreadyCompleted {
+		t.Fatalf("repeat outcome = %q, want %q", second.Outcome, OutcomeAlreadyCompleted)
+	}
+	if confirmCalls.Load() != 1 || reportCalls.Load() != 1 {
+		t.Fatalf("confirm calls = %d, report calls = %d, want 1/1", confirmCalls.Load(), reportCalls.Load())
+	}
+}
+
 func TestConfirmOperationRecoversCompletedResponseAfterTransientFailure(t *testing.T) {
 	var confirmCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
