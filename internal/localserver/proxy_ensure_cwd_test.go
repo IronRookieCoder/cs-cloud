@@ -175,6 +175,10 @@ func TestEnsureCwdRejectsSymlinkEscapeFromAnchor(t *testing.T) {
 // symlink target of the longest existing ancestor plus the non-existent tail.
 func TestResolveForCreateResolvesExistingAncestor(t *testing.T) {
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
 	realTarget := filepath.Join(root, "real")
 	if err := os.MkdirAll(realTarget, 0o755); err != nil {
 		t.Fatalf("mkdir real: %v", err)

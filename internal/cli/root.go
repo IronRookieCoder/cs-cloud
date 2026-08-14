@@ -226,6 +226,10 @@ func dispatch(a *app.App) error {
 		return gc(a)
 	case "workflow":
 		return workflowCmd(a, cmds[1:])
+	case "task":
+		return memberTaskCmd(a, cmds[1:])
+	case "autostart":
+		return autostartCmd(a, cmds[1:])
 	case "_daemon":
 		return runDaemon(a)
 	case "help", "-h", "--help":
@@ -269,6 +273,8 @@ func printUsage() {
 		{"serve", "Run server in foreground (no daemon)"},
 		{"gc", "Remove expired attachments and report freed bytes"},
 		{"workflow", "Manage workflow resources"},
+		{"task", "Process assigned member tasks locally"},
+		{"autostart", "Enable/disable boot autostart (enable|disable|status)"},
 	}
 	fmt.Print(renderKV(cmds))
 }

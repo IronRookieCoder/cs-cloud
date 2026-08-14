@@ -2,6 +2,7 @@ package workflowrunner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,6 +140,7 @@ func TestTaskRunnerCscAddsOutputFormatText(t *testing.T) {
 type fakeSessionRunner struct {
 	env      []string
 	permMode string
+	prompt   string
 	err      error
 	// onRun, when set, is invoked at the start of RunSession. Tests use it to
 	// simulate the agent calling the explicit "complete task" tool so the
@@ -146,10 +148,11 @@ type fakeSessionRunner struct {
 	onRun func()
 }
 
-func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, _ string, env []string, permMode string) ([]byte, error) {
+func (r *fakeSessionRunner) RunSession(_ context.Context, _ string, _ string, prompt string, env []string, permMode string) ([]byte, error) {
 	if r.onRun != nil {
 		r.onRun()
 	}
+	r.prompt = prompt
 	r.env = env
 	r.permMode = permMode
 	return []byte("session runner used"), r.err
@@ -188,6 +191,60 @@ func TestTaskRunnerCscSessionUsesBoundSessionWithTaskEnv(t *testing.T) {
 	}
 	if env["CS_CLOUD_NODE_RUN_ID"] != "nr-env" {
 		t.Fatalf("CS_CLOUD_NODE_RUN_ID = %q, want nr-env", env["CS_CLOUD_NODE_RUN_ID"])
+	}
+}
+
+// TestRunCSCSession_PassesPromptUnchanged verifies RunCSCSession forwards
+// payload.Prompt to the session runner verbatim. cs-cloud no longer injects
+// task-id / signaling guidance — all prompt content (role, commands, --task,
+// retry hints) is owned by multica and arrives already baked into the prompt.
+func TestRunCSCSession_PassesPromptUnchanged(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	runner := &fakeSessionRunner{}
+	tr.SetSessionRunner(runner)
+
+	workdir := t.TempDir()
+	const body = "do thing"
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID: "task-prompt", WorkspaceID: "ws-1", Agent: "csc", Prompt: body,
+	}, workdir, "session-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+	if runner.prompt != body {
+		t.Fatalf("session prompt must be payload.Prompt unchanged; got:\n%s", runner.prompt)
+	}
+}
+
+// TestRunCSCSession_WritesAndRemovesTaskPointer verifies RunCSCSession writes a
+// task pointer (<runs>/<taskID> → worktree) the in-task CLI can read in O(1),
+// then removes it when the session returns. The pointer is observed from the
+// session runner's onRun callback (fired while the session — and the pointer —
+// are live), because the defer removes it before RunCSCSession returns.
+func TestRunCSCSession_WritesAndRemovesTaskPointer(t *testing.T) {
+	installFakeAgent(t, "csc")
+
+	wm := NewWorkspaceManager(t.TempDir())
+	tr := NewTaskRunner(wm, time.Minute, []string{"csc"})
+	var seenDuring string
+	runner := &fakeSessionRunner{onRun: func() {
+		seenDuring = ReadTaskPointer(wm.Root(), "task-ptr")
+	}}
+	tr.SetSessionRunner(runner)
+
+	workdir := t.TempDir()
+	if _, err := tr.RunCSCSession(context.Background(), workflow.TaskRunPayload{
+		TaskID: "task-ptr", WorkspaceID: "ws-1", Agent: "csc", Prompt: "do",
+	}, workdir, "sess-1"); err != nil {
+		t.Fatalf("RunCSCSession: %v", err)
+	}
+	if seenDuring != workdir {
+		t.Fatalf("pointer during session = %q, want %q", seenDuring, workdir)
+	}
+	if got := ReadTaskPointer(wm.Root(), "task-ptr"); got != "" {
+		t.Fatalf("pointer after session = %q, want empty (removed by defer)", got)
 	}
 }
 
@@ -401,6 +458,86 @@ func TestBuildEnvInjectsLocalServerURL(t *testing.T) {
 	}
 	if got != "http://127.0.0.1:9999" {
 		t.Fatalf("CS_CLOUD_LOCAL_URL = %q, want http://127.0.0.1:9999", got)
+	}
+}
+
+// TestBuildEnv_InjectsDeliverableReports verifies payload.Deliverables[].Report
+// is serialized into CS_CLOUD_DELIVERABLE_REPORTS so the in-task CLI can honor
+// a non-default submit endpoint/body field per deliverable (R4). Deliverables
+// without a Report are omitted; the CLI falls back to its hardcoded defaults.
+//
+// The contract is decoded (not string-matched) so a missing or renamed field is
+// caught. ReportSpec.Method is set on the fixture but NOT asserted: the runner
+// serializes only id/endpoint/body_field today (Method is not yet plumbed end to
+// end — reportToServer always POSTs), so the test pins the wired fields only.
+func TestBuildEnv_InjectsDeliverableReports(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Deliverables: []workflow.DeliverableSpec{
+			{ID: "d1", Report: workflow.ReportSpec{Endpoint: "/api/v2/d1/submit", Method: "POST", BodyField: "merge_request_url"}},
+			{ID: "d2"}, // no Report → omitted
+		},
+	}, t.TempDir())
+	var raw string
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			raw = v
+		}
+	}
+	if raw == "" {
+		t.Fatal("CS_CLOUD_DELIVERABLE_REPORTS not injected despite a deliverable with a Report")
+	}
+	var targets []struct {
+		ID        string `json:"deliverable_id"`
+		Endpoint  string `json:"endpoint"`
+		BodyField string `json:"body_field"`
+	}
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		t.Fatalf("decode CS_CLOUD_DELIVERABLE_REPORTS: %v: %s", err, raw)
+	}
+	if len(targets) != 1 || targets[0].ID != "d1" {
+		t.Fatalf("targets = %+v, want exactly one entry for d1", targets)
+	}
+	if targets[0].Endpoint != "/api/v2/d1/submit" {
+		t.Errorf("endpoint = %q, want /api/v2/d1/submit", targets[0].Endpoint)
+	}
+	if targets[0].BodyField != "merge_request_url" {
+		t.Errorf("body_field = %q, want merge_request_url", targets[0].BodyField)
+	}
+}
+
+// TestBuildEnv_OmitsDeliverableReportsWhenNoneHasReport verifies the env var
+// stays absent when no deliverable carries a Report, so the CLI falls back.
+func TestBuildEnv_OmitsDeliverableReportsWhenNoneHasReport(t *testing.T) {
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Deliverables: []workflow.DeliverableSpec{{ID: "d1"}}, // no Report
+	}, t.TempDir())
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			t.Fatalf("CS_CLOUD_DELIVERABLE_REPORTS should be absent when no deliverable has a Report: %s", e)
+		}
+	}
+}
+
+// TestBuildEnv_ClearsStaleDeliverableReports verifies a stale
+// CS_CLOUD_DELIVERABLE_REPORTS inherited from the parent process env or
+// payload.Env is dropped when the current task has no Report contract, so the
+// in-task CLI cannot accidentally report to a prior task's endpoint.
+func TestBuildEnv_ClearsStaleDeliverableReports(t *testing.T) {
+	t.Setenv("CS_CLOUD_DELIVERABLE_REPORTS", "stale-from-parent")
+	tr := NewTaskRunner(NewWorkspaceManager(t.TempDir()), time.Minute, []string{"csc"})
+	env := tr.buildEnv(workflow.TaskRunPayload{
+		TaskID: "t", WorkspaceID: "ws", Agent: "csc", Prompt: "x",
+		Env:          map[string]string{"CS_CLOUD_DELIVERABLE_REPORTS": "stale-from-payload"},
+		Deliverables: []workflow.DeliverableSpec{{ID: "d1"}}, // no Report
+	}, t.TempDir())
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && k == "CS_CLOUD_DELIVERABLE_REPORTS" {
+			t.Fatalf("stale CS_CLOUD_DELIVERABLE_REPORTS should be cleared when the task has no Report: %s", v)
+		}
 	}
 }
 

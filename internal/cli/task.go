@@ -23,8 +23,12 @@ import (
 const taskCompleteAttempts = 3
 
 // taskCompleteRetryWait paces retries. Short: completion is latency-sensitive
-// (the driver's completion grace window is seconds), so we must not back off
-// for long before the signal lands.
+// because the signal must reach the localserver and enter the driver's
+// completion registry before execute returns and unregisterCompletion removes
+// the task's entry - after that the POST gets a 409 and the explicit
+// completion payload is lost. (The fail/complete race is arbitrated
+// server-side via ApplyTaskFact's FailureGraceWindow; this retry only guards
+// device-side signal delivery.)
 const taskCompleteRetryWait = 500 * time.Millisecond
 
 // errTaskAlreadyFinished represents a 409 from localserver: the task is no
@@ -38,9 +42,10 @@ var errTaskAlreadyFinished = errors.New("task already finished")
 // It calls back into this device's localserver, which signals the driver.
 //
 // The agent passes NO context flags: task id + local server URL come from the
-// environment, which `cs-cloud workflow` populated from .cs-cloud.env at task
-// start (see loadTaskEnvFile). Each command takes at most one optional flag
-// (summary / reason) to keep the surface small and hard to misuse.
+// environment, which `cs-cloud workflow` fills from .cs-cloud.env when env
+// propagation through the agent subprocess failed. Each command takes at most
+// one optional flag (summary / reason) to keep the surface small and hard to
+// misuse.
 func taskCmd(a *app.App, args []string) error {
 	_ = a // task-context command; uses task env, not daemon config/credentials
 	if len(args) == 0 {
@@ -58,8 +63,8 @@ func taskCmd(a *app.App, args []string) error {
 		printTaskUsage()
 		return nil
 	default:
-		printTaskUsage()
-		return fmt.Errorf("unknown workflow task command: %s", args[0])
+		fmt.Println("Unknown workflow task command: " + args[0] + ". Valid actions: complete, approve, reject.")
+		return nil
 	}
 }
 
@@ -69,11 +74,25 @@ func printTaskUsage() {
 	fmt.Println(dimStyle.Render("  cs-cloud workflow task <action> [flags]"))
 	printSection("Actions")
 	cmds := [][2]string{
-		{"complete", "Worker finished. [--summary <text>]"},
+		{"complete", "Worker finished. [--summary <text>] [--pr-url <url>]"},
 		{"approve", "Critic approves. [--reason <text>]"},
 		{"reject", "Critic requests rework. [--reason <text>]"},
 	}
 	fmt.Print(renderKV(cmds))
+}
+
+// completionMessage renders the result of a completion/review POST as
+// agent-facing text. The task CLI never surfaces a non-zero exit to the agent:
+// on success it confirms delivery, on failure it returns this guidance instead,
+// so the agent reads the text and recovers (cd to the task root and retry)
+// rather than being derailed by an error exit code. The task id is supplied to
+// the agent separately in the task prompt (injectTaskEnvGuidance).
+func completionMessage(subject string, err error) string {
+	if err == nil {
+		return subject + " delivered. You may stop."
+	}
+	return strings.ToUpper(subject) + " NOT DELIVERED: " + err.Error() + "\n" +
+		"This is not a final failure. You are likely not in the task root, or the task server was briefly unavailable. cd to your task root and retry the command. If it still fails after a few attempts, report this message verbatim."
 }
 
 // runTaskComplete signals that the worker agent has finished its work. It must
@@ -81,25 +100,32 @@ func printTaskUsage() {
 // open (idle is not completion).
 func runTaskComplete(args []string) error {
 	summary, _ := parseStringFlag(args, "--summary")
-	return postTaskCompletion(map[string]string{
+	prURL, _ := parseStringFlag(args, "--pr-url")
+	err := postTaskCompletion(map[string]string{
 		"action":  "complete",
 		"summary": summary,
+		"pr_url":  prURL,
 	})
+	fmt.Println(completionMessage("Task completion", err))
+	return nil
 }
 
 // runTaskReview signals a critic's decision (approve or reject).
 func runTaskReview(args []string, decision string) error {
 	reason, _ := parseStringFlag(args, "--reason")
-	return postTaskCompletion(map[string]string{
+	err := postTaskCompletion(map[string]string{
 		"action":   "review",
 		"decision": decision,
 		"reason":   reason,
 	})
+	fmt.Println(completionMessage("Review decision", err))
+	return nil
 }
 
 // postTaskCompletion POSTs the completion payload to this device's localserver
 // endpoint, which forwards it to the driver via SignalTaskCompletion. Task id +
-// local URL come from the env (populated from .cs-cloud.env by loadTaskEnvFile).
+// local URL come from the env (filled from .cs-cloud.env by loadTaskEnvFile when
+// env propagation through the agent subprocess failed).
 //
 // The call is the agent's only chance to signal completion, so transient
 // failures are retried (taskCompleteAttempts). A 409 means the task already

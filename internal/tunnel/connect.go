@@ -16,6 +16,7 @@ import (
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/logger"
+	"cs-cloud/internal/platform"
 	"cs-cloud/internal/version"
 
 	"github.com/hashicorp/yamux"
@@ -33,6 +34,19 @@ const (
 func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionChange func(connected bool)) error {
 	attempt := 0
 	rateLimitAttempt := 0
+	sessionAttempt := 0
+
+	// 包装 onSessionChange：session 真正建立成功时清零 sessionAttempt，
+	// 让短暂网络抖动后的重连仍然走快速重试，只有持续失败才指数退避。
+	sessionChange := func(connected bool) {
+		if connected {
+			sessionAttempt = 0
+		}
+		if onSessionChange != nil {
+			onSessionChange(connected)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -95,7 +109,7 @@ func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionCh
 		}
 		rateLimitAttempt = 0
 
-		err = runSession(ctx, gatewayURL, dev.DeviceID, dev.DeviceToken, localPort, onSessionChange)
+		err = runSession(ctx, gatewayURL, dev.DeviceID, dev.DeviceToken, localPort, sessionChange)
 		if err != nil {
 			logger.Warn("[tunnel] session error: %v", err)
 		}
@@ -103,10 +117,17 @@ func Connect(ctx context.Context, localPort int, cfg *config.Config, onSessionCh
 		logger.Info("[tunnel] session ended, reconnecting...")
 		attempt = 0
 
+		// session 失败用指数退避（1s → 2s → 4s → ... → 60s 带 jitter），
+		// 避免在永久性错误（如 TLS 证书校验失败）下每秒狂刷重连日志、
+		// 把网关打爆。一旦真正建连成功，sessionAttempt 会被清零。
+		reconnectDelay := backoff(sessionAttempt)
+		sessionAttempt++
+		logger.Info("[tunnel] reconnecting in %v (session attempt=%d)", reconnectDelay, sessionAttempt)
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(initialDelay):
+		case <-time.After(reconnectDelay):
 		}
 	}
 }
@@ -120,7 +141,9 @@ func runSession(ctx context.Context, gatewayURL, deviceID, deviceToken string, l
 	connectCtx, cancel := context.WithTimeout(ctx, wsConnectTimeout)
 	defer cancel()
 
-	conn, resp, err := websocket.Dial(connectCtx, wsURL, nil)
+	conn, resp, err := websocket.Dial(connectCtx, wsURL, &websocket.DialOptions{
+		HTTPClient: platform.HTTPClient(),
+	})
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cs-cloud/internal/app"
+	"cs-cloud/internal/autostart"
 	"cs-cloud/internal/device"
 	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
@@ -19,6 +20,10 @@ import (
 )
 
 const readyTimeout = 30 * time.Second
+
+// tunnelReadyTimeout 是 start/restart 时等待隧道建立的时间上限。
+// 超时只会触发告警，不会让 start 失败——daemon 会继续在后台重试。
+const tunnelReadyTimeout = 5 * time.Second
 
 func start(a *app.App) error {
 	// 如果是更新后的重启，跳过更新检查
@@ -210,6 +215,29 @@ waitDone:
 	printKV("swagger docs", url+"/api/v1/docs")
 	printKV("logs", filepath.Join(a.RootDir(), "app.log"))
 
+	// cloud 模式下，启动后短暂等待隧道建立：成功就给出确认提示，5s 内
+	// 未连上则告警。daemon 无论如何都会在后台继续重试，此处不会让
+	// start 命令失败。
+	if mode == "cloud" {
+		tunnelReady := false
+		tunnelDeadline := time.Now().Add(tunnelReadyTimeout)
+		for time.Now().Before(tunnelDeadline) {
+			if t := probeTunnelStatus(url); t.Connected {
+				tunnelReady = true
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if tunnelReady {
+			printSuccess("Tunnel connected")
+		} else {
+			printWarn("Tunnel not connected within %v (daemon will keep retrying)", tunnelReadyTimeout)
+			printKV("hint", "Check tunnel logs in app.log")
+		}
+	}
+
+	suggestAutostart(a)
+
 	if mode == "cloud" {
 		webURL := strings.TrimSuffix(a.CloudBaseURL(), "/cloud-api") + "/cloud"
 		fmt.Println()
@@ -353,4 +381,24 @@ func restartWithNewBinary(exe string) {
 	}
 
 	os.Exit(0)
+}
+
+// suggestAutostart prints a one-line hint when boot autostart is not yet
+// configured. Best-effort: any error short-circuits to silence so it never
+// interferes with an otherwise successful start. Stays quiet when autostart
+// is already enabled (no noise for configured users).
+func suggestAutostart(a *app.App) {
+	cfg, err := buildAutostartConfig(a)
+	if err != nil {
+		return
+	}
+	mgr, err := autostart.New(cfg)
+	if err != nil {
+		return
+	}
+	enabled, err := mgr.Enabled()
+	if err != nil || enabled {
+		return
+	}
+	printInfo("Tip: enable boot autostart with 'autostart enable'")
 }

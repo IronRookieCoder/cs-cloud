@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 
 	"cs-cloud/internal/agent"
 	"cs-cloud/internal/logger"
@@ -41,7 +42,14 @@ func (s *Server) BindWorkflowSessionBinder() {
 	if s.workflow == nil || s.manager == nil {
 		return
 	}
-	if s.manager.DefaultBackend() != "csc" {
+	if backend := s.manager.DefaultBackend(); backend != "csc" {
+		// Without the binder, workflow tasks cannot bind a csc session, so the
+		// task-complete tool path is unavailable: tasks run to completion but
+		// their completion signal finds no registry entry ("task not running")
+		// and they eventually fail with agent_timeout. This may be intentional
+		// (a non-csc default agent), so we don't refuse startup — but log
+		// loudly so the degraded state is diagnosable instead of silent.
+		logger.Warn("workflow session binder not wired: default backend %q is not \"csc\"; csc workflow tasks will not be able to signal completion and may time out", backend)
 		return
 	}
 	s.workflow.SetConversationBinder(&agentManagerSessionBinder{manager: s.manager})
@@ -150,6 +158,7 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Action   string `json:"action"`
 		Summary  string `json:"summary"`
+		PRURL    string `json:"pr_url"`
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
 	}
@@ -172,10 +181,60 @@ func (s *Server) handleWorkflowTaskComplete(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "unsupported action: "+req.Action)
 		return
 	}
-	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, Decision: req.Decision, Reason: req.Reason}
+	sig := agent.CompletionSignal{Action: req.Action, Summary: req.Summary, PRURL: req.PRURL, Decision: req.Decision, Reason: req.Reason}
 	if err := s.workflow.SignalTaskCompletion(taskID, sig); err != nil {
 		writeErr(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
 	writeOK(w, map[string]string{"status": "accepted"})
+}
+
+// handleWorkflowTaskFacts returns the durable facts recorded for a task,
+// whether pending or delivered, plus whether the task is still in the driver's
+// running table. This lets the multica server reconcile task state from the
+// device instead of inferring it from session liveness.
+func (s *Server) handleWorkflowTaskFacts(w http.ResponseWriter, r *http.Request) {
+	if s.workflow == nil {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "workflow driver not registered")
+		return
+	}
+
+	taskID := r.URL.Query().Get("task_id")
+	if taskID == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "missing task_id")
+		return
+	}
+
+	outbox := s.workflow.Outbox()
+	if outbox == nil {
+		writeErr(w, http.StatusServiceUnavailable, "UNAVAILABLE", "workflow driver not initialized")
+		return
+	}
+
+	facts, err := outbox.All()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL_ERROR", "read outbox: "+err.Error())
+		return
+	}
+
+	filtered := make([]workflowrunner.OutboxFact, 0, len(facts))
+	for _, f := range facts {
+		if f.TaskID == taskID {
+			filtered = append(filtered, f)
+		}
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		if !filtered[i].OccurredAt.Equal(filtered[j].OccurredAt) {
+			return filtered[i].OccurredAt.Before(filtered[j].OccurredAt)
+		}
+		return filtered[i].FactID < filtered[j].FactID
+	})
+
+	running := s.workflow.IsTaskRunning(taskID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"facts":        filtered,
+		"task_running": running,
+	})
 }

@@ -1,0 +1,704 @@
+package membertask
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"cs-cloud/internal/logger"
+)
+
+type RepoPublishPlan struct {
+	RepositoryIdentity string         `json:"repository_identity"`
+	ExpectedRef        string         `json:"expected_ref"`
+	BaseRef            string         `json:"base_ref,omitempty"`
+	BeforeSHA          string         `json:"before_sha"`
+	HeadSHA            string         `json:"head_sha"`
+	RemoteName         string         `json:"remote_name,omitempty"`
+	OperationMarker    string         `json:"operation_marker,omitempty"`
+	Status             RepoStepStatus `json:"status,omitempty"`
+}
+
+type Preview struct {
+	ID               string          `json:"id"`
+	Kind             string          `json:"kind"`
+	Status           string          `json:"status"`
+	TaskVersion      int64           `json:"task_version"`
+	ContextVersion   int64           `json:"context_version"`
+	Attempt          int             `json:"attempt"`
+	MaterialDigest   string          `json:"material_digest"`
+	ContentDigest    string          `json:"content_digest"`
+	RiskDigest       string          `json:"risk_digest,omitempty"`
+	PreviewDigest    string          `json:"preview_digest,omitempty"`
+	ReviewSnapshotID string          `json:"review_snapshot_id,omitempty"`
+	ExpiresAt        time.Time       `json:"expires_at"`
+	PublishPlan      json.RawMessage `json:"publish_plan,omitempty"`
+}
+
+type OperationStatus string
+
+const (
+	OperationPreviewed         OperationStatus = "previewed"
+	OperationAccepted          OperationStatus = "accepted"
+	OperationRunning           OperationStatus = "running"
+	OperationCompleted         OperationStatus = "completed"
+	OperationRepreviewRequired OperationStatus = "repreview_required"
+	OperationConflict          OperationStatus = "conflict"
+	OperationUnknown           OperationStatus = "unknown"
+	OperationFailed            OperationStatus = "failed"
+)
+
+type Operation struct {
+	ID           string                    `json:"id"`
+	PreviewID    string                    `json:"preview_id"`
+	Kind         string                    `json:"kind"`
+	Status       OperationStatus           `json:"status"`
+	PublishPlan  json.RawMessage           `json:"publish_plan,omitempty"`
+	PublishSteps []RepoPublishPlan         `json:"steps,omitempty"`
+	LocalSteps   map[string]RepoStepResult `json:"local_steps,omitempty"`
+	Outcome      Outcome                   `json:"outcome,omitempty"`
+}
+
+type SubmitRepository struct {
+	RepositoryIdentity string   `json:"repository_identity"`
+	ExpectedRef        string   `json:"ref"`
+	BaseRef            string   `json:"base_ref"`
+	BaseSHA            string   `json:"base_sha"`
+	BeforeSHA          string   `json:"before_sha"`
+	HeadSHA            string   `json:"head_sha"`
+	ChangedPaths       []string `json:"changed_paths"`
+	OperationMarker    string   `json:"operation_marker"`
+}
+
+type SubmitFile struct {
+	Identity      string `json:"deliverable_id"`
+	SourceVersion string `json:"version"`
+	Name          string `json:"name,omitempty"`
+	RelativePath  string `json:"relative_path"`
+	SHA256        string `json:"sha256"`
+	Content       string `json:"content"`
+}
+
+const maxSubmissionFileSize int64 = 10 << 20
+
+type SubmitPreviewRequest struct {
+	Attempt        int                `json:"attempt"`
+	TaskVersion    int64              `json:"task_version"`
+	ContextVersion int64              `json:"context_version"`
+	MaterialDigest string             `json:"material_digest"`
+	ContentDigest  string             `json:"content_digest"`
+	Repositories   []SubmitRepository `json:"repositories"`
+	Files          []SubmitFile       `json:"files"`
+}
+
+type ReviewPreviewRequest struct {
+	Attempt        int    `json:"attempt"`
+	TaskVersion    int64  `json:"task_version"`
+	ContextVersion int64  `json:"context_version"`
+	MaterialDigest string `json:"material_digest"`
+	ContentDigest  string `json:"content_digest"`
+	Decision       string `json:"decision"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+type StepReport struct {
+	RepositoryIdentity string         `json:"repository_identity"`
+	Status             RepoStepStatus `json:"status"`
+	ObservedSHA        string         `json:"observed_sha,omitempty"`
+	ErrorCode          string         `json:"error_code,omitempty"`
+}
+
+func (s *Service) PreviewSubmit(ctx context.Context, key TaskKey, bindingSets ...[]DeliverableFileBinding) (Preview, error) {
+	if key.Role != RoleWorker {
+		return Preview{}, newTaskError("invalid_task_role", "only workers can preview a submission", nil)
+	}
+	unlock := s.lockTask(key)
+	defer unlock()
+	record, verification, err := s.loadVerifiedTask(key)
+	if err != nil {
+		return Preview{}, err
+	}
+	if len(bindingSets) > 1 {
+		return Preview{}, newTaskError("deliverable_binding_invalid", "deliverable file bindings were provided more than once", nil)
+	}
+	if len(bindingSets) == 1 {
+		if err := s.validateDeliverableBindings(ctx, key, record, bindingSets[0]); err != nil {
+			return Preview{}, err
+		}
+	}
+	attempt, taskVersion, contextVersion, err := parseRemoteVersion(record.RemoteVersion)
+	if err != nil {
+		return Preview{}, err
+	}
+	var bindings []DeliverableFileBinding
+	if len(bindingSets) == 1 {
+		bindings = bindingSets[0]
+	}
+	var repositories []SubmitRepository
+	var files []SubmitFile
+	if len(bindingSets) == 0 {
+		repositories, files, err = buildSubmitManifest(record, verification)
+	} else {
+		repositories, files, err = buildSubmitManifest(record, verification, bindings)
+	}
+	if err != nil {
+		return Preview{}, err
+	}
+	if len(repositories) == 0 && len(files) == 0 {
+		candidates := untrackedTaskFiles(record)
+		if len(candidates) > 0 {
+			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; untracked candidate files=%s; submit explicitly with `cs-cloud task submit %s --deliverable <id> --file <path>`", key.String(), strings.Join(candidates, ","), key.String())
+		} else {
+			logger.Warn("membertask: submit preview has no publishable outputs: task=%s; cloud submission will contain no deliverables", key.String())
+		}
+	}
+	request := SubmitPreviewRequest{Attempt: attempt, TaskVersion: taskVersion, ContextVersion: contextVersion, MaterialDigest: effectiveMaterialDigest(record), ContentDigest: verification.ContentDigest, Repositories: repositories, Files: files}
+	preview, err := s.cloud.PreviewSubmit(ctx, key, request)
+	if err != nil {
+		s.handleAuthorityError(record, err)
+		return Preview{}, err
+	}
+	if preview.ContentDigest == "" {
+		preview.ContentDigest = request.ContentDigest
+	}
+	if preview.RiskDigest == "" {
+		preview.RiskDigest = preview.PreviewDigest
+	}
+	if err := validatePreview(preview, request.Attempt, request.TaskVersion, request.ContextVersion, request.MaterialDigest, request.ContentDigest); err != nil {
+		return Preview{}, err
+	}
+	record.Preview = &preview
+	if err := s.store.SaveTask(record); err != nil {
+		return Preview{}, err
+	}
+	return preview, nil
+}
+
+func (s *Service) validateDeliverableBindings(ctx context.Context, key TaskKey, record TaskRecord, bindings []DeliverableFileBinding) error {
+	if len(bindings) == 0 {
+		return nil
+	}
+	remote, err := s.cloud.GetContext(ctx, key)
+	if err != nil {
+		var taskErr *TaskError
+		if errors.As(err, &taskErr) {
+			return err
+		}
+		return newTaskError("deliverable_binding_invalid", "cannot validate deliverable file bindings", err)
+	}
+	known := make(map[string]struct{}, len(remote.RequiredDeliverables)+len(remote.OptionalDeliverables))
+	for _, deliverable := range append(append([]RemoteDeliverable{}, remote.RequiredDeliverables...), remote.OptionalDeliverables...) {
+		known[deliverable.ID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(bindings))
+	root, err := filepath.Abs(record.Directory)
+	if err != nil {
+		return newTaskError("deliverable_binding_invalid", "prepared task directory is invalid", err)
+	}
+	for _, binding := range bindings {
+		if binding.DeliverableID == "" || binding.File == "" {
+			return newTaskError("deliverable_binding_invalid", "deliverable and file must be provided together", nil)
+		}
+		if _, ok := known[binding.DeliverableID]; !ok {
+			return newTaskError("deliverable_binding_invalid", "deliverable is not part of the current task context", nil)
+		}
+		if _, ok := seen[binding.DeliverableID]; ok {
+			return newTaskError("deliverable_binding_invalid", "deliverable is bound more than once", nil)
+		}
+		seen[binding.DeliverableID] = struct{}{}
+		cleaned, err := cleanRelativePath(binding.File)
+		if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
+			return newTaskError("deliverable_binding_invalid", "file path is not publishable", err)
+		}
+		full := filepath.Join(root, filepath.FromSlash(cleaned))
+		if err := ValidateContainedPath(root, full); err != nil {
+			return newTaskError("deliverable_binding_invalid", "file path escapes the prepared task directory", err)
+		}
+		info, err := os.Lstat(full)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return newTaskError("deliverable_binding_invalid", "file must be an existing regular file", err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) PreviewReview(ctx context.Context, key TaskKey, decision, reason string) (Preview, error) {
+	if key.Role != RoleCritic {
+		return Preview{}, newTaskError("invalid_task_role", "only critics can preview a review", nil)
+	}
+	if decision != "approve" && decision != "reject" {
+		return Preview{}, newTaskError("invalid_arguments", "review decision must be approve or reject", nil)
+	}
+	if decision == "reject" && strings.TrimSpace(reason) == "" {
+		return Preview{}, newTaskError("invalid_arguments", "reject requires a reason", nil)
+	}
+	unlock := s.lockTask(key)
+	defer unlock()
+	record, verification, err := s.loadVerifiedTask(key)
+	if err != nil {
+		return Preview{}, err
+	}
+	attempt, taskVersion, contextVersion, err := parseRemoteVersion(record.RemoteVersion)
+	if err != nil {
+		return Preview{}, err
+	}
+	request := ReviewPreviewRequest{Attempt: attempt, TaskVersion: taskVersion, ContextVersion: contextVersion, MaterialDigest: effectiveMaterialDigest(record), ContentDigest: verification.ContentDigest, Decision: decision, Reason: reason}
+	preview, err := s.cloud.PreviewReview(ctx, key, request)
+	if err != nil {
+		s.handleAuthorityError(record, err)
+		return Preview{}, err
+	}
+	if preview.ContentDigest == "" {
+		preview.ContentDigest = request.ContentDigest
+	}
+	if preview.RiskDigest == "" {
+		preview.RiskDigest = preview.PreviewDigest
+	}
+	if err := validatePreview(preview, attempt, taskVersion, contextVersion, request.MaterialDigest, request.ContentDigest); err != nil {
+		return Preview{}, err
+	}
+	record.Preview = &preview
+	if err := s.store.SaveTask(record); err != nil {
+		return Preview{}, err
+	}
+	return preview, nil
+}
+
+func (s *Service) ConfirmOperation(ctx context.Context, key TaskKey, previewID string) (Operation, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+
+	record, verification, err := s.loadVerifiedTask(key)
+	if err != nil {
+		return Operation{}, err
+	}
+	if record.Preview == nil || record.Preview.ID != previewID {
+		return Operation{}, newTaskError("preview_stale", "preview does not match the local task", nil)
+	}
+	if record.Operation != nil && record.Operation.PreviewID == previewID && record.Operation.Status == OperationCompleted {
+		operation := *record.Operation
+		operation.Outcome = OutcomeAlreadyCompleted
+		return operation, nil
+	}
+	if !record.Preview.ExpiresAt.IsZero() && !s.now().Before(record.Preview.ExpiresAt) {
+		return Operation{}, newTaskError("preview_stale", "preview has expired", nil)
+	}
+	if record.Preview.MaterialDigest != effectiveMaterialDigest(record) || record.Preview.ContentDigest != verification.ContentDigest {
+		return Operation{}, newTaskError("preview_stale", "task content changed after preview", nil)
+	}
+	operation, err := s.cloud.ConfirmOperation(ctx, key, previewID)
+	if err != nil {
+		s.handleAuthorityError(record, err)
+		return Operation{}, err
+	}
+	if operation.PreviewID == "" {
+		operation.PreviewID = previewID
+	}
+	if operation.PreviewID != previewID || operation.ID == "" {
+		return Operation{}, newTaskError("invalid_cloud_response", "confirmed operation identity is invalid", nil)
+	}
+	if operation.LocalSteps == nil {
+		operation.LocalSteps = map[string]RepoStepResult{}
+	}
+	if operation.Status == OperationCompleted && operation.Outcome == "" {
+		operation.Outcome = OutcomeCompleted
+	}
+	record.Operation = &operation
+	if err := s.store.SaveTask(record); err != nil {
+		return Operation{}, err
+	}
+	return s.executeOperation(ctx, record)
+}
+
+func effectiveMaterialDigest(record TaskRecord) string {
+	if record.CloudMaterialDigest != "" {
+		return record.CloudMaterialDigest
+	}
+	if record.Manifest != nil {
+		return record.Manifest.MaterialDigest
+	}
+	return ""
+}
+
+func (s *Service) RecoverOperation(ctx context.Context, key TaskKey) (Operation, error) {
+	unlock := s.lockTask(key)
+	defer unlock()
+	record, found, err := s.store.LoadTask(key)
+	if err != nil {
+		return Operation{}, err
+	}
+	if !found || record.Operation == nil || record.Operation.ID == "" {
+		return Operation{}, newTaskError("operation_not_found", "task has no accepted operation", nil)
+	}
+	operation, err := s.cloud.GetOperation(ctx, key, record.Operation.ID)
+	if err != nil {
+		return Operation{}, err
+	}
+	if operation.ID != record.Operation.ID {
+		return Operation{}, newTaskError("invalid_cloud_response", "operation identity changed during recovery", nil)
+	}
+	if operation.PreviewID == "" {
+		operation.PreviewID = record.Operation.PreviewID
+	} else if record.Operation.PreviewID != "" && operation.PreviewID != record.Operation.PreviewID {
+		return Operation{}, newTaskError("invalid_cloud_response", "operation preview identity changed during recovery", nil)
+	}
+	record.Operation = &operation
+	if operation.Status == OperationCompleted {
+		record.Ended = true
+		record.SyncPending = false
+		if err := s.store.SaveTask(record); err != nil {
+			return Operation{}, err
+		}
+		return operation, nil
+	}
+	if operation.Status != OperationAccepted && operation.Status != OperationRunning {
+		if err := s.store.SaveTask(record); err != nil {
+			return Operation{}, err
+		}
+		return operation, nil
+	}
+	return s.executeOperation(ctx, record)
+}
+
+func (s *Service) executeOperation(ctx context.Context, record TaskRecord) (Operation, error) {
+	operation := record.Operation
+	if operation == nil {
+		return Operation{}, newTaskError("operation_not_found", "accepted operation is missing", nil)
+	}
+	if operation.LocalSteps == nil {
+		operation.LocalSteps = map[string]RepoStepResult{}
+	}
+	if len(operation.PublishSteps) == 0 {
+		if operation.Status == OperationCompleted {
+			record.Ended = true
+			record.Operation = operation
+			if err := s.store.SaveTask(record); err != nil {
+				return *operation, err
+			}
+		}
+		return *operation, nil
+	}
+	publisher := s.publisher
+	if publisher == nil {
+		publisher = NewGitPublisher()
+	}
+	written := false
+	for _, plan := range operation.PublishSteps {
+		if step, ok := operation.LocalSteps[plan.RepositoryIdentity]; ok && step.Status == RepoStepVerified {
+			written = true
+			continue
+		}
+		repo, ok := repositoryByIdentity(record.Manifest, plan.RepositoryIdentity)
+		if !ok || repo.TargetRef != plan.ExpectedRef {
+			return *operation, newTaskError("invalid_publish_plan", "cloud publish plan does not match prepared repository", nil)
+		}
+		worktree := filepath.Join(record.Directory, filepath.FromSlash(repo.RelativePath))
+		plan.BaseRef = repo.BaseRef
+		operation.Status = OperationRunning
+		operation.LocalSteps[plan.RepositoryIdentity] = RepoStepResult{RepositoryIdentity: plan.RepositoryIdentity, Status: RepoStepRunning}
+		record.Operation = operation
+		if err := s.store.SaveTask(record); err != nil {
+			return *operation, err
+		}
+		remote := plan.RemoteName
+		if remote == "" {
+			remote = "origin"
+		}
+		var result RepoStepResult
+		var err error
+		if repo.CloneURL == "" {
+			result, err = publisher.PublishStep(ctx, worktree, plan)
+		} else {
+			credential, credentialErr := s.cloud.RepositoryCredential(ctx, record.Key)
+			if credentialErr != nil {
+				return *operation, credentialErr
+			}
+			authenticatedRemoteURL, authErr := repositoryAuthURL(repo.CloneURL, credential)
+			if authErr != nil {
+				return *operation, authErr
+			}
+			result, err = publisher.PublishStepWithRemote(ctx, worktree, plan, authenticatedRemoteURL)
+		}
+		operation.LocalSteps[plan.RepositoryIdentity] = result
+		record.Operation = operation
+		_ = s.store.SaveTask(record)
+		if err != nil {
+			var taskErr *TaskError
+			errorCode := "operation_result_unknown"
+			if errors.As(err, &taskErr) {
+				errorCode = taskErr.Code
+			}
+			updated, reportErr := s.cloud.ReportOperation(ctx, record.Key, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA, ErrorCode: errorCode})
+			if reportErr != nil {
+				return *operation, newTaskError("operation_result_unknown", "operation failure report result is unknown", reportErr)
+			}
+			if updated.ID != "" {
+				updated.LocalSteps = operation.LocalSteps
+				operation = &updated
+				record.Operation = operation
+				_ = s.store.SaveTask(record)
+			}
+			if errorCode == "remote_ref_changed" && written {
+				return *operation, newTaskError("operation_ref_conflict", "remote ref changed after another repository was published", nil)
+			}
+			return *operation, err
+		}
+		written = true
+		updated, err := s.cloud.ReportOperation(ctx, record.Key, operation.ID, StepReport{RepositoryIdentity: result.RepositoryIdentity, Status: result.Status, ObservedSHA: result.ObservedSHA})
+		if err != nil {
+			return *operation, newTaskError("operation_result_unknown", "operation report result is unknown", err)
+		}
+		if updated.ID != "" {
+			operation = &updated
+			if operation.LocalSteps == nil {
+				operation.LocalSteps = record.Operation.LocalSteps
+			}
+		}
+	}
+	record.Operation = operation
+	if operation.Status == OperationCompleted {
+		record.Ended = true
+	}
+	if err := s.store.SaveTask(record); err != nil {
+		return *operation, err
+	}
+	return *operation, nil
+}
+
+func (s *Service) loadVerifiedTask(key TaskKey) (TaskRecord, Verification, error) {
+	record, found, err := s.store.LoadTask(key)
+	if err != nil {
+		return TaskRecord{}, Verification{}, err
+	}
+	if !found || !record.Prepared || record.Manifest == nil {
+		return TaskRecord{}, Verification{}, newTaskError("task_not_prepared", "task must be prepared first", nil)
+	}
+	verification, err := VerifyManifest(record.Directory, *record.Manifest)
+	if err != nil {
+		return TaskRecord{}, Verification{}, err
+	}
+	record.Dirty = verification.Dirty
+	record.DirtyPaths = verification.ChangedPaths
+	return record, verification, nil
+}
+
+func buildSubmitManifest(record TaskRecord, verification Verification, bindingSets ...[]DeliverableFileBinding) ([]SubmitRepository, []SubmitFile, error) {
+	var repositories []SubmitRepository
+	for _, repo := range record.Manifest.Repositories {
+		repoDir := filepath.Join(record.Directory, filepath.FromSlash(repo.RelativePath))
+		status, err := gitOutputAllowEmpty(repoDir, "status", "--porcelain")
+		if err != nil {
+			return nil, nil, newTaskError("git_material_invalid", "cannot inspect repository worktree", err)
+		}
+		if strings.TrimSpace(status) != "" {
+			return nil, nil, newTaskError("uncommitted_changes_present", "repository index and worktree must be clean before preview", nil)
+		}
+		changed, head, err := verifyRepository(repoDir, repo)
+		if err != nil {
+			return nil, nil, err
+		}
+		repositories = append(repositories, SubmitRepository{RepositoryIdentity: repo.Identity, ExpectedRef: repo.TargetRef, BaseRef: repo.BaseRef, BaseSHA: repo.BaseSHA, BeforeSHA: repo.BeforeSHA, HeadSHA: head, ChangedPaths: changed, OperationMarker: digestJSON(struct{ Key, Repo, Head string }{record.Key.String(), repo.Identity, head})})
+	}
+	var files []SubmitFile
+	var bindings []DeliverableFileBinding
+	if len(bindingSets) > 1 {
+		return nil, nil, newTaskError("deliverable_binding_invalid", "deliverable file bindings were provided more than once", nil)
+	}
+	if len(bindingSets) == 1 {
+		bindings = bindingSets[0]
+	}
+	if bindingSets != nil {
+		byID := make(map[string]FileManifest, len(record.Manifest.Files))
+		for _, file := range record.Manifest.Files {
+			byID[file.Identity] = file
+		}
+		for _, binding := range bindings {
+			file, ok := byID[binding.DeliverableID]
+			if !ok {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "deliverable binding is not in the local manifest", nil)
+			}
+			if file.Role != MaterialOutputWritable {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file is not writable output", nil)
+			}
+			cleaned, err := cleanRelativePath(binding.File)
+			if err != nil || filepath.Base(cleaned) == "task.json" || filepath.Base(cleaned) == "manifest.json" {
+				return nil, nil, newTaskError("deliverable_binding_invalid", "bound file path is not publishable", err)
+			}
+			content, err := readBoundSubmissionFile(record.Directory, cleaned)
+			if err != nil {
+				return nil, nil, err
+			}
+			digest := sha256.Sum256(content)
+			files = append(files, SubmitFile{Identity: binding.DeliverableID, SourceVersion: "sha256:" + hex.EncodeToString(digest[:]), Name: filepath.Base(cleaned), RelativePath: cleaned, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Identity < files[j].Identity })
+		return repositories, files, nil
+	}
+	for _, file := range record.Manifest.Files {
+		if file.Role != MaterialOutputWritable {
+			continue
+		}
+		path := filepath.Join(record.Directory, filepath.FromSlash(file.RelativePath))
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		digest := sha256.Sum256(content)
+		files = append(files, SubmitFile{Identity: file.Identity, SourceVersion: file.SourceVersion, RelativePath: file.RelativePath, SHA256: hex.EncodeToString(digest[:]), Content: string(content)})
+	}
+	sort.Slice(repositories, func(i, j int) bool { return repositories[i].RepositoryIdentity < repositories[j].RepositoryIdentity })
+	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
+	_ = verification
+	return repositories, files, nil
+}
+
+func readBoundSubmissionFile(taskDirectory, relativePath string) ([]byte, error) {
+	root, err := os.OpenRoot(taskDirectory)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "prepared task directory cannot be opened", err)
+	}
+	defer root.Close()
+
+	name := filepath.FromSlash(relativePath)
+	validatedInfo, err := root.Lstat(name)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is missing or outside the prepared task directory", err)
+	}
+	if !validatedInfo.Mode().IsRegular() {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is not a regular file", nil)
+	}
+	if validatedInfo.Size() > maxSubmissionFileSize {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+	}
+
+	fileHandle, err := root.Open(name)
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file is missing or outside the prepared task directory", err)
+	}
+	defer fileHandle.Close()
+	openedInfo, err := fileHandle.Stat()
+	if err != nil || !os.SameFile(validatedInfo, openedInfo) {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file changed during validation", err)
+	}
+	content, err := io.ReadAll(io.LimitReader(fileHandle, maxSubmissionFileSize+1))
+	if err != nil {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file cannot be read", err)
+	}
+	if int64(len(content)) > maxSubmissionFileSize {
+		return nil, newTaskError("deliverable_binding_invalid", "bound file exceeds submission size limit", nil)
+	}
+	return content, nil
+}
+
+// untrackedTaskFiles finds likely deliverable files created outside the prepared
+// material manifest. It is diagnostic only: callers still preserve the legacy
+// empty-submit behavior and must explicitly bind a file to a deliverable.
+func untrackedTaskFiles(record TaskRecord) []string {
+	if record.Directory == "" {
+		return nil
+	}
+	managed := make(map[string]struct{})
+	if record.Manifest != nil {
+		for _, file := range record.Manifest.Files {
+			managed[filepath.Clean(file.RelativePath)] = struct{}{}
+		}
+		for _, repo := range record.Manifest.Repositories {
+			managed[filepath.Clean(repo.RelativePath)] = struct{}{}
+		}
+	}
+	var candidates []string
+	_ = filepath.Walk(record.Directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(record.Directory, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.Clean(rel)
+		if rel == "task.json" || rel == "manifest.json" || strings.HasPrefix(rel, ".") || strings.HasPrefix(rel, "input"+string(filepath.Separator)) {
+			return nil
+		}
+		if _, ok := managed[rel]; !ok {
+			candidates = append(candidates, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	sort.Strings(candidates)
+	return candidates
+}
+
+func validatePreview(preview Preview, attempt int, taskVersion, contextVersion int64, materialDigest, contentDigest string) error {
+	if preview.ID == "" || preview.Attempt != attempt || preview.TaskVersion != taskVersion || preview.ContextVersion != contextVersion || preview.MaterialDigest != materialDigest || preview.ContentDigest != contentDigest {
+		return newTaskError("invalid_cloud_response", "cloud preview does not match the current task", nil)
+	}
+	return nil
+}
+
+func parseRemoteVersion(raw string) (int, int64, int64, error) {
+	parts := strings.Split(raw, ":")
+	if len(parts) != 3 {
+		return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
+	}
+	values := make([]int64, 3)
+	for i, part := range parts {
+		if part == "" || strings.IndexFunc(part, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
+		}
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || value < 1 {
+			return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", err)
+		}
+		values[i] = value
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if values[0] > maxInt {
+		return 0, 0, 0, newTaskError("local_task_store_corrupt", "task version is invalid", nil)
+	}
+	return int(values[0]), values[1], values[2], nil
+}
+
+func repositoryByIdentity(manifest *Manifest, identity string) (RepositoryManifest, bool) {
+	if manifest == nil {
+		return RepositoryManifest{}, false
+	}
+	for _, repo := range manifest.Repositories {
+		if repo.Identity == identity {
+			return repo, true
+		}
+	}
+	return RepositoryManifest{}, false
+}
+
+func (s *Service) handleAuthorityError(record TaskRecord, err error) {
+	te, ok := err.(*TaskError)
+	if !ok {
+		return
+	}
+	switch te.Code {
+	case "attempt_won_by_other_operation":
+		record.WonByOtherOperation = true
+		record.ReadOnly = true
+	case "resource_access_denied", "task_not_assigned":
+		if record.Operation != nil {
+			record.WriteAuthorityLost = true
+		} else {
+			record.ReadOnly = true
+		}
+	default:
+		return
+	}
+	_ = s.store.SaveTask(record)
+}

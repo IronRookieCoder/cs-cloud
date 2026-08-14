@@ -1,12 +1,19 @@
 package app
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"cs-cloud/internal/cloud"
 	"cs-cloud/internal/config"
 	"cs-cloud/internal/device"
+	"cs-cloud/internal/membertask"
 	"cs-cloud/internal/platform"
 	"cs-cloud/internal/provider"
 	"cs-cloud/internal/workflowrunner"
@@ -44,6 +51,106 @@ func (a *App) OIDCBaseURL(credBaseURL string) string {
 
 func (a *App) Credentials() (*provider.Credentials, error) {
 	return provider.LoadCredentials()
+}
+
+func (a *App) memberTaskSecretPath() string {
+	return filepath.Join(a.rootDir, "member_task_secret")
+}
+
+func (a *App) NewMemberTaskRuntime() (*membertask.Service, string, error) {
+	secret, err := a.memberTaskSecret()
+	if err != nil {
+		return nil, "", err
+	}
+	store, err := membertask.OpenStore(a.rootDir)
+	if err != nil {
+		return nil, "", err
+	}
+	// Member tasks are served by the Multica workflow backend, while
+	// CloudBaseURL points at the CoStrict cloud-api gateway. Reuse the same
+	// workflow base URL as the workflow runner so task requests reach
+	// /workflow-backend/api/member/tasks.
+	baseURL := strings.TrimRight(a.cfg.Workflow.BackendBaseURL, "/")
+	if baseURL == "" {
+		baseURL = a.CloudBaseURL()
+	}
+	cloud := membertask.NewCloudClient(baseURL, a.Credentials)
+	return membertask.NewService(store, cloud), secret, nil
+}
+
+func (a *App) memberTaskSecret() (string, error) {
+	if err := a.EnsureRootDir(); err != nil {
+		return "", err
+	}
+	path := a.memberTaskSecretPath()
+	for attempt := 0; attempt < 2; attempt++ {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			secret := strings.TrimSpace(string(data))
+			decoded, decodeErr := base64.RawURLEncoding.DecodeString(secret)
+			if decodeErr != nil || len(decoded) != 32 {
+				return "", fmt.Errorf("member task secret is malformed")
+			}
+			if err := membertask.SecureProfilePermissions(a.rootDir, path); err != nil {
+				return "", err
+			}
+			if err := membertask.ValidateProfilePermissions(a.rootDir, path); err != nil {
+				return "", err
+			}
+			return secret, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("read member task secret: %w", err)
+		}
+		random := make([]byte, 32)
+		if _, err := rand.Read(random); err != nil {
+			return "", fmt.Errorf("generate member task secret: %w", err)
+		}
+		secret := base64.RawURLEncoding.EncodeToString(random)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("create member task secret: %w", err)
+		}
+		if err := persistMemberTaskSecret(file, path, secret); err != nil {
+			return "", err
+		}
+		if err := membertask.SecureProfilePermissions(a.rootDir, path); err != nil {
+			return "", err
+		}
+		if err := membertask.ValidateProfilePermissions(a.rootDir, path); err != nil {
+			return "", err
+		}
+		return secret, nil
+	}
+	return "", fmt.Errorf("member task secret creation raced repeatedly")
+}
+
+func persistMemberTaskSecret(file *os.File, path, secret string) (err error) {
+	complete := false
+	defer func() {
+		if !complete {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.WriteString(secret + "\n"); err != nil {
+		return fmt.Errorf("write member task secret: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync member task secret: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close member task secret: %w", err)
+	}
+	complete = true
+	return nil
+}
+
+func (a *App) MemberTaskSecret() (string, error) {
+	return a.memberTaskSecret()
 }
 
 func (a *App) NewWorkflowDriver() *workflowrunner.Driver {
@@ -85,4 +192,8 @@ func (a *App) workflowTokenProvider() func() (*provider.Credentials, error) {
 
 func (a *App) Device() (*device.DeviceInfo, error) {
 	return device.LoadDevice()
+}
+
+func (a *App) PrepareCloudDaemon(ctx context.Context) (*device.DeviceInfo, error) {
+	return device.PrepareDaemonDevice(ctx, a.cfg)
 }

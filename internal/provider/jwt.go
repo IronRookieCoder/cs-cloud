@@ -259,6 +259,20 @@ func IsTokenValid(accessToken string, refreshToken string, expiryDate int64) boo
 	return false
 }
 
+// IsRefreshTokenExpired reports whether the refresh token's own JWT exp is in the past.
+// Returns false when the token is unparseable or carries no exp claim, so callers fall
+// back to attempting a network refresh instead of preemptively refusing.
+func IsRefreshTokenExpired(refreshToken string) bool {
+	if refreshToken == "" {
+		return false
+	}
+	p, err := ParseJWT(refreshToken)
+	if err != nil || p.Exp == 0 {
+		return false
+	}
+	return time.Now().UnixMilli() >= p.Exp*1000
+}
+
 func splitToken(token string) []string {
 	var parts []string
 	start := 0

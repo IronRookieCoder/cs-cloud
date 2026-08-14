@@ -38,8 +38,8 @@ func deliverableCmd(a *app.App, args []string) error {
 		printDeliverableUsage()
 		return nil
 	default:
-		printDeliverableUsage()
-		return fmt.Errorf("unknown gitea command: %s", args[0])
+		fmt.Println("Unknown workflow deliverable command: " + args[0] + ". Valid action: submit.")
+		return nil
 	}
 }
 
@@ -68,16 +68,34 @@ Usage:
 func runGiteaSubmit(args []string) error {
 	deliverableID, filePath, mrMode, repoURL, title, err := parseSubmitArgs(args)
 	if err != nil {
-		return err
+		fmt.Println(submitGuidance(err))
+		return nil
 	}
-	return submitDeliverable(submitConfig{
+	if err := submitDeliverable(submitConfig{
 		deliverableID: deliverableID,
 		filePath:      filePath,
 		mrMode:        mrMode,
 		repoURL:       repoURL,
 		title:         title,
 		gitOps:        &execGitOps{},
-	})
+	}); err != nil {
+		fmt.Println(submitGuidance(err))
+		return nil
+	}
+	return nil
+}
+
+// submitGuidance renders a deliverable-submit failure as loud agent-facing
+// text. The submit CLI never surfaces a non-zero exit: on failure it prints
+// this guidance instead, so the agent reads the text and recovers rather than
+// being derailed by an error exit code. Because a submit failure means the
+// deliverable was NOT submitted, the text says so explicitly and loudly — a
+// failed submit must never read like success, or the agent will move on and
+// the deliverable silently goes missing. submit is idempotent, so re-running
+// is always safe.
+func submitGuidance(err error) string {
+	return "DELIVERABLE SUBMIT FAILED: " + err.Error() + "\n" +
+		"The deliverable was NOT submitted. Fix the issue described above and re-run `cs-cloud workflow deliverable submit ...` from the task root. Submit is idempotent, so re-running is safe. Do not signal task completion until a submit prints a pull-request URL."
 }
 
 // parseSubmitArgs parses `--deliverable <id> --file <path> [--title <title>] [--mr --repo <url>]` from the flat arg
@@ -536,9 +554,14 @@ func findExistingGiteaPR(ctx context.Context, base, token, owner, repo, head str
 	return "", fmt.Errorf("PR already exists (409) but no open PR with head %q found", head)
 }
 
-// reportToServer POSTs a pull_request_url to the given server endpoint.
-func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, workspaceID, agentID, taskID string) error {
-	body, _ := json.Marshal(map[string]string{"pull_request_url": prURL})
+// reportToServer POSTs a PR/MR URL to the given server endpoint. bodyField is
+// the JSON key the server reads (multica's Report.BodyField); it defaults to
+// "pull_request_url" when empty for backward compatibility.
+func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, workspaceID, agentID, taskID, bodyField string) error {
+	if bodyField == "" {
+		bodyField = "pull_request_url"
+	}
+	body, _ := json.Marshal(map[string]string{bodyField: prURL})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build report request: %w", err)
@@ -571,11 +594,51 @@ func reportToServer(ctx context.Context, serverURL, token, endpoint, prURL, work
 	return nil
 }
 
-// reportDeliverablePR POSTs the PR URL to the unified submit endpoint
-// (same endpoint the code-MR path uses).
+// deliverableReportTarget mirrors the per-deliverable Report contract multica
+// sends (payload.Deliverables[].Report), serialized into the
+// CS_CLOUD_DELIVERABLE_REPORTS env var by the workflowrunner. It lets cs-cloud
+// honor a non-default submit endpoint / body field instead of hardcoding them.
+type deliverableReportTarget struct {
+	ID        string `json:"deliverable_id"`
+	Endpoint  string `json:"endpoint"`
+	BodyField string `json:"body_field"`
+}
+
+// resolveSubmitTarget returns the submit endpoint (absolute URL) and request
+// body field for a deliverable. It prefers the per-deliverable Report contract
+// from CS_CLOUD_DELIVERABLE_REPORTS (sent by multica when it parameterizes the
+// route), and falls back to the historical hardcoded path + body field so
+// older multica deployments keep working.
+func resolveSubmitTarget(deliverableID, serverURL, nodeRunID string) (endpoint, bodyField string) {
+	bodyField = "pull_request_url"
+	endpoint = strings.TrimRight(serverURL, "/") + "/api/node-runs/" + nodeRunID + "/deliverables/" + deliverableID + "/submit"
+	if raw := os.Getenv("CS_CLOUD_DELIVERABLE_REPORTS"); raw != "" {
+		var targets []deliverableReportTarget
+		if err := json.Unmarshal([]byte(raw), &targets); err == nil {
+			for _, t := range targets {
+				if t.ID != deliverableID || t.Endpoint == "" {
+					continue
+				}
+				if strings.HasPrefix(t.Endpoint, "http://") || strings.HasPrefix(t.Endpoint, "https://") {
+					endpoint = t.Endpoint
+				} else {
+					endpoint = strings.TrimRight(serverURL, "/") + "/" + strings.TrimLeft(t.Endpoint, "/")
+				}
+				if t.BodyField != "" {
+					bodyField = t.BodyField
+				}
+				break
+			}
+		}
+	}
+	return endpoint, bodyField
+}
+
+// reportDeliverablePR POSTs the PR URL to the deliverable's submit endpoint,
+// honoring the per-deliverable Report contract when multica sends one (R4).
 func reportDeliverablePR(ctx context.Context, serverURL, token, nodeRunID, deliverableID, prURL, workspaceID, agentID, taskID string) error {
-	return reportToServer(ctx, serverURL, token,
-		serverURL+"/api/node-runs/"+nodeRunID+"/deliverables/"+deliverableID+"/submit", prURL, workspaceID, agentID, taskID)
+	endpoint, bodyField := resolveSubmitTarget(deliverableID, serverURL, nodeRunID)
+	return reportToServer(ctx, serverURL, token, endpoint, prURL, workspaceID, agentID, taskID, bodyField)
 }
 
 // createAgentDefinedDeliverable creates a run-scoped deliverable the agent

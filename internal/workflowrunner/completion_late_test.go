@@ -2,7 +2,6 @@ package workflowrunner
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -25,8 +24,8 @@ func (r *failingSessionRunner) RunSession(context.Context, string, string, strin
 // agent is still working, execute enters failTask, and the fail callback
 // wedges. The agent's later "complete task" signal must not disappear into the
 // completion registry (runAgent already returned, so popCompletionSignal never
-// runs) — the driver must forward it to the server as a real CompleteTask.
-func TestDriverForwardsCompletionSignaledDuringFailCallback(t *testing.T) {
+// runs) — the driver must persist it to the outbox so the server can arbitrate.
+func TestDriverPersistsCompletionSignaledDuringFailCallback(t *testing.T) {
 	runner := &failingSessionRunner{err: agent.ErrIncomplete}
 	d, fm := newCSCSessionTestDriver(t, time.Minute, runner, nil)
 	fm.gateFailCallbacks()
@@ -47,77 +46,91 @@ func TestDriverForwardsCompletionSignaledDuringFailCallback(t *testing.T) {
 	}
 
 	// The agent finishes its real work and signals completion. The signal must
-	// be accepted (2xx → CLI exit 0) AND actually reach the server — even
-	// though execute is still stuck in the fail callback.
+	// be accepted (2xx → CLI exit 0) and durably written to the outbox; the
+	// server arbitrates the complete-after-fail race.
 	if err := d.SignalTaskCompletion("task-late-complete", agent.CompletionSignal{
 		Action: "complete", Summary: "late done",
 	}); err != nil {
 		t.Fatalf("SignalTaskCompletion: %v", err)
 	}
 
-	waitFor(t, "late /complete forward", func() bool {
-		_, ok := fm.taskCallback("/complete")
-		return ok
-	})
-
-	body, _ := fm.taskCallback("/complete")
-	var complete struct {
-		Output string `json:"output"`
+	pending, err := d.Outbox().Pending()
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
 	}
-	if err := json.Unmarshal(body, &complete); err != nil {
-		t.Fatalf("complete body: %v", err)
+	var complete *OutboxFact
+	for i := range pending {
+		if pending[i].Kind == "complete" && pending[i].TaskID == "task-late-complete" {
+			complete = &pending[i]
+			break
+		}
+	}
+	if complete == nil {
+		t.Fatal("complete fact not found in outbox")
 	}
 	if complete.Output != "late done" {
 		t.Errorf("complete output = %q, want %q", complete.Output, "late done")
 	}
+
+	// The legacy direct HTTP /complete forward must not fire; outbox is the
+	// only late path.
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("unexpected legacy /complete HTTP callback")
+	}
 }
 
-// A signal that latches in the narrow window between runAgent's error return
-// and the fail path's late mark would never be consumed; marking late must
-// flush an already-latched signal.
-func TestMarkCompletionLateForwardsLatchedSignal(t *testing.T) {
+// A signal that arrives after the task has entered the terminal-failure path
+// is persisted to the outbox with the original session and workdir so the
+// server can preserve the resume pointer.
+func TestFailedCompletionStatePersistsLateSignal(t *testing.T) {
 	d, fm := newCSCSessionTestDriver(t, time.Minute, &failingSessionRunner{err: agent.ErrIncomplete}, nil)
 
 	d.registerCompletion("t-latched", "sess-1", "/tmp/wd")
+	d.mu.Lock()
+	d.completion["t-latched"].failed = true
+	d.mu.Unlock()
+
 	if err := d.SignalTaskCompletion("t-latched", agent.CompletionSignal{
 		Action: "complete", Summary: "latched summary",
 	}); err != nil {
 		t.Fatalf("SignalTaskCompletion: %v", err)
 	}
-	if _, ok := fm.taskCallback("/complete"); ok {
-		t.Fatal("unexpected /complete before late mark")
-	}
 
-	d.markCompletionLate("t-latched")
-
-	waitFor(t, "latched signal forward", func() bool {
-		_, ok := fm.taskCallback("/complete")
-		return ok
-	})
-	body, _ := fm.taskCallback("/complete")
-	var complete struct {
-		Output  string `json:"output"`
-		Session string `json:"session_id"`
-		WorkDir string `json:"work_dir"`
+	pending, err := d.Outbox().Pending()
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
 	}
-	if err := json.Unmarshal(body, &complete); err != nil {
-		t.Fatalf("complete body: %v", err)
+	var complete *OutboxFact
+	for i := range pending {
+		if pending[i].Kind == "complete" && pending[i].TaskID == "t-latched" {
+			complete = &pending[i]
+			break
+		}
+	}
+	if complete == nil {
+		t.Fatal("complete fact not found in outbox")
 	}
 	if complete.Output != "latched summary" {
 		t.Errorf("complete output = %q, want %q", complete.Output, "latched summary")
 	}
-	if complete.Session != "sess-1" || complete.WorkDir != "/tmp/wd" {
-		t.Errorf("complete session/work_dir = %q/%q, want sess-1//tmp/wd", complete.Session, complete.WorkDir)
+	if complete.SessionID != "sess-1" || complete.WorkDir != "/tmp/wd" {
+		t.Errorf("complete session/work_dir = %q/%q, want sess-1//tmp/wd", complete.SessionID, complete.WorkDir)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("unexpected legacy /complete HTTP callback")
 	}
 }
 
-// After a late forward, further signals are idempotent no-ops: exactly one
-// /complete reaches the server.
-func TestLateCompletionForwardedOnce(t *testing.T) {
+// Late completion signals are intentionally not deduplicated on the device:
+// each signal gets its own fact_id and is delivered to the server, where
+// completed is an absorbing state.
+func TestLateCompletionNotDeduplicated(t *testing.T) {
 	d, fm := newCSCSessionTestDriver(t, time.Minute, &failingSessionRunner{err: agent.ErrIncomplete}, nil)
 
 	d.registerCompletion("t-once", "sess-1", "/tmp/wd")
-	d.markCompletionLate("t-once")
+	d.mu.Lock()
+	d.completion["t-once"].failed = true
+	d.mu.Unlock()
 
 	for i := 0; i < 2; i++ {
 		if err := d.SignalTaskCompletion("t-once", agent.CompletionSignal{
@@ -127,13 +140,21 @@ func TestLateCompletionForwardedOnce(t *testing.T) {
 		}
 	}
 
-	waitFor(t, "late /complete forward", func() bool {
-		_, ok := fm.taskCallback("/complete")
-		return ok
-	})
-	time.Sleep(50 * time.Millisecond)
-	if got := fm.taskCallbackCount("/complete"); got != 1 {
-		t.Fatalf("complete callback count = %d, want 1", got)
+	pending, err := d.Outbox().Pending()
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	var completeCount int
+	for _, f := range pending {
+		if f.Kind == "complete" && f.TaskID == "t-once" {
+			completeCount++
+		}
+	}
+	if completeCount != 2 {
+		t.Fatalf("complete fact count = %d, want 2", completeCount)
+	}
+	if _, ok := fm.taskCallback("/complete"); ok {
+		t.Fatal("unexpected legacy /complete HTTP callback")
 	}
 }
 

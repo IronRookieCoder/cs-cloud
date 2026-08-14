@@ -6,6 +6,7 @@ package agent
 type CompletionSignal struct {
 	Action   string // "complete" (worker) | "review" (critic)
 	Summary  string // worker's final summary; becomes the task output
+	PRURL    string // worker deliverable PR/MR URL, when one was created
 	Decision string // critic decision: "approve" | "reject" (review only)
 	Reason   string // critic reason (review only)
 }
